@@ -123,7 +123,7 @@ function initTables() {
 
 export function createUser(user) {
   const stmt = db.prepare(`INSERT INTO users (id, username, password, role, created_at) VALUES (?, ?, ?, ?, ?)`);
-  stmt.run(user.id, user.username, user.password, user.role, user.created_at);
+  stmt.run(user.id, user.username, user.password, user.role, user.createdAt || user.created_at || Date.now());
   return user;
 }
 
@@ -333,8 +333,15 @@ export function seedDefaultScenariosIfEmpty() {
   const count = db.prepare(`SELECT COUNT(*) as cnt FROM scenarios`).get().cnt;
   if (count > 0) return;
 
-  const adminUser = db.prepare(`SELECT id FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1`).get();
-  const adminId = adminUser?.id || 'system';
+  // If no users exist yet, create a hidden system user to own default scenarios
+  let adminUser = db.prepare(`SELECT id FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1`).get();
+  if (!adminUser) {
+    db.prepare(`INSERT INTO users (id, username, password, role, created_at) VALUES (?, ?, ?, ?, ?)`).run(
+      'system', 'FictionLab', '', 'admin', Date.now()
+    );
+    adminUser = { id: 'system' };
+  }
+  const adminId = adminUser.id;
   const now = Date.now();
 
   const defaultScenarios = [
