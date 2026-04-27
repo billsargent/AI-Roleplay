@@ -1,54 +1,47 @@
-
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fs from 'fs/promises';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import cors from 'cors';
+import {
+  getDb,
+  createUser,
+  getUserByUsername,
+  getUserById,
+  getUserWithPersonas,
+  getPersonasByUserId,
+  upsertPersona,
+  deletePersonaById,
+  getAllScenarios,
+  getScenarioById,
+  saveScenarioTransaction,
+  deleteScenarioById,
+  getChatsByUserId,
+  getChatById,
+  saveChatTransaction,
+  deleteChatById,
+  getSystemSetting,
+  setSystemSetting,
+  seedDefaultScenariosIfEmpty,
+} from './database/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_FILE = path.join(__dirname, 'db.json');
-const JWT_SECRET = 'fictionlab-super-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET || 'fictionlab-super-secret-key';
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// DB structure: { users: [], scenarios: [], chats: [], settings: { deepseekKey: '' } }
-const initDb = async () => {
-  try {
-    await fs.access(DB_FILE);
-    console.log('Database found.');
-  } catch {
-    console.log('Database not found. Creating new one...');
-    await fs.writeFile(DB_FILE, JSON.stringify({ 
-      users: [], 
-      scenarios: [], 
-      chats: [], 
-      settings: { deepseekKey: '' } 
-    }, null, 2));
-  }
-};
+// Initialize database
+getDb();
+seedDefaultScenariosIfEmpty();
 
-const readDb = async () => {
-  try {
-    const data = await fs.readFile(DB_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch (error) {
-    return { users: [], scenarios: [], chats: [], settings: { deepseekKey: '' } };
-  }
-};
-
-const writeDb = async (db) => {
-  await fs.writeFile(DB_FILE, JSON.stringify(db, null, 2));
-};
-
-// Middleware for auth
+// Auth middleware
 const auth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -64,7 +57,28 @@ const auth = async (req, res, next) => {
   }
 };
 
-// API Routes
+// Admin middleware
+const adminAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Unauthorized: No token provided' });
+    }
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = getUserById(decoded.userId);
+    if (user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: Admins only' });
+    }
+    req.userId = decoded.userId;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Unauthorized: Invalid token' });
+  }
+};
+
+// ==================== Auth Routes ====================
+
 app.post('/api/register', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -72,26 +86,25 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
-    const db = await readDb();
-    if (db.users.find(u => u.username.toLowerCase() === username.toLowerCase())) {
+    const existing = getUserByUsername(username);
+    if (existing) {
       return res.status(400).json({ error: 'Username already exists' });
     }
-    
+
     const hashedPassword = await bcrypt.hash(password, 10);
-    // First user is admin
-    const role = db.users.length === 0 ? 'admin' : 'user';
-    
-    const user = { 
-      id: 'u-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9), 
-      username, 
-      password: hashedPassword, 
-      role, 
-      personas: [] 
+    // First user gets admin role
+    const allUsers = getDb().prepare(`SELECT COUNT(*) as cnt FROM users`).get();
+    const role = allUsers.cnt === 0 ? 'admin' : 'user';
+
+    const user = {
+      id: 'u-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9),
+      username,
+      password: hashedPassword,
+      role,
+      createdAt: Date.now(),
     };
-    
-    db.users.push(user);
-    await writeDb(db);
-    
+
+    createUser(user);
     const token = jwt.sign({ userId: user.id }, JWT_SECRET);
     const { password: _, ...userWithoutPassword } = user;
     console.log(`Registered user: ${username} with role: ${role}`);
@@ -109,13 +122,11 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
-    const db = await readDb();
-    const user = db.users.find(u => u.username.toLowerCase() === username.toLowerCase());
-    
+    const user = getUserByUsername(username);
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
-    
+
     const token = jwt.sign({ userId: user.id }, JWT_SECRET);
     const { password: _, ...userWithoutPassword } = user;
     console.log(`Logged in user: ${username}`);
@@ -126,122 +137,215 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Admin Settings
-app.get('/api/system/settings', auth, async (req, res) => {
-  const db = await readDb();
-  const user = db.users.find(u => u.id === req.userId);
-  if (user?.role !== 'admin') return res.status(403).json({ error: 'Forbidden: Admins only' });
-  res.json(db.settings);
+// ==================== User Routes ====================
+
+app.get('/api/users/me', auth, (req, res) => {
+  const user = getUserWithPersonas(req.userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  res.json(user);
 });
 
-app.post('/api/system/settings', auth, async (req, res) => {
-  const db = await readDb();
-  const user = db.users.find(u => u.id === req.userId);
-  if (user?.role !== 'admin') return res.status(403).json({ error: 'Forbidden: Admins only' });
-  
-  db.settings = { ...db.settings, ...req.body };
-  await writeDb(db);
-  res.json(db.settings);
+// ==================== Persona Routes ====================
+
+app.get('/api/personas', auth, (req, res) => {
+  const personas = getPersonasByUserId(req.userId);
+  res.json(personas);
 });
 
-// Personas
-app.post('/api/personas', auth, async (req, res) => {
-  const persona = req.body;
-  const db = await readDb();
-  const userIndex = db.users.findIndex(u => u.id === req.userId);
-  if (userIndex === -1) return res.status(404).json({ error: 'User not found' });
-  
-  const personaIndex = db.users[userIndex].personas.findIndex(p => p.id === persona.id);
-  if (personaIndex >= 0) {
-    db.users[userIndex].personas[personaIndex] = persona;
-  } else {
-    db.users[userIndex].personas.push(persona);
-  }
-  
-  await writeDb(db);
-  res.json(persona);
+app.post('/api/personas', auth, (req, res) => {
+  const persona = { ...req.body, userId: req.userId };
+  const saved = upsertPersona(persona);
+  res.json(saved);
 });
 
-app.delete('/api/personas/:id', auth, async (req, res) => {
-  const db = await readDb();
-  const userIndex = db.users.findIndex(u => u.id === req.userId);
-  if (userIndex === -1) return res.status(404).json({ error: 'User not found' });
-  
-  db.users[userIndex].personas = db.users[userIndex].personas.filter(p => p.id !== req.params.id);
-  await writeDb(db);
+app.delete('/api/personas/:id', auth, (req, res) => {
+  const deleted = deletePersonaById(req.params.id, req.userId);
+  if (!deleted) return res.status(404).json({ error: 'Persona not found or unauthorized' });
   res.status(204).send();
 });
 
-// Scenarios
-app.get('/api/scenarios', async (req, res) => {
-  const db = await readDb();
-  res.json(db.scenarios);
+// ==================== Scenario Routes ====================
+
+app.get('/api/scenarios', (req, res) => {
+  const scenarios = getAllScenarios();
+  res.json(scenarios);
 });
 
-app.post('/api/scenarios', auth, async (req, res) => {
+app.get('/api/scenarios/:id', (req, res) => {
+  const scenario = getScenarioById(req.params.id);
+  if (!scenario) return res.status(404).json({ error: 'Scenario not found' });
+  res.json(scenario);
+});
+
+app.post('/api/scenarios', auth, (req, res) => {
   try {
     const scenario = req.body;
-    const db = await readDb();
-    const index = db.scenarios.findIndex(s => s.id === scenario.id);
-    
-    if (index === -1) {
-      const user = db.users.find(u => u.id === req.userId);
-      scenario.userId = req.userId;
-      scenario.creatorName = user?.username;
-      db.scenarios.push(scenario);
-    } else {
-      const existing = db.scenarios[index];
-      const isOwner = existing.userId === req.userId;
-      const allowsCustomization = existing.settings?.allowCustomization;
+    const existing = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(scenario.id);
 
-      if (!isOwner && !allowsCustomization) {
+    if (existing) {
+      // Editing existing scenario — check ownership
+      const isOwner = existing.user_id === req.userId;
+      const existingScenario = getScenarioById(scenario.id);
+      const allowsCustomization = existingScenario?.settings?.allowCustomization;
+      const user = getUserById(req.userId);
+      const isAdmin = user?.role === 'admin';
+
+      if (!isOwner && !allowsCustomization && !isAdmin) {
         return res.status(403).json({ error: 'Unauthorized to edit this scenario' });
       }
-      
-      // If it's a customization of someone else's work, the frontend should ideally 
-      // change the ID to create a fork, but if they are editing the same ID 
-      // (and it allows customization), we let them save.
-      db.scenarios[index] = { ...scenario, userId: existing.userId, creatorName: existing.creatorName };
+
+      // Preserve original creator
+      scenario.userId = existing.user_id;
+      const original = getScenarioById(scenario.id);
+      scenario.creatorName = original?.creatorName || '';
+    } else {
+      // New scenario
+      scenario.userId = req.userId;
+      const user = getUserById(req.userId);
+      scenario.creatorName = user?.username || '';
+      scenario.createdAt = scenario.createdAt || Date.now();
     }
-    
-    await writeDb(db);
+
+    saveScenarioTransaction(scenario);
     res.json(scenario);
   } catch (err) {
+    console.error('Save scenario error:', err);
     res.status(500).json({ error: 'Server error saving scenario' });
   }
 });
 
-app.delete('/api/scenarios/:id', auth, async (req, res) => {
+app.delete('/api/scenarios/:id', auth, (req, res) => {
   try {
-    const db = await readDb();
-    const index = db.scenarios.findIndex(s => s.id === req.params.id);
-    
-    if (index === -1) return res.status(404).json({ error: 'Scenario not found' });
-    
-    const scenario = db.scenarios[index];
-    const user = db.users.find(u => u.id === req.userId);
+    const scenario = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(req.params.id);
+    if (!scenario) return res.status(404).json({ error: 'Scenario not found' });
+
+    const user = getUserById(req.userId);
     const isAdmin = user?.role === 'admin';
-    const isOwner = scenario.userId === req.userId;
+    const isOwner = scenario.user_id === req.userId;
 
     if (!isOwner && !isAdmin) {
       return res.status(403).json({ error: 'Unauthorized to delete this scenario' });
     }
-    
-    db.scenarios.splice(index, 1);
-    await writeDb(db);
+
+    deleteScenarioById(req.params.id);
     res.status(204).send();
   } catch (err) {
+    console.error('Delete scenario error:', err);
     res.status(500).json({ error: 'Server error deleting scenario' });
   }
 });
 
-// Serve Frontend
+// ==================== Chat Routes ====================
+
+app.get('/api/chats', auth, (req, res) => {
+  const user = getUserById(req.userId);
+  const isAdmin = user?.role === 'admin';
+
+  let chats;
+  if (isAdmin) {
+    // Admin sees all chats for management
+    chats = getDb().prepare(`SELECT * FROM chats ORDER BY created_at DESC`).all();
+    chats = chats.map(chat => {
+      const c = getChatById(chat.id);
+      return c;
+    });
+    // But strip visible user details for privacy
+    chats = chats.filter(Boolean);
+  } else {
+    // Regular user sees only their own chats
+    chats = getChatsByUserId(req.userId);
+  }
+
+  res.json(chats);
+});
+
+app.post('/api/chats', auth, (req, res) => {
+  try {
+    const chat = req.body;
+    const existing = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(chat.id);
+
+    if (existing) {
+      // Editing — check ownership
+      const isOwner = existing.user_id === req.userId;
+      const user = getUserById(req.userId);
+      const isAdmin = user?.role === 'admin';
+
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json({ error: 'Unauthorized to edit this chat' });
+      }
+      chat.userId = existing.user_id;
+    } else {
+      // New chat
+      chat.userId = req.userId;
+      chat.createdAt = chat.createdAt || Date.now();
+    }
+
+    saveChatTransaction(chat);
+    res.json(chat);
+  } catch (err) {
+    console.error('Save chat error:', err);
+    res.status(500).json({ error: 'Server error saving chat' });
+  }
+});
+
+app.get('/api/chats/:id', auth, (req, res) => {
+  const chat = getChatById(req.params.id);
+  if (!chat) return res.status(404).json({ error: 'Chat not found' });
+
+  const user = getUserById(req.userId);
+  const isAdmin = user?.role === 'admin';
+  const isOwner = chat.userId === req.userId;
+
+  if (!isOwner && !isAdmin) {
+    return res.status(403).json({ error: 'Unauthorized to view this chat' });
+  }
+
+  res.json(chat);
+});
+
+app.delete('/api/chats/:id', auth, (req, res) => {
+  try {
+    const chat = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(req.params.id);
+    if (!chat) return res.status(404).json({ error: 'Chat not found' });
+
+    const user = getUserById(req.userId);
+    const isAdmin = user?.role === 'admin';
+    const isOwner = chat.user_id === req.userId;
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ error: 'Unauthorized to delete this chat' });
+    }
+
+    deleteChatById(req.params.id);
+    res.status(204).send();
+  } catch (err) {
+    console.error('Delete chat error:', err);
+    res.status(500).json({ error: 'Server error deleting chat' });
+  }
+});
+
+// ==================== System Settings (Admin Only) ====================
+
+app.get('/api/system/settings', adminAuth, (req, res) => {
+  const deepseekKey = getSystemSetting('deepseekKey');
+  res.json({ deepseekKey });
+});
+
+app.post('/api/system/settings', adminAuth, (req, res) => {
+  const { deepseekKey } = req.body;
+  if (deepseekKey !== undefined) {
+    setSystemSetting('deepseekKey', deepseekKey);
+  }
+  const updated = getSystemSetting('deepseekKey');
+  res.json({ deepseekKey: updated });
+});
+
+// ==================== Serve Frontend ====================
+
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
-initDb().then(() => {
-  app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
-  });
+app.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
 });
