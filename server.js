@@ -326,11 +326,13 @@ app.delete('/api/chats/:id', auth, (req, res) => {
 
 // ==================== System Settings (Admin Only) ====================
 
+// Admin-only: read full settings (used by Settings UI)
 app.get('/api/system/settings', adminAuth, (req, res) => {
   const deepseekKey = getSystemSetting('deepseekKey');
   res.json({ deepseekKey });
 });
 
+// Admin-only: write settings
 app.post('/api/system/settings', adminAuth, (req, res) => {
   const { deepseekKey } = req.body;
   if (deepseekKey !== undefined) {
@@ -338,6 +340,12 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   }
   const updated = getSystemSetting('deepseekKey');
   res.json({ deepseekKey: updated });
+});
+
+// Authenticated users: read DeepSeek key (needed to make API calls)
+app.get('/api/system/deepseek-key', auth, (req, res) => {
+  const deepseekKey = getSystemSetting('deepseekKey');
+  res.json({ deepseekKey });
 });
 
 // ==================== Serve Frontend ====================

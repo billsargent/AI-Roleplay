@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -n server,client \"node server.js\" \"vite\"",
+    "dev:host": "concurrently -n server,client \"node server.js\" \"vite --host\"",
     "build": "vite build",
     "preview": "vite preview",
     "start": "node server.js"
@@ -40,6 +41,7 @@
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
+    "concurrently": "^9.2.1",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.2.4"

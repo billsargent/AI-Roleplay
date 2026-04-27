@@ -1,16 +1,15 @@
 import axios from 'axios';
 import { Message, ChatSettings, Scenario, Chat } from '../types';
-import { apiService } from './api';
 
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
 export const deepseek = {
   async chat(messages: Message[], settings: ChatSettings, scenario: Scenario, chat: Chat): Promise<string> {
-    // Get API key from server settings (admin set)
+    // Get API key from server (any authenticated user can read the key)
     let apiKey = '';
     try {
-      const systemSettings = await apiService.getSystemSettings();
-      apiKey = systemSettings.deepseekKey;
+      const response = await axios.get('/api/system/deepseek-key');
+      apiKey = response.data.deepseekKey;
     } catch (e) {
       throw new Error('DeepSeek API key is missing. Please ask your administrator to set it in settings.');
     }
@@ -100,8 +99,8 @@ RESPONSE GUIDELINES:
   async generateMemory(messages: Message[]): Promise<string> {
     let apiKey = '';
     try {
-      const systemSettings = await apiService.getSystemSettings();
-      apiKey = systemSettings.deepseekKey;
+      const response = await axios.get('/api/system/deepseek-key');
+      apiKey = response.data.deepseekKey;
     } catch (e) {
       return '';
     }
