@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    background-color: #09090b; /* zinc-950 */
+    color: #e4e4e7; /* zinc-200 */
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a; /* zinc-800 */
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46; /* zinc-700 */
+}
+
+/* Animations */
+@keyframes slide-up {
+  from { transform: translateY(10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s ease-out forwards;
+}
+
+/* Chat styles */
+.message-content em {
+  color: #a1a1aa; /* zinc-400 */
+  font-style: italic;
+  opacity: 0.9;
+}
+
+.message-content strong {
+  color: #818cf8; /* indigo-400 */
+  font-weight: 800;
+}
