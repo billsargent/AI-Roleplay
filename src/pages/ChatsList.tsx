@@ -1,8 +1,7 @@
-
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MessageSquare, Trash2, Calendar, Book, ChevronRight, Search } from 'lucide-react';
-import { storage } from '../services/storage';
+import { apiService } from '../services/api';
 import { Chat, Scenario } from '../types';
 import { format } from 'date-fns';
 
@@ -10,23 +9,40 @@ export const ChatsList: React.FC = () => {
   const [chats, setChats] = useState<Chat[]>([]);
   const [scenarios, setScenarios] = useState<Record<string, Scenario>>({});
   const [search, setSearch] = useState('');
+  const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
   useEffect(() => {
-    const storedChats = storage.getChats();
-    const storedScenarios = storage.getScenarios();
-    const scenarioMap: Record<string, Scenario> = {};
-    storedScenarios.forEach(s => { scenarioMap[s.id] = s; });
-    
-    setChats(storedChats.sort((a, b) => b.createdAt - a.createdAt));
-    setScenarios(scenarioMap);
+    const loadData = async () => {
+      setLoading(true);
+      try {
+        const [storedChats, storedScenarios] = await Promise.all([
+          apiService.getChats(),
+          apiService.getScenarios(),
+        ]);
+        const scenarioMap: Record<string, Scenario> = {};
+        storedScenarios.forEach((s: Scenario) => { scenarioMap[s.id] = s; });
+        
+        setChats(storedChats.sort((a: Chat, b: Chat) => b.createdAt - a.createdAt));
+        setScenarios(scenarioMap);
+      } catch (e) {
+        console.error('Failed to load chats', e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadData();
   }, []);
 
-  const deleteChat = (e: React.MouseEvent, id: string) => {
+  const deleteChat = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (confirm('Are you sure you want to delete this chat?')) {
-      storage.deleteChat(id);
-      setChats(prev => prev.filter(c => c.id !== id));
+      try {
+        await apiService.deleteChat(id);
+        setChats(prev => prev.filter(c => c.id !== id));
+      } catch (err) {
+        alert('Failed to delete chat');
+      }
     }
   };
 
@@ -112,7 +128,7 @@ export const ChatsList: React.FC = () => {
           );
         })}
 
-        {filteredChats.length === 0 && (
+        {!loading && filteredChats.length === 0 && (
           <div className="text-center py-20 bg-zinc-900/50 border-2 border-dashed border-zinc-800 rounded-3xl">
             <MessageSquare size={48} className="mx-auto text-zinc-800 mb-4" />
             <p className="text-zinc-500 font-medium">No chats found. Go to home and start a scenario!</p>

@@ -1,4 +1,3 @@
-
 export interface Scenario {
   id: string;
   userId?: string;
@@ -68,6 +67,7 @@ export interface ScenarioSettings {
 
 export interface Chat {
   id: string;
+  userId?: string;
   scenarioId: string;
   title: string;
   messages: Message[];

@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
@@ -6,12 +5,11 @@ import {
   Settings as SettingsIcon, Save, Plus, Trash2, 
   UserPlus, MessageSquare, ChevronLeft, Globe, Lock, Upload
 } from 'lucide-react';
-import { storage } from '../services/storage';
+import { apiService } from '../services/api';
 import { Scenario, LorePiece, StoryCharacter } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import { fileToBase64 } from '../utils/image';
 import { useLocation } from 'react-router-dom';
-import { apiService } from '../services/api';
 
 export const CreateScenario: React.FC = () => {
   const navigate = useNavigate();
@@ -25,12 +23,12 @@ export const CreateScenario: React.FC = () => {
       if (initialScenario.userId !== user?.id) {
         return {
           ...initialScenario,
-          id: uuidv4(), // New ID for the fork
+          id: uuidv4(),
           name: `${initialScenario.name} (Remix)`,
           userId: user?.id,
           creatorName: user?.username,
           createdAt: Date.now(),
-          settings: { ...initialScenario.settings, isPublic: false } // Default fork to private
+          settings: { ...initialScenario.settings, isPublic: false }
         };
       }
       return initialScenario;
@@ -75,7 +73,6 @@ export const CreateScenario: React.FC = () => {
     }
     try {
       await apiService.saveScenario(scenario);
-      storage.saveScenario(scenario); // Keep local sync
       navigate('/');
     } catch (e: any) {
       alert(e.response?.data?.error || 'Failed to save scenario');

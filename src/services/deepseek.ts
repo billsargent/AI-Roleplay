@@ -1,25 +1,22 @@
-
 import axios from 'axios';
 import { Message, ChatSettings, Scenario, Chat } from '../types';
-import { storage } from './storage';
 import { apiService } from './api';
 
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
 export const deepseek = {
   async chat(messages: Message[], settings: ChatSettings, scenario: Scenario, chat: Chat): Promise<string> {
-    // Try to get key from server first (Admin set key)
+    // Get API key from server settings (admin set)
     let apiKey = '';
     try {
       const systemSettings = await apiService.getSystemSettings();
       apiKey = systemSettings.deepseekKey;
     } catch (e) {
-      // Fallback to local key
-      apiKey = storage.getApiKey();
+      throw new Error('DeepSeek API key is missing. Please ask your administrator to set it in settings.');
     }
 
     if (!apiKey) {
-      throw new Error('DeepSeek API key is missing. Please ask your administrator or set it in settings.');
+      throw new Error('DeepSeek API key is missing. Please ask your administrator to set it in settings.');
     }
 
     const userName = chat.userCharacter?.name || 'User';
@@ -101,7 +98,13 @@ RESPONSE GUIDELINES:
   },
 
   async generateMemory(messages: Message[]): Promise<string> {
-    const apiKey = storage.getApiKey();
+    let apiKey = '';
+    try {
+      const systemSettings = await apiService.getSystemSettings();
+      apiKey = systemSettings.deepseekKey;
+    } catch (e) {
+      return '';
+    }
     if (!apiKey) return '';
 
     const recentMessages = messages.slice(-10).map(m => `${m.role}: ${m.content}`).join('\n');

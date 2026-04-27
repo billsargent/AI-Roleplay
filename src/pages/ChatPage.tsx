@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
@@ -6,7 +5,6 @@ import {
   ChevronLeft, MessageSquare, MoreVertical, RefreshCw, Trash2,
   X, Pin, User, Edit2
 } from 'lucide-react';
-import { storage } from '../services/storage';
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
 import { Chat, Message, Scenario, Persona } from '../types';
@@ -21,20 +19,44 @@ export const ChatPage: React.FC = () => {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [sidebar, setSidebar] = useState<'none' | 'settings' | 'matrix' | 'info'>('none');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (chatId) {
-      const storedChat = storage.getChats().find(c => c.id === chatId);
-      if (storedChat) {
-        setChat(storedChat);
-        const storedScenario = storage.getScenarios().find(s => s.id === storedChat.scenarioId);
-        if (storedScenario) setScenario(storedScenario);
-      } else {
-        navigate('/');
-      }
+      loadChat(chatId);
     }
   }, [chatId, navigate]);
+
+  const loadChat = async (id: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const storedChat = await apiService.getChat(id);
+      if (storedChat) {
+        // Ownership guard — server already enforces this, but we can double-check
+        const user = apiService.getCurrentUser();
+        if (storedChat.userId && storedChat.userId !== user?.id && user?.role !== 'admin') {
+          setError('You do not have access to this chat.');
+          return;
+        }
+        setChat(storedChat);
+        const storedScenario = await apiService.getScenario(storedChat.scenarioId);
+        if (storedScenario) setScenario(storedScenario);
+      } else {
+        setError('Chat not found.');
+      }
+    } catch (e: any) {
+      if (e.response?.status === 403 || e.response?.status === 404) {
+        setError('Chat not found or access denied.');
+      } else {
+        setError('Failed to load chat.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -53,11 +75,13 @@ export const ChatPage: React.FC = () => {
     const updatedMessages = [...chat.messages, userMessage];
     const updatedChat = { ...chat, messages: updatedMessages };
     setChat(updatedChat);
-    storage.saveChat(updatedChat);
     setInput('');
     setIsTyping(true);
 
     try {
+      // Save user message to server
+      await apiService.saveChat(updatedChat);
+
       const response = await deepseek.chat(updatedMessages, chat.settings, scenario, updatedChat);
       
       const assistantMessage: Message = {
@@ -70,7 +94,7 @@ export const ChatPage: React.FC = () => {
       const finalMessages = [...updatedMessages, assistantMessage];
       const finalChat = { ...updatedChat, messages: finalMessages };
       
-      // Auto-generate memory every 10 messages (FictionLab does 30, but let's do 10 for demo)
+      // Auto-generate memory every 10 messages
       if (finalMessages.length % 10 === 0) {
         const memoryContent = await deepseek.generateMemory(finalMessages);
         if (memoryContent) {
@@ -84,7 +108,7 @@ export const ChatPage: React.FC = () => {
       }
 
       setChat(finalChat);
-      storage.saveChat(finalChat);
+      await apiService.saveChat(finalChat);
     } catch (error: any) {
       alert(error.message || 'Error communicating with DeepSeek');
     } finally {
@@ -92,7 +116,19 @@ export const ChatPage: React.FC = () => {
     }
   };
 
-  if (!chat || !scenario) return <div className="p-8 text-white">Loading...</div>;
+  if (loading) return <div className="p-8 text-white">Loading...</div>;
+  if (error) return (
+    <div className="p-8 flex flex-col items-center justify-center min-h-screen">
+      <p className="text-zinc-400 mb-4">{error}</p>
+      <button 
+        onClick={() => navigate('/chats')}
+        className="text-indigo-400 font-bold hover:underline"
+      >
+        Back to Chats
+      </button>
+    </div>
+  );
+  if (!chat || !scenario) return <div className="p-8 text-white">Chat not found.</div>;
 
   return (
     <div className="flex h-screen bg-zinc-950 text-zinc-200 overflow-hidden relative">
@@ -190,13 +226,13 @@ export const ChatPage: React.FC = () => {
                     {/* Message Actions Overlay */}
                     <div className={`absolute top-0 ${m.role === 'user' ? 'right-full mr-2' : 'left-full ml-2'} opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-lg shadow-xl z-10`}>
                       <button 
-                        onClick={() => {
+                        onClick={async () => {
                           const newContent = prompt('Edit message:', m.content);
                           if (newContent !== null) {
                             const newMessages = chat.messages.map(msg => msg.id === m.id ? { ...msg, content: newContent } : msg);
                             const updatedChat = { ...chat, messages: newMessages };
                             setChat(updatedChat);
-                            storage.saveChat(updatedChat);
+                            await apiService.saveChat(updatedChat);
                           }
                         }}
                         className="p-1.5 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors" title="Edit"
@@ -204,13 +240,13 @@ export const ChatPage: React.FC = () => {
                         <Edit2 size={14} />
                       </button>
                       <button 
-                        onClick={() => {
+                        onClick={async () => {
                           if (confirm('Delete this and all messages after it? (Rewind)')) {
                             const index = chat.messages.findIndex(msg => msg.id === m.id);
                             const newMessages = chat.messages.slice(0, index + 1);
                             const updatedChat = { ...chat, messages: newMessages };
                             setChat(updatedChat);
-                            storage.saveChat(updatedChat);
+                            await apiService.saveChat(updatedChat);
                           }
                         }}
                         className="p-1.5 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors" title="Rewind"
@@ -218,12 +254,12 @@ export const ChatPage: React.FC = () => {
                         <RefreshCw size={14} />
                       </button>
                       <button 
-                        onClick={() => {
+                        onClick={async () => {
                           if (confirm('Delete this message?')) {
                             const newMessages = chat.messages.filter(msg => msg.id !== m.id);
                             const updatedChat = { ...chat, messages: newMessages };
                             setChat(updatedChat);
-                            storage.saveChat(updatedChat);
+                            await apiService.saveChat(updatedChat);
                           }
                         }}
                         className="p-1.5 hover:bg-red-900/40 rounded text-zinc-400 hover:text-red-500 transition-colors" title="Delete"
@@ -372,11 +408,11 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
               <div className="flex items-start justify-between gap-4">
                 <p className="text-sm text-zinc-300 leading-relaxed">{memory.content}</p>
                 <button 
-                  onClick={() => {
+                  onClick={async () => {
                     const newMemories = chat.memories.map(m => m.id === memory.id ? { ...m, pinned: !m.pinned } : m);
                     const newChat = { ...chat, memories: newMemories };
                     setChat(newChat);
-                    storage.saveChat(newChat);
+                    await apiService.saveChat(newChat);
                   }}
                   className={`mt-1 flex-shrink-0 ${memory.pinned ? 'text-indigo-400' : 'text-zinc-600 hover:text-zinc-400'}`}
                 >
@@ -398,10 +434,14 @@ const ChatSettingsView: React.FC<{ chat: Chat, setChat: (chat: Chat) => void }> 
   const [personas, setPersonas] = React.useState<Persona[]>([]);
   
   React.useEffect(() => {
-    setPersonas(apiService.getPersonas());
+    const loadPersonas = async () => {
+      const data = await apiService.getPersonas();
+      setPersonas(data);
+    };
+    loadPersonas();
   }, []);
 
-  const updateSettings = (key: string, value: any, notification?: string) => {
+  const updateSettings = async (key: string, value: any, notification?: string) => {
     const newMessages = [...chat.messages];
     if (notification) {
       newMessages.push({
@@ -421,10 +461,10 @@ const ChatSettingsView: React.FC<{ chat: Chat, setChat: (chat: Chat) => void }> 
       }
     };
     setChat(newChat);
-    storage.saveChat(newChat);
+    await apiService.saveChat(newChat);
   };
 
-  const changePersona = (persona: Persona) => {
+  const changePersona = async (persona: Persona) => {
     const newChat = {
       ...chat,
       userCharacter: persona,
@@ -439,7 +479,7 @@ const ChatSettingsView: React.FC<{ chat: Chat, setChat: (chat: Chat) => void }> 
       ]
     };
     setChat(newChat);
-    storage.saveChat(newChat);
+    await apiService.saveChat(newChat);
   };
 
   return (
@@ -522,11 +562,11 @@ const ChatSettingsView: React.FC<{ chat: Chat, setChat: (chat: Chat) => void }> 
 
       <div className="pt-4 border-t border-zinc-800">
         <button 
-          onClick={() => {
+          onClick={async () => {
             if (confirm('Are you sure you want to clear all messages?')) {
               const newChat = { ...chat, messages: [] };
               setChat(newChat);
-              storage.saveChat(newChat);
+              await apiService.saveChat(newChat);
             }
           }}
           className="w-full flex items-center justify-center gap-2 py-3 bg-red-900/20 text-red-500 border border-red-900/50 rounded-xl hover:bg-red-900/30 transition-colors"

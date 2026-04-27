@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
@@ -6,7 +5,6 @@ import {
   Book, Info, Settings as SettingsIcon,
   Globe, Lock, ShieldAlert, Heart, X, Check, Trash2
 } from 'lucide-react';
-import { storage } from '../services/storage';
 import { apiService } from '../services/api';
 import { Scenario, Persona } from '../types';
 import { v4 as uuidv4 } from 'uuid';
@@ -22,13 +20,13 @@ export const ScenarioDetail: React.FC = () => {
   const [isOwner, setIsOwner] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const loadScenario = async () => {
       if (scenarioId) {
         try {
-          const fetched = await apiService.getScenarios();
-          const s = fetched.find((item: Scenario) => item.id === scenarioId);
+          const s = await apiService.getScenario(scenarioId);
           if (s) {
             setScenario(s);
             const user = apiService.getCurrentUser();
@@ -36,20 +34,27 @@ export const ScenarioDetail: React.FC = () => {
             const admin = user?.role === 'admin';
             setIsOwner(owner);
             setIsAdmin(admin);
-            setCanEdit(owner || s.settings?.allowCustomization);
+            setCanEdit(owner || s.settings?.allowCustomization || admin);
           } else {
             navigate('/');
           }
         } catch (e) {
           navigate('/');
+        } finally {
+          setLoading(false);
         }
       }
     };
     loadScenario();
-    setPersonas(apiService.getPersonas());
+    
+    const loadPersonas = async () => {
+      const data = await apiService.getPersonas();
+      setPersonas(data);
+    };
+    loadPersonas();
   }, [scenarioId, navigate]);
 
-  const startChat = () => {
+  const startChat = async () => {
     if (!scenario) return;
     
     const selectedPersona = personas.find(p => p.id === selectedPersonaId);
@@ -84,15 +89,21 @@ export const ScenarioDetail: React.FC = () => {
         showSuggestions: true,
         fontSize: 100,
         typingSpeed: 100,
-        customInstructions: '', // Default empty, can be customized in chat
+        customInstructions: '',
       },
       createdAt: Date.now(),
     };
-    storage.saveChat(newChat);
-    navigate(`/chat/${newChatId}`);
+
+    try {
+      await apiService.saveChat(newChat);
+      navigate(`/chat/${newChatId}`);
+    } catch (err) {
+      alert('Failed to start chat');
+    }
   };
 
-  if (!scenario) return <div className="p-8 text-white">Loading...</div>;
+  if (loading) return <div className="p-8 text-white">Loading...</div>;
+  if (!scenario) return <div className="p-8 text-white">Scenario not found.</div>;
 
   return (
     <div className="pb-24 pt-4 px-4 max-w-5xl mx-auto">

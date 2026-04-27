@@ -1,58 +1,8 @@
-
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, Play, Plus, BookOpen, Trash2 } from 'lucide-react';
-import { storage } from '../services/storage';
 import { apiService } from '../services/api';
 import { Scenario } from '../types';
-import { v4 as uuidv4 } from 'uuid';
-
-const DEFAULT_SCENARIOS: Scenario[] = [
-  {
-    id: 'default-1',
-    name: 'Cyberpunk Neon Nights',
-    description: 'A gritty underworld mission in the rain-slicked streets of Neo-Tokyo. Corporate intrigue and neon-lit danger await.',
-    image: 'https://images.unsplash.com/photo-1605810230434-7631ac76ec81?w=800&auto=format&fit=crop',
-    tags: ['Cyberpunk', 'Sci-Fi', 'Action'],
-    backstory: 'The year is 2084. Megacorporations rule the world from their golden towers while the rest of humanity struggles in the neon shadows. You are a mercenary for hire, specialized in high-stakes data theft.',
-    greetingMessage: '*The rain drums a rhythmic beat against the window of your cramped apartment. A neon sign outside flickers, casting a harsh blue light across your desk. Your terminal pings—a new encrypted message from an anonymous sender.* "I have a job for you. High risk, higher reward. Interested?"',
-    lorePieces: [],
-    characters: [
-      { id: 'c1', name: 'Kaelen', description: 'A cynical street doc', personality: 'Grumpy but loyal' }
-    ],
-    settings: {
-      separateUserCharacter: true,
-      sensitiveContent: false,
-      isPublic: true,
-      allowCustomization: true,
-      hidePrompts: false,
-      allowCommenting: true,
-    },
-    createdAt: Date.now(),
-  },
-  {
-    id: 'default-2',
-    name: 'The Forgotten Kingdom',
-    description: 'Awaken in the ruins of a once-great civilization. Magic is fading, and ancient shadows are stirring in the deep.',
-    image: 'https://images.unsplash.com/photo-1519074063912-ad2d6d51ee17?w=800&auto=format&fit=crop',
-    tags: ['Fantasy', 'Adventure', 'Magic'],
-    backstory: 'A thousand years ago, the Kingdom of Eldoria was the jewel of the world. Now, it is a land of ruins and whispers. You are a traveler who has stumbled upon the gates of the capital, guided by a strange, humming pendant.',
-    greetingMessage: '*The heavy stone gates groan as they swing open, revealing a city reclaimed by nature. Vines wrap around marble pillars, and the air is thick with the scent of old magic. A figure shrouded in grey rags steps out from the shadows.* "Few come this way anymore. Do you seek the crown, or the curse?"',
-    lorePieces: [],
-    characters: [
-      { id: 'c2', name: 'The Oracle', description: 'A blind seer who speaks in riddles', personality: 'Mysterious and wise' }
-    ],
-    settings: {
-      separateUserCharacter: true,
-      sensitiveContent: false,
-      isPublic: true,
-      allowCustomization: true,
-      hidePrompts: false,
-      allowCommenting: true,
-    },
-    createdAt: Date.now(),
-  }
-];
 
 export const Home: React.FC = () => {
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
@@ -64,14 +14,9 @@ export const Home: React.FC = () => {
   const loadScenarios = async () => {
     try {
       const fetched = await apiService.getScenarios();
-      if (fetched.length === 0) {
-        const local = storage.getScenarios();
-        setScenarios(local.length === 0 ? DEFAULT_SCENARIOS : local);
-      } else {
-        setScenarios(fetched);
-      }
+      setScenarios(fetched);
     } catch (e) {
-      setScenarios(storage.getScenarios());
+      console.error('Failed to load scenarios', e);
     }
   };
 
@@ -103,32 +48,7 @@ export const Home: React.FC = () => {
   });
 
   const startScenario = (scenario: Scenario) => {
-    const newChatId = uuidv4();
-    const newChat = {
-      id: newChatId,
-      scenarioId: scenario.id,
-      title: scenario.name,
-      messages: scenario.greetingMessage ? [
-        {
-          id: uuidv4(),
-          role: 'assistant' as const,
-          content: scenario.greetingMessage,
-          timestamp: Date.now(),
-        }
-      ] : [],
-      memories: [],
-      settings: {
-        model: 'deepseek-chat',
-        responseLength: 'medium' as const,
-        streamResponse: true,
-        showSuggestions: true,
-        fontSize: 100,
-        typingSpeed: 100,
-      },
-      createdAt: Date.now(),
-    };
-    storage.saveChat(newChat);
-    navigate(`/chat/${newChatId}`);
+    navigate(`/scenario/${scenario.id}`);
   };
 
   return (
@@ -199,7 +119,7 @@ export const Home: React.FC = () => {
                 <Play fill="currentColor" size={20} />
               </button>
 
-              {(scenario.userId === user?.id || user?.role === 'admin') && (
+              {user && (scenario.userId === user.id || user.role === 'admin') && (
                 <button 
                   onClick={(e) => handleDelete(e, scenario.id)}
                   className="absolute top-4 right-4 bg-red-900/80 p-2 rounded-lg text-white shadow-xl hover:bg-red-800 transition-colors z-10 opacity-0 group-hover:opacity-100"

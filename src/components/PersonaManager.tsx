@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { User, Plus, Trash2, Edit2, Check, X, Camera, Upload } from 'lucide-react';
 import { apiService } from '../services/api';
@@ -10,36 +9,44 @@ export const PersonaManager: React.FC = () => {
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editPersona, setEditPersona] = useState<Partial<Persona>>({});
+  const [loading, setLoading] = useState(true);
+
+  const loadPersonas = async () => {
+    setLoading(true);
+    const data = await apiService.getPersonas();
+    setPersonas(data);
+    setLoading(false);
+  };
 
   useEffect(() => {
-    setPersonas(apiService.getPersonas());
+    loadPersonas();
   }, []);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (editPersona.name && editingId) {
       const updated = { ...editPersona, id: editingId } as Persona;
-      apiService.savePersona(updated);
-      setPersonas(apiService.getPersonas());
+      await apiService.savePersona(updated);
+      await loadPersonas();
       setEditingId(null);
     }
   };
 
-  const handleAddNew = () => {
+  const handleAddNew = async () => {
     const newPersona: Persona = {
       id: uuidv4(),
       name: 'New Persona',
       description: 'Description here...',
     };
-    apiService.savePersona(newPersona);
-    setPersonas(apiService.getPersonas());
+    await apiService.savePersona(newPersona);
+    await loadPersonas();
     setEditingId(newPersona.id);
     setEditPersona(newPersona);
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (confirm('Delete this persona?')) {
-      apiService.deletePersona(id);
-      setPersonas(apiService.getPersonas());
+      await apiService.deletePersona(id);
+      await loadPersonas();
     }
   };
 
@@ -86,16 +93,16 @@ export const PersonaManager: React.FC = () => {
                       </label>
                    </div>
                    <div className="flex-1 space-y-2">
-                      <input 
-                        className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1 text-white font-bold"
-                        value={editPersona.name}
-                        onChange={e => setEditPersona({...editPersona, name: e.target.value})}
-                      />
-                      <textarea 
-                        className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1 text-zinc-400 text-sm h-20 resize-none"
-                        value={editPersona.description}
-                        onChange={e => setEditPersona({...editPersona, description: e.target.value})}
-                      />
+                     <input 
+                       className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1 text-white font-bold"
+                       value={editPersona.name}
+                       onChange={e => setEditPersona({...editPersona, name: e.target.value})}
+                     />
+                     <textarea 
+                       className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1 text-zinc-400 text-sm h-20 resize-none"
+                       value={editPersona.description}
+                       onChange={e => setEditPersona({...editPersona, description: e.target.value})}
+                     />
                    </div>
                 </div>
                 <div className="flex justify-end gap-2">
@@ -120,7 +127,7 @@ export const PersonaManager: React.FC = () => {
             )}
           </div>
         ))}
-        {personas.length === 0 && (
+        {!loading && personas.length === 0 && (
           <div className="text-center py-10 border-2 border-dashed border-zinc-900 rounded-2xl">
             <p className="text-zinc-600 text-sm">You haven't created any personas yet.</p>
           </div>
