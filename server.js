@@ -99,7 +99,19 @@ app.use(express.static(path.join(__dirname, 'dist')));
 // General rate limiter for all API routes to prevent abuse
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // 200 requests per window per IP
+  max: async (req) => {
+    try {
+      const auth = req.headers.authorization;
+      if (auth) {
+        const token = auth.split(' ')[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const user = getUserById(decoded.userId);
+        if (user?.role === 'admin') return 0; // 0 = unlimited for admins
+      }
+    } catch {}
+    const configured = getSystemSetting('rateLimitMax');
+    return parseInt(configured) || 200;
+  },
   message: { error: 'Too many requests. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,

@@ -27,7 +27,7 @@ import { TrashPage } from './pages/TrashPage';
 import { AuthPage } from './pages/AuthPage';
 
 import { apiService } from './services/api';
-import { NotificationProvider } from './utils/notifications';
+import { NotificationProvider, useNotifications } from './utils/notifications';
 
 /**
  * Reads the cached site name from localStorage.
@@ -52,6 +52,16 @@ const getCachedSiteName = (): string => localStorage.getItem('fl_siteName') || '
  * @param siteName - The configured site/brand name
  */
 const AuthenticatedApp: React.FC<{ siteName: string }> = ({ siteName }) => {
+  const { showToast } = useNotifications();
+
+  // Listen for rate limit exceeded events from the API interceptor
+  React.useEffect(() => {
+    const handleRateLimit = (e: CustomEvent) => {
+      showToast(e.detail || 'Too many requests. Please try again later.', 'error');
+    };
+    window.addEventListener('ratelimit:exceeded', handleRateLimit as EventListener);
+    return () => window.removeEventListener('ratelimit:exceeded', handleRateLimit as EventListener);
+  }, [showToast]);
   return (
     <>
       <Navbar />

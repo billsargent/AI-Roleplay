@@ -47,6 +47,12 @@ api.interceptors.response.use(
       // Dispatch a custom event so the React app can react without a full page reload
       window.dispatchEvent(new CustomEvent('auth:unauthorized'));
     }
+    if (error.response?.status === 429) {
+      // Dispatch a custom event so the React app can show a toast notification
+      window.dispatchEvent(new CustomEvent('ratelimit:exceeded', {
+        detail: error.response.data?.error || 'Too many requests. Please try again later.'
+      }));
+    }
     return Promise.reject(error);
   }
 );

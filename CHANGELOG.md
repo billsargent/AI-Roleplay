@@ -17,6 +17,7 @@
   - Confirmation dialogs and success toasts for all trash actions
   - Soft-deleted items are filtered from active chats, scenarios, and admin views
   - Orphan protection: when a scenario is permanently deleted, associated chats are preserved in read-only mode with all messages, memories, and settings intact
+- **Configurable Rate Limiting** — API rate limit is now configurable from the admin panel (System tab). Admins are exempt from rate limiting. Users who hit the limit see a friendly toast notification instead of a silent failure.
 
 ### Fixed
 - **PDF Export Failure** — Replaced `html2canvas` DOM capture with `jsPDF` native text rendering. The previous approach failed because the chat messages area was hidden behind the full-screen Chat Settings overlay, causing html2canvas to capture a blank/empty canvas.

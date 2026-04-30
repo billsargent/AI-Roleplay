@@ -43,6 +43,7 @@ export const AdminPage: React.FC = () => {
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [siteName, setSiteName] = useState('');
+  const [rateLimitMax, setRateLimitMax] = useState('200');
 
   // ─── LLM settings ───
   const [globalInstructions, setGlobalInstructions] = useState('');
@@ -88,6 +89,7 @@ export const AdminPage: React.FC = () => {
         setMemoryGenerateInterval(settings.memoryGenerateInterval || '25');
         setMemoryWordCount(settings.memoryWordCount || '100');
         setMemoryMaxCount(settings.memoryMaxCount || '50');
+        setRateLimitMax(settings.rateLimitMax || '200');
       } catch (e) {
         console.error('Failed to load settings', e);
       }
@@ -108,18 +110,18 @@ export const AdminPage: React.FC = () => {
     }
   };
 
-  /** Save site name + update localStorage + document.title immediately */
+  /** Save site name + rate limit + update localStorage + document.title immediately */
   const handleSaveSiteName = async () => {
     try {
-      await apiService.updateSystemSettings({ siteName });
+      await apiService.updateSystemSettings({ siteName, rateLimitMax });
       localStorage.setItem('fl_siteName', siteName);
       document.title = siteName || 'AI Roleplay';
       setSiteNameSaved(true);
       setTimeout(() => setSiteNameSaved(false), 3000);
-      showToast('Site name saved', 'success');
+      showToast('Settings saved', 'success');
     } catch (err) {
-      console.error('Failed to save site name:', err);
-      showToast('Failed to save site name', 'error');
+      console.error('Failed to save settings:', err);
+      showToast('Failed to save settings', 'error');
     }
   };
 
@@ -253,6 +255,21 @@ export const AdminPage: React.FC = () => {
               />
               <p className="mt-2 text-xs text-zinc-500 italic">
                 This name is displayed on the home page and as the browser tab title.
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-bold text-zinc-400 mb-2">API Rate Limit (requests per 15 min)</label>
+              <input
+                type="number"
+                min="10"
+                max="10000"
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="200"
+                value={rateLimitMax}
+                onChange={(e) => setRateLimitMax(e.target.value)}
+              />
+              <p className="mt-2 text-xs text-zinc-500 italic">
+                Maximum API requests per 15-minute window for non-admin users. Admins are not rate-limited.
               </p>
             </div>
             <button
