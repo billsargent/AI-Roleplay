@@ -486,10 +486,16 @@ export function deleteChatById(chatId) {
   db.prepare(`UPDATE chats SET deleted_at = ? WHERE id = ?`).run(Date.now(), chatId);
 }
 
-/** Gets all soft-deleted chats for a user, enriched with messages and memories */
+/** Gets all soft-deleted chats for a user, enriched with messages, memories, and scenario name */
 export function getTrashedChatsByUserId(userId) {
   const chats = db.prepare(`SELECT * FROM chats WHERE user_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC`).all(userId);
-  return chats.map(chat => enrichChat(chat));
+  return chats.map(chat => {
+    const enriched = enrichChat(chat);
+    // Look up scenario name (including soft-deleted scenarios)
+    const scenario = db.prepare(`SELECT name FROM scenarios WHERE id = ?`).get(enriched.scenarioId);
+    enriched.scenarioName = scenario?.name || null;
+    return enriched;
+  });
 }
 
 /** Restores a soft-deleted chat (removes from trash) */

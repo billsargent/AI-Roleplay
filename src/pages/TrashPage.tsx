@@ -159,7 +159,7 @@ export const TrashPage: React.FC = () => {
                       <p className="font-bold text-white truncate">{chat.title || 'Untitled Chat'}</p>
                       <p className="text-xs text-zinc-500 mt-0.5">
                         Deleted {formatDate(chat.createdAt || chat.deletedAt)}
-                        {chat.scenarioId && ' • Scenario: ' + (chat.scenarioName || 'Unknown')}
+                        {chat.scenarioId && ' • Scenario: ' + (chat.scenarioName || 'Unknown Scenario')}
                       </p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
