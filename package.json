@@ -8,7 +8,7 @@
     "dev:host": "concurrently -n server,client \"node server.js\" \"vite --host\"",
     "build": "vite build",
     "preview": "vite preview",
-    "start": "node server.js"
+    "start": "vite build && node server.js"
   },
   "dependencies": {
     "@types/bcryptjs": "^2.4.6",
