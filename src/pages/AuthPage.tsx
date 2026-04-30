@@ -1,4 +1,17 @@
-
+/**
+ * ─── Login / Register Page ───
+ *
+ * A dual-mode authentication form:
+ * - Login mode (default): signs in with username/password
+ * - Register mode: creates a new account
+ *
+ * The user can toggle between modes via the link at the bottom of the card.
+ * On successful auth, the onLogin callback is invoked, which triggers
+ * App.tsx to reload user data and swap to the authenticated layout.
+ *
+ * The form includes decorative background blobs, icon-labeled inputs,
+ * and a privacy footer.
+ */
 import React, { useState } from 'react';
 import { LogIn, User, Sparkles, Shield, Key } from 'lucide-react';
 import { apiService } from '../services/api';
@@ -6,10 +19,10 @@ import { apiService } from '../services/api';
 export const AuthPage: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
   const [username, setUsername] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
-
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
 
+  /** Handle form submission (login or register) */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -19,6 +32,7 @@ export const AuthPage: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
       } else {
         await apiService.login(username, password);
       }
+      // Notify parent that authentication succeeded
       onLogin();
     } catch (err: any) {
       console.error('Auth detail error:', err);
@@ -30,19 +44,24 @@ export const AuthPage: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
   return (
     <div className="min-h-[80vh] flex items-center justify-center px-4">
       <div className="w-full max-w-md space-y-8 bg-zinc-900 border border-zinc-800 p-8 rounded-3xl shadow-2xl relative overflow-hidden">
-        {/* Decorative elements */}
+        {/* Decorative background blurs */}
         <div className="absolute -top-24 -right-24 w-48 h-48 bg-indigo-600/10 rounded-full blur-3xl" />
         <div className="absolute -bottom-24 -left-24 w-48 h-48 bg-purple-600/10 rounded-full blur-3xl" />
         
+        {/* Header icon + title */}
         <div className="text-center relative">
           <div className="inline-flex p-4 bg-indigo-600/10 rounded-2xl mb-4">
              <Sparkles className="text-indigo-500" size={32} />
           </div>
-          <h1 className="text-3xl font-black text-white tracking-tight">FictionLab</h1>
-          <p className="text-zinc-500 mt-2">{isRegistering ? 'Create your account to start roleplaying' : 'Sign in to access your stories'}</p>
+          <h1 className="text-3xl font-black text-white tracking-tight">Login</h1>
+          <p className="text-zinc-500 mt-2">
+            {isRegistering ? 'Create your account to start roleplaying' : 'Sign in to access your stories'}
+          </p>
         </div>
 
+        {/* Login/Register Form */}
         <form onSubmit={handleSubmit} className="space-y-6 relative">
+          {/* Username field */}
           <div className="space-y-2">
             <label className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.2em] ml-1">Username</label>
             <div className="relative">
@@ -58,6 +77,7 @@ export const AuthPage: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
             </div>
           </div>
 
+          {/* Password field */}
           <div className="space-y-2">
             <label className="text-[10px] font-black text-zinc-600 uppercase tracking-[0.2em] ml-1">Password</label>
             <div className="relative">
@@ -73,8 +93,10 @@ export const AuthPage: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
             </div>
           </div>
 
+          {/* Error message */}
           {error && <p className="text-red-500 text-xs text-center font-bold">{error}</p>}
 
+          {/* Submit button */}
           <button 
             type="submit"
             className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-3 shadow-xl shadow-indigo-900/20 transition-all active:scale-95"
@@ -84,6 +106,7 @@ export const AuthPage: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
           </button>
         </form>
 
+        {/* Toggle between login / register */}
         <div className="text-center pt-4 relative">
           <button 
             onClick={() => setIsRegistering(!isRegistering)}
@@ -93,6 +116,7 @@ export const AuthPage: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
           </button>
         </div>
 
+        {/* Footer badges */}
         <div className="pt-8 border-t border-zinc-800 flex items-center justify-center gap-4 relative">
            <div className="flex items-center gap-1 text-[10px] text-zinc-700 font-black uppercase">
               <Shield size={12} /> Privacy Guaranteed

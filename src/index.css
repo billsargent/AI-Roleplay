@@ -1,14 +1,28 @@
+/**
+ * ─── Global Styles ───
+ *
+ * Imports Tailwind CSS v4 via the @import directive (no @tailwind directives needed
+ * when using the @tailwindcss/vite plugin).
+ *
+ * The @layer base block sets the default body background (zinc-950), text color (zinc-200),
+ * and font stack (Inter, system fallbacks).
+ *
+ * The remaining styles provide custom scrollbar theming, chat message markdown rendering,
+ * and a reusable slide-up animation.
+ */
+
 @import "tailwindcss";
 
 @layer base {
   body {
-    background-color: #09090b; /* zinc-950 */
-    color: #e4e4e7; /* zinc-200 */
+    background-color: #09090b; /* zinc-950 — full-screen dark background */
+    color: #e4e4e7;           /* zinc-200 — default readable text */
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
   }
 }
 
-/* Scrollbar styling */
+/* ─── Thin Dark Scrollbar ───
+ * Matches the dark UI theme. Only 6px wide to stay out of the way. */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -27,7 +41,8 @@
   background: #3f3f46; /* zinc-700 */
 }
 
-/* Animations */
+/* ─── Reusable Animation ───
+ * Subtle slide-up + fade-in used for various entry effects. */
 @keyframes slide-up {
   from { transform: translateY(10px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
@@ -37,14 +52,115 @@
   animation: slide-up 0.3s ease-out forwards;
 }
 
-/* Chat styles */
+/* ─── Chat Message Markdown Styles ───
+ * These styles are applied inside .message-content containers (rendered by react-markdown).
+ * They handle dialogue emphasis, bold character names, and common markdown elements. */
+
+/* Dialogue indicators (italic text in messages) */
 .message-content em {
-  color: #a1a1aa; /* zinc-400 */
   font-style: italic;
   opacity: 0.9;
 }
 
+/* Bold text — typically used for character names during speech */
 .message-content strong {
   color: #818cf8; /* indigo-400 */
   font-weight: 800;
+}
+
+/* Paragraph spacing (bottom margin on all paragraphs except the last) */
+.message-content p {
+  margin-bottom: 0.75rem;
+}
+
+.message-content p:last-child {
+  margin-bottom: 0;
+}
+
+/* Lists */
+.message-content ul, 
+.message-content ol {
+  margin-bottom: 0.75rem;
+  padding-left: 1.5rem;
+}
+
+.message-content li {
+  margin-bottom: 0.25rem;
+}
+
+/* Blockquotes — typically used for quoted dialogue or character speech */
+.message-content blockquote {
+  border-left: 3px solid #6366f1; /* indigo-500 accent line */
+  padding-left: 1rem;
+  margin-bottom: 0.75rem;
+  color: #a1a1aa; /* zinc-400 */
+}
+
+/* Inline code */
+.message-content code {
+  background: #27272a;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.875em;
+}
+
+/* Code blocks (fenced ``` blocks) */
+.message-content pre {
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+  overflow-x: auto;
+}
+
+.message-content pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+/* Headings */
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4 {
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  margin-top: 1rem;
+}
+
+.message-content h1 { font-size: 1.25rem; }
+.message-content h2 { font-size: 1.125rem; }
+.message-content h3 { font-size: 1rem; }
+
+/* Links */
+.message-content a {
+  color: #818cf8;
+  text-decoration: underline;
+}
+
+/* Horizontal rule */
+.message-content hr {
+  border-color: #27272a;
+  margin: 1rem 0;
+}
+
+/* Tables */
+.message-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 0.75rem;
+}
+
+.message-content th,
+.message-content td {
+  border: 1px solid #27272a;
+  padding: 0.5rem;
+  text-align: left;
+}
+
+.message-content th {
+  background: #18181b;
+  font-weight: 700;
 }

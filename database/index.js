@@ -1,3 +1,11 @@
+/**
+ * Database Layer — SQLite Interface
+ * 
+ * Manages all database operations using better-sqlite3 (synchronous SQLite driver).
+ * Handles table creation, CRUD operations for all entities, and data seeding.
+ * Uses WAL mode for better concurrent read performance and foreign key enforcement.
+ */
+
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -5,20 +13,31 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/** Path to the SQLite database file (stored in project root) */
 const DB_PATH = path.join(__dirname, '..', 'fictionlab.sqlite');
 
 let db;
 
+/**
+ * Retrieves (or initializes) the database singleton.
+ * Creates tables on first call if they don't exist.
+ * @returns {Database} The better-sqlite3 database instance
+ */
 export function getDb() {
   if (!db) {
     db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
+    db.pragma('journal_mode = WAL');    // Write-Ahead Logging for performance
+    db.pragma('foreign_keys = ON');     // Enforce referential integrity
     initTables();
   }
   return db;
 }
 
+/**
+ * Creates all application tables if they don't already exist.
+ * Tables: users, personas, scenarios, characters, lore_pieces, chats, messages, memories, system_settings, user_settings
+ * All use TEXT UUIDs as primary keys. Foreign keys cascade on delete.
+ */
 function initTables() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -116,25 +135,41 @@ function initTables() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      PRIMARY KEY (user_id, key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
   `);
 }
 
-// ============= Users =============
+// ─── Users ────────────────────────────────────────────────────────────
 
+/**
+ * Creates a new user record in the database.
+ * @param {Object} user - User object with id, username, password, role, createdAt
+ * @returns {Object} The created user object
+ */
 export function createUser(user) {
   const stmt = db.prepare(`INSERT INTO users (id, username, password, role, created_at) VALUES (?, ?, ?, ?, ?)`);
   stmt.run(user.id, user.username, user.password, user.role, user.createdAt || user.created_at || Date.now());
   return user;
 }
 
+/** Finds a user by username (case-insensitive) */
 export function getUserByUsername(username) {
   return db.prepare(`SELECT * FROM users WHERE LOWER(username) = LOWER(?)`).get(username);
 }
 
+/** Finds a user by their UUID */
 export function getUserById(id) {
   return db.prepare(`SELECT * FROM users WHERE id = ?`).get(id);
 }
 
+/** Gets a user with their associated personas (used by /api/users/me) */
 export function getUserWithPersonas(id) {
   const user = db.prepare(`SELECT id, username, role, created_at FROM users WHERE id = ?`).get(id);
   if (!user) return null;
@@ -142,12 +177,49 @@ export function getUserWithPersonas(id) {
   return user;
 }
 
-// ============= Personas =============
+/**
+ * Gets all real users (excluding the internal 'system' user) ordered by creation date.
+ * Each user includes a chatCount field.
+ */
+export function getAllUsers() {
+  const users = db.prepare(`SELECT id, username, role, created_at FROM users WHERE id != 'system' ORDER BY created_at DESC`).all();
+  return users.map(u => ({
+    ...u,
+    chatCount: db.prepare(`SELECT COUNT(*) as cnt FROM chats WHERE user_id = ?`).get(u.id).cnt,
+  }));
+}
 
+/** Updates specific fields (username, role, password) on a user record */
+export function updateUser(id, updates) {
+  if (updates.username !== undefined) {
+    db.prepare(`UPDATE users SET username = ? WHERE id = ?`).run(updates.username, id);
+  }
+  if (updates.role !== undefined) {
+    db.prepare(`UPDATE users SET role = ? WHERE id = ?`).run(updates.role, id);
+  }
+  if (updates.password !== undefined) {
+    db.prepare(`UPDATE users SET password = ? WHERE id = ?`).run(updates.password, id);
+  }
+  return getUserById(id);
+}
+
+/** Deletes a user and all cascade-related data (chats, scenarios, etc.) */
+export function deleteUserById(id) {
+  db.prepare(`DELETE FROM users WHERE id = ?`).run(id);
+}
+
+
+// ─── Personas ─────────────────────────────────────────────────────────
+
+/** Gets all personas owned by a specific user */
 export function getPersonasByUserId(userId) {
   return db.prepare(`SELECT * FROM personas WHERE user_id = ?`).all(userId);
 }
 
+/**
+ * Creates or updates a persona. If the persona ID exists it updates, otherwise inserts.
+ * @param {Object} persona - Persona object with id, userId, name, description, avatar
+ */
 export function upsertPersona(persona) {
   const existing = db.prepare(`SELECT id FROM personas WHERE id = ?`).get(persona.id);
   if (existing) {
@@ -160,6 +232,10 @@ export function upsertPersona(persona) {
   return persona;
 }
 
+/**
+ * Deletes a persona only if the requesting user is the owner.
+ * @returns {boolean} Whether the deletion was performed
+ */
 export function deletePersonaById(personaId, userId) {
   const p = db.prepare(`SELECT * FROM personas WHERE id = ?`).get(personaId);
   if (!p) return false;
@@ -168,35 +244,75 @@ export function deletePersonaById(personaId, userId) {
   return true;
 }
 
-// ============= Scenarios =============
+// ─── Scenarios ────────────────────────────────────────────────────────
 
-export function getAllScenarios() {
-  return db.prepare(`SELECT * FROM scenarios ORDER BY created_at DESC`).all();
+/**
+ * Converts a raw snake_case scenario DB row to camelCase for the frontend.
+ * Also parses JSON-stringified fields (tags, settings).
+ */
+function scenarioToCamelCase(s) {
+  return {
+    id: s.id,
+    userId: s.user_id,
+    creatorName: s.creator_name,
+    name: s.name,
+    description: s.description,
+    image: s.image,
+    tags: (() => { try { return JSON.parse(s.tags); } catch { return []; } })(),
+    backstory: s.backstory,
+    greetingMessage: s.greeting_message,
+    customInstructions: s.custom_instructions,
+    settings: (() => { try { return JSON.parse(s.settings); } catch { return {}; } })(),
+    createdAt: s.created_at,
+  };
 }
 
+/** Gets all scenarios (admin use) */
+export function getAllScenarios() {
+  const scenarios = db.prepare(`SELECT * FROM scenarios ORDER BY created_at DESC`).all();
+  return scenarios.map(scenarioToCamelCase);
+}
+
+/**
+ * Gets scenarios that are either public OR owned by the requesting user.
+ * This ensures users only see scenarios they have access to.
+ */
+export function getAccessibleScenarios(userId) {
+  const scenarios = db.prepare(`SELECT * FROM scenarios WHERE json_extract(settings, '$.isPublic') = 1 OR user_id = ? ORDER BY created_at DESC`).all(userId);
+  return scenarios.map(scenarioToCamelCase);
+}
+
+/**
+ * Gets a full scenario by ID including characters and lore pieces.
+ * Lore pieces are enriched with parsed JSON and boolean conversions.
+ */
 export function getScenarioById(id) {
-  const scenario = db.prepare(`SELECT * FROM scenarios WHERE id = ?`).get(id);
-  if (!scenario) return null;
-  scenario.characters = db.prepare(`SELECT * FROM characters WHERE scenario_id = ?`).all(id);
-  scenario.lorePieces = db.prepare(`SELECT * FROM lore_pieces WHERE scenario_id = ?`).all(id);
-  // Parse JSON fields
-  try { scenario.tags = JSON.parse(scenario.tags); } catch { scenario.tags = []; }
-  try { scenario.settings = JSON.parse(scenario.settings); } catch { scenario.settings = {}; }
-  try {
-    scenario.lorePieces = scenario.lorePieces.map(p => ({
-      ...p,
-      pinned: !!p.pinned,
-      smartActivation: !!p.smartActivation,
-      playable: !!p.playable,
-      hidden: !!p.hidden,
-      triggers: JSON.parse(p.triggers || '[]'),
-      linkedPieces: JSON.parse(p.linked_pieces || '[]'),
-      weight: p.weight || 100,
-    }));
-  } catch { }
+  const raw = db.prepare(`SELECT * FROM scenarios WHERE id = ?`).get(id);
+  if (!raw) return null;
+  const characters = db.prepare(`SELECT * FROM characters WHERE scenario_id = ?`).all(id);
+  const lorePieces = db.prepare(`SELECT * FROM lore_pieces WHERE scenario_id = ?`).all(id);
+
+  const scenario = scenarioToCamelCase(raw);
+  scenario.characters = characters;
+  scenario.lorePieces = lorePieces.map(p => ({
+    ...p,
+    pinned: !!p.pinned,
+    smartActivation: !!p.smartActivation,
+    playable: !!p.playable,
+    hidden: !!p.hidden,
+    triggers: JSON.parse(p.triggers || '[]'),
+    linkedPieces: JSON.parse(p.linked_pieces || '[]'),
+    weight: p.weight || 100,
+  }));
   return scenario;
 }
 
+/**
+ * Saves a scenario within a database transaction.
+ * If the scenario exists it updates; otherwise inserts.
+ * Then replaces all associated characters and lore pieces (delete + re-insert).
+ * This atomic approach ensures data consistency.
+ */
 export function saveScenarioTransaction(scenario) {
   const transaction = db.transaction(() => {
     const existing = db.prepare(`SELECT id FROM scenarios WHERE id = ?`).get(scenario.id);
@@ -219,7 +335,7 @@ export function saveScenarioTransaction(scenario) {
         );
     }
 
-    // Replace characters
+    // Replace all characters for this scenario (delete old, insert new)
     db.prepare(`DELETE FROM characters WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.characters && scenario.characters.length > 0) {
       const insertChar = db.prepare(`INSERT INTO characters (id, scenario_id, name, description, personality, avatar) VALUES (?, ?, ?, ?, ?, ?)`);
@@ -228,7 +344,7 @@ export function saveScenarioTransaction(scenario) {
       }
     }
 
-    // Replace lore pieces
+    // Replace all lore pieces for this scenario
     db.prepare(`DELETE FROM lore_pieces WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.lorePieces && scenario.lorePieces.length > 0) {
       const insertLore = db.prepare(`INSERT INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -247,31 +363,52 @@ export function saveScenarioTransaction(scenario) {
   return scenario;
 }
 
+/** Deletes a scenario and all cascade-related data */
 export function deleteScenarioById(id) {
   db.prepare(`DELETE FROM scenarios WHERE id = ?`).run(id);
 }
 
-// ============= Chats =============
+// ─── Chats ────────────────────────────────────────────────────────────
 
+/** Gets all chats for a specific user, enriched with messages and memories */
 export function getChatsByUserId(userId) {
   const chats = db.prepare(`SELECT * FROM chats WHERE user_id = ? ORDER BY created_at DESC`).all(userId);
   return chats.map(chat => enrichChat(chat));
 }
 
+/** Gets a single chat by ID with full message/memory data */
 export function getChatById(chatId) {
   const chat = db.prepare(`SELECT * FROM chats WHERE id = ?`).get(chatId);
   return chat ? enrichChat(chat) : null;
 }
 
+/**
+ * Enriches a raw chat row with its messages, memories, and parsed JSON fields.
+ * This is the standard transformation applied before returning chat data.
+ */
 function enrichChat(chat) {
-  chat.messages = db.prepare(`SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC`).all(chat.id);
-  chat.memories = db.prepare(`SELECT * FROM memories WHERE chat_id = ? ORDER BY timestamp ASC`).all(chat.id);
-  try { chat.userCharacter = JSON.parse(chat.user_character); } catch { chat.userCharacter = null; }
-  try { chat.settings = JSON.parse(chat.settings); } catch { chat.settings = {}; }
-  delete chat.user_character;
-  return chat;
+  const messages = db.prepare(`SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC`).all(chat.id);
+  const memories = db.prepare(`SELECT * FROM memories WHERE chat_id = ? ORDER BY timestamp ASC`).all(chat.id);
+  let userCharacter, settings;
+  try { userCharacter = JSON.parse(chat.user_character); } catch { userCharacter = null; }
+  try { settings = JSON.parse(chat.settings); } catch { settings = {}; }
+  return {
+    id: chat.id,
+    userId: chat.user_id,
+    scenarioId: chat.scenario_id,
+    title: chat.title,
+    userCharacter,
+    settings,
+    createdAt: chat.created_at,
+    messages,
+    memories,
+  };
 }
 
+/**
+ * Saves a chat (including all its messages and memories) within a transaction.
+ * Uses the same delete-then-reinsert pattern as scenarios for consistency.
+ */
 export function saveChatTransaction(chat) {
   const transaction = db.transaction(() => {
     const existing = db.prepare(`SELECT id FROM chats WHERE id = ?`).get(chat.id);
@@ -286,7 +423,7 @@ export function saveChatTransaction(chat) {
         .run(chat.id, chat.userId, chat.scenarioId, chat.title || '', userCharJson, settingsJson, chat.createdAt || Date.now());
     }
 
-    // Replace messages
+    // Replace all messages for this chat
     if (chat.messages) {
       db.prepare(`DELETE FROM messages WHERE chat_id = ?`).run(chat.id);
       const insertMsg = db.prepare(`INSERT INTO messages (id, chat_id, role, content, timestamp, character_name, versions) VALUES (?, ?, ?, ?, ?, ?, ?)`);
@@ -298,7 +435,7 @@ export function saveChatTransaction(chat) {
       }
     }
 
-    // Replace memories
+    // Replace all memories for this chat
     if (chat.memories) {
       db.prepare(`DELETE FROM memories WHERE chat_id = ?`).run(chat.id);
       const insertMem = db.prepare(`INSERT INTO memories (id, chat_id, content, pinned, timestamp) VALUES (?, ?, ?, ?, ?)`);
@@ -312,23 +449,60 @@ export function saveChatTransaction(chat) {
   return chat;
 }
 
+/** Deletes a single chat by ID */
 export function deleteChatById(chatId) {
   db.prepare(`DELETE FROM chats WHERE id = ?`).run(chatId);
 }
 
-// ============= System Settings =============
+/** Deletes all chats owned by a specific user */
+export function deleteAllChatsByUserId(userId) {
+  db.prepare(`DELETE FROM chats WHERE user_id = ?`).run(userId);
+}
 
+
+// ─── System Settings ──────────────────────────────────────────────────
+
+/** Gets a single system setting by key */
 export function getSystemSetting(key) {
   const row = db.prepare(`SELECT value FROM system_settings WHERE key = ?`).get(key);
   return row ? row.value : '';
 }
 
+/** Sets or updates a system setting (upsert via INSERT OR REPLACE) */
 export function setSystemSetting(key, value) {
   db.prepare(`INSERT OR REPLACE INTO system_settings (key, value) VALUES (?, ?)`).run(key, value);
 }
 
-// ============= Seed Default Scenarios =============
+// ─── User Settings ────────────────────────────────────────────────────
 
+/** Gets a specific user setting by user ID and key */
+export function getUserSetting(userId, key) {
+  const row = db.prepare(`SELECT value FROM user_settings WHERE user_id = ? AND key = ?`).get(userId, key);
+  return row ? row.value : '';
+}
+
+/** Sets or updates a user setting */
+export function setUserSetting(userId, key, value) {
+  db.prepare(`INSERT OR REPLACE INTO user_settings (user_id, key, value) VALUES (?, ?, ?)`).run(userId, key, value);
+}
+
+/** Gets all settings for a user as a flat key-value object */
+export function getAllUserSettings(userId) {
+  const rows = db.prepare(`SELECT key, value FROM user_settings WHERE user_id = ?`).all(userId);
+  const settings = {};
+  for (const row of rows) {
+    settings[row.key] = row.value;
+  }
+  return settings;
+}
+
+// ─── Seed Default Scenarios ───────────────────────────────────────────
+
+/**
+ * Seeds 2 default public scenarios (Cyberpunk + Fantasy) if no scenarios exist.
+ * Creates an internal 'system' admin user if no admin exists to own them.
+ * This runs once on server startup if the database is empty.
+ */
 export function seedDefaultScenariosIfEmpty() {
   const count = db.prepare(`SELECT COUNT(*) as cnt FROM scenarios`).get().cnt;
   if (count > 0) return;

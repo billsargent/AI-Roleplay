@@ -1,3 +1,17 @@
+/**
+ * ─── Vite Build Configuration ───
+ *
+ * Plugins:
+ *   - @vitejs/plugin-react — Fast Refresh + JSX transform for React 19
+ *   - @tailwindcss/vite — Tailwind CSS v4 JIT compiler (processes @import "tailwindcss")
+ *
+ * Resolve aliases:
+ *   - "@" maps to src/ — allows imports like `import { ... } from "@/components/..."``
+ *
+ * Dev server proxy:
+ *   - /api requests are forwarded to http://localhost:3000 (Express backend)
+ *     so the frontend can call /api/* without CORS issues during development.
+ */
 import path from "path";
 import { fileURLToPath } from "url";
 import tailwindcss from "@tailwindcss/vite";

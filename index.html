@@ -1,9 +1,17 @@
+<!--
+  ─── HTML Entry Point ───
+  The root <div id="root"> is where React mounts (via src/main.tsx).
+  The inline <script> sets document.title from localStorage so the
+  custom site name (set by admin in "fl_siteName") appears immediately
+  before React hydrates.
+-->
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FictionLab | AI Roleplay</title>
+    <title>AI Roleplay</title>
+    <script>document.title=localStorage.getItem('fl_siteName')||'AI Roleplay';</script>
   </head>
   <body>
     <div id="root"></div>

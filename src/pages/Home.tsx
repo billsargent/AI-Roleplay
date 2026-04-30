@@ -1,16 +1,43 @@
+/**
+ * ─── Home / Scenario Discovery Page ───
+ *
+ * The landing page users see after login. Features:
+ *
+ * - Site branding header (name from localStorage 'fl_siteName')
+ * - "Explore" tab (default): shows scenarios from OTHER users (community scenarios)
+ * - "My Scenarios" tab: shows scenarios the current user owns
+ * - Search bar filters by name, description, tags, and creatorName
+ * - Each scenario card shows image, tags, name, description, and creator attribution
+ * - Click a card → navigate to /scenario/:id (ScenarioDetail)
+ * - Play button overlay → direct navigation to scenario detail
+ * - Delete button (visible to owner or admin): confirmation dialog then delete
+ * - Logout button in the header bar
+ * - "Create" button to open the scenario editor
+ *
+ * The active tab toggles between showing all scenarios (excluding user's own)
+ * and only the user's own scenarios.
+ */
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Play, Plus, BookOpen, Trash2 } from 'lucide-react';
+import { Search, Play, Plus, BookOpen, Trash2, LogOut } from 'lucide-react';
+
 import { apiService } from '../services/api';
 import { Scenario } from '../types';
+import { useNotifications } from '../utils/notifications';
 
-export const Home: React.FC = () => {
+/** Reads the cached site name from localStorage (set by admin via AdminPage) */
+const getCachedSiteName = (): string => localStorage.getItem('fl_siteName') || 'AI Roleplay';
+
+export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSiteName() }) => {
+  const { showToast, showConfirm } = useNotifications();
+
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [search, setSearch] = useState('');
   const [activeTab, setActiveTab] = useState<'all' | 'mine'>('all');
   const navigate = useNavigate();
   const user = apiService.getCurrentUser();
 
+  /** Fetch all accessible scenarios from the API */
   const loadScenarios = async () => {
     try {
       const fetched = await apiService.getScenarios();
@@ -24,49 +51,70 @@ export const Home: React.FC = () => {
     loadScenarios();
   }, []);
 
+  /** Delete a scenario after confirmation. Requires ownership or admin role. */
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    if (confirm('Are you sure you want to delete this scenario?')) {
+    if (await showConfirm('Are you sure you want to delete this scenario?')) {
       try {
         await apiService.deleteScenario(id);
         setScenarios(prev => prev.filter(s => s.id !== id));
       } catch (err) {
-        alert('Failed to delete scenario');
+        showToast('Failed to delete scenario', 'error');
       }
     }
   };
 
+  /** Filter scenarios by search text + active tab.
+   *  - 'all' tab: show scenarios NOT owned by the current user (community)
+   *  - 'mine' tab: show scenarios owned by the current user */
   const filteredScenarios = scenarios.filter(s => {
     const matchesSearch = s.name.toLowerCase().includes(search.toLowerCase()) ||
       s.description.toLowerCase().includes(search.toLowerCase()) ||
+      s.creatorName?.toLowerCase().includes(search.toLowerCase()) ||
       s.tags.some(t => t.toLowerCase().includes(search.toLowerCase()));
     
     if (activeTab === 'mine') {
       return matchesSearch && s.userId === user?.id;
     }
-    return matchesSearch;
+    return matchesSearch && s.userId !== user?.id;
   });
 
+  /** Navigate to the scenario detail page */
   const startScenario = (scenario: Scenario) => {
     navigate(`/scenario/${scenario.id}`);
   };
 
   return (
     <div className="pb-24 pt-4 px-4 max-w-6xl mx-auto">
+      {/* ─── Header: Site Name + Logout + Create ─── */}
       <div className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">FictionLab</h1>
+          <h1 className="text-3xl font-bold text-white tracking-tight">{siteName}</h1>
           <p className="text-zinc-400">Discover your next adventure</p>
         </div>
-        <button 
-          onClick={() => navigate('/create')}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-indigo-900/20 active:scale-95"
-        >
-          <Plus size={20} />
-          <span>Create</span>
-        </button>
+        <div className="flex items-center gap-3">
+          <button 
+            onClick={() => {
+              apiService.logout();
+              window.location.href = '/';
+            }}
+            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-400 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all active:scale-95"
+            title="Logout"
+          >
+            <LogOut size={18} />
+            <span>Logout</span>
+          </button>
+          <button 
+            onClick={() => navigate('/create')}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-indigo-900/20 active:scale-95"
+          >
+            <Plus size={20} />
+            <span>Create</span>
+          </button>
+        </div>
       </div>
 
+      {/* ─── Tab Bar: Explore / My Scenarios ─── */}
       <div className="flex items-center gap-4 mb-6">
         <div className="flex bg-zinc-900 p-1 rounded-xl border border-zinc-800">
           <button 
@@ -84,6 +132,7 @@ export const Home: React.FC = () => {
         </div>
       </div>
 
+      {/* ─── Search Input ─── */}
       <div className="relative mb-8">
         <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500" size={20} />
         <input 
@@ -95,6 +144,7 @@ export const Home: React.FC = () => {
         />
       </div>
 
+      {/* ─── Scenario Grid ─── */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {filteredScenarios.map(scenario => (
           <div 
@@ -102,13 +152,16 @@ export const Home: React.FC = () => {
             className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden group hover:border-zinc-700 transition-all cursor-pointer"
             onClick={() => navigate(`/scenario/${scenario.id}`)}
           >
+            {/* Image + Play/Delete overlays */}
             <div className="aspect-video relative overflow-hidden">
               <img 
-                src={scenario.image || 'https://images.unsplash.com/photo-1534447677768-be436bb09401?w=800&auto=format&fit=crop'} 
+                src={scenario.image || "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='450'%3E%3Crect fill='%23d1d5db' width='800' height='450'/%3E%3C/svg%3E"}
                 alt={scenario.name}
-                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                className="w-full h-full object-contain bg-zinc-950 group-hover:scale-105 transition-transform duration-500"
               />
+              {/* Gradient overlay for readability */}
               <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent opacity-60" />
+              {/* Play button */}
               <button 
                 onClick={(e) => {
                   e.stopPropagation();
@@ -119,6 +172,7 @@ export const Home: React.FC = () => {
                 <Play fill="currentColor" size={20} />
               </button>
 
+              {/* Delete button — visible on hover for owner/admin */}
               {user && (scenario.userId === user.id || user.role === 'admin') && (
                 <button 
                   onClick={(e) => handleDelete(e, scenario.id)}
@@ -129,6 +183,7 @@ export const Home: React.FC = () => {
                 </button>
               )}
             </div>
+            {/* Card info */}
             <div className="p-4">
               <div className="flex flex-wrap gap-2 mb-2">
                 {scenario.tags.map(tag => (
@@ -144,6 +199,12 @@ export const Home: React.FC = () => {
               <div className="flex items-center gap-2 text-zinc-500 text-xs">
                 <BookOpen size={14} />
                 <span>Story Detail</span>
+                {scenario.creatorName && (
+                  <>
+                    <span className="text-zinc-700">|</span>
+                    <span>by {scenario.creatorName}</span>
+                  </>
+                )}
               </div>
             </div>
           </div>
