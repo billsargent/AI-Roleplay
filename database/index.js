@@ -102,13 +102,12 @@ function initTables() {
     CREATE TABLE IF NOT EXISTS chats (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
-      scenario_id TEXT NOT NULL,
+      scenario_id TEXT,
       title TEXT DEFAULT '',
       user_character TEXT DEFAULT '{}',
       settings TEXT DEFAULT '{}',
       created_at INTEGER NOT NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (scenario_id) REFERENCES scenarios(id) ON DELETE CASCADE
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS messages (
@@ -386,17 +385,24 @@ export function restoreScenarioById(id) {
 
 /** Permanently deletes a scenario from the database (final deletion after trash) */
 export function permanentlyDeleteScenarioById(id) {
+  // Orphan all chats referencing this scenario so they remain accessible in read-only mode
+  db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id = ?`).run(id);
+  // Then safely delete the scenario (no cascade — FK was removed)
   db.prepare(`DELETE FROM scenarios WHERE id = ?`).run(id);
 }
 
 /** Permanently deletes all soft-deleted scenarios for a user (empties trash) */
 export function emptyScenarioTrashByUserId(userId) {
+  // Orphan all chats referencing these scenarios so they remain accessible in read-only mode
+  db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id IN (SELECT id FROM scenarios WHERE user_id = ? AND deleted_at IS NOT NULL)`).run(userId);
   db.prepare(`DELETE FROM scenarios WHERE user_id = ? AND deleted_at IS NOT NULL`).run(userId);
 }
 
 /** Permanently deletes scenarios that have been in the trash for more than the specified number of days */
 export function purgeExpiredScenarioTrash(daysOld = 30) {
   const cutoff = Date.now() - (daysOld * 24 * 60 * 60 * 1000);
+  // Orphan all chats referencing expired scenarios first
+  db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id IN (SELECT id FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?)`).run(cutoff);
   db.prepare(`DELETE FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff);
 }
 
@@ -491,9 +497,13 @@ export function getTrashedChatsByUserId(userId) {
   const chats = db.prepare(`SELECT * FROM chats WHERE user_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC`).all(userId);
   return chats.map(chat => {
     const enriched = enrichChat(chat);
-    // Look up scenario name (including soft-deleted scenarios)
-    const scenario = db.prepare(`SELECT name FROM scenarios WHERE id = ?`).get(enriched.scenarioId);
-    enriched.scenarioName = scenario?.name || null;
+    // Look up scenario name (handle null/undefined scenarioId for orphaned chats)
+    if (enriched.scenarioId) {
+      const scenario = db.prepare(`SELECT name FROM scenarios WHERE id = ?`).get(enriched.scenarioId);
+      enriched.scenarioName = scenario?.name || null;
+    } else {
+      enriched.scenarioName = null;
+    }
     return enriched;
   });
 }
