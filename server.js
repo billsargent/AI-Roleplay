@@ -35,10 +35,18 @@ import {
   getScenarioById,
   saveScenarioTransaction,
   deleteScenarioById,
+  getTrashedScenariosByUserId,
+  restoreScenarioById,
+  permanentlyDeleteScenarioById,
+  emptyScenarioTrashByUserId,
   getChatsByUserId,
   getChatById,
   saveChatTransaction,
   deleteChatById,
+  getTrashedChatsByUserId,
+  restoreChatById,
+  permanentlyDeleteChatById,
+  emptyChatTrashByUserId,
   deleteAllChatsByUserId,
 
   getSystemSetting,
@@ -67,7 +75,7 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      imgSrc: ["'self'", "data:", "blob:", "https://images.unsplash.com", "https://*.unsplash.com"],
+      imgSrc: ["'self'", "data:", "block:", "https://images.unsplash.com", "https://*.unsplash.com"],
       fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
       connectSrc: ["'self'", "https://api.deepseek.com"],
       frameSrc: ["'none'"],
@@ -357,7 +365,7 @@ app.post('/api/scenarios', auth, (req, res) => {
 
 /**
  * DELETE /api/scenarios/:id
- * Deletes a scenario. Owner or admin only.
+ * Deletes (soft-delete, moves to trash) a scenario. Owner or admin only.
  */
 app.delete('/api/scenarios/:id', auth, (req, res) => {
   try {
@@ -393,7 +401,7 @@ app.get('/api/chats', auth, (req, res) => {
   let chats;
   if (isAdmin) {
     // Admin sees all chats for management
-    const rawChats = getDb().prepare(`SELECT * FROM chats ORDER BY created_at DESC`).all();
+    const rawChats = getDb().prepare(`SELECT * FROM chats WHERE deleted_at IS NULL ORDER BY created_at DESC`).all();
     chats = rawChats.map(chat => {
       const c = getChatById(chat.id);
       if (!c) return null;
@@ -473,7 +481,7 @@ app.delete('/api/chats/all', auth, (req, res) => {
   }
 });
 
-/** DELETE /api/chats/:id — Deletes a single chat (owner or admin) */
+/** DELETE /api/chats/:id — Deletes (soft-delete, moves to trash) a single chat (owner or admin) */
 app.delete('/api/chats/:id', auth, (req, res) => {
   try {
     const chat = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(req.params.id);
@@ -495,7 +503,132 @@ app.delete('/api/chats/:id', auth, (req, res) => {
   }
 });
 
+// ─── Trash / Recycle Bin Routes ────────────────────────────────────────
 
+/**
+ * GET /api/trash
+ * Returns all trashed items (chats and scenarios) for the authenticated user.
+ */
+app.get('/api/trash', auth, (req, res) => {
+  const trashedChats = getTrashedChatsByUserId(req.userId);
+  const trashedScenarios = getTrashedScenariosByUserId(req.userId);
+  res.json({ chats: trashedChats, scenarios: trashedScenarios });
+});
+
+/**
+ * POST /api/trash/restore/chat/:id
+ * Restores a soft-deleted chat from the trash.
+ */
+app.post('/api/trash/restore/chat/:id', auth, (req, res) => {
+  try {
+    const chat = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(req.params.id);
+    if (!chat) return res.status(404).json({ error: 'Chat not found' });
+
+    const user = getUserById(req.userId);
+    const isAdmin = user?.role === 'admin';
+    const isOwner = chat.user_id === req.userId;
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ error: 'Unauthorized to restore this chat' });
+    }
+
+    restoreChatById(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Restore chat error:', err);
+    res.status(500).json({ error: 'Server error restoring chat' });
+  }
+});
+
+/**
+ * POST /api/trash/restore/scenario/:id
+ * Restores a soft-deleted scenario from the trash.
+ */
+app.post('/api/trash/restore/scenario/:id', auth, (req, res) => {
+  try {
+    const scenario = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(req.params.id);
+    if (!scenario) return res.status(404).json({ error: 'Scenario not found' });
+
+    const user = getUserById(req.userId);
+    const isAdmin = user?.role === 'admin';
+    const isOwner = scenario.user_id === req.userId;
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ error: 'Unauthorized to restore this scenario' });
+    }
+
+    restoreScenarioById(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Restore scenario error:', err);
+    res.status(500).json({ error: 'Server error restoring scenario' });
+  }
+});
+
+/**
+ * DELETE /api/trash/chat/:id
+ * Permanently deletes a chat from the trash (final deletion).
+ */
+app.delete('/api/trash/chat/:id', auth, (req, res) => {
+  try {
+    const chat = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(req.params.id);
+    if (!chat) return res.status(404).json({ error: 'Chat not found' });
+
+    const user = getUserById(req.userId);
+    const isAdmin = user?.role === 'admin';
+    const isOwner = chat.user_id === req.userId;
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ error: 'Unauthorized to permanently delete this chat' });
+    }
+
+    permanentlyDeleteChatById(req.params.id);
+    res.status(204).send();
+  } catch (err) {
+    console.error('Permanent delete chat error:', err);
+    res.status(500).json({ error: 'Server error permanently deleting chat' });
+  }
+});
+
+/**
+ * DELETE /api/trash/scenario/:id
+ * Permanently deletes a scenario from the trash (final deletion).
+ */
+app.delete('/api/trash/scenario/:id', auth, (req, res) => {
+  try {
+    const scenario = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(req.params.id);
+    if (!scenario) return res.status(404).json({ error: 'Scenario not found' });
+
+    const user = getUserById(req.userId);
+    const isAdmin = user?.role === 'admin';
+    const isOwner = scenario.user_id === req.userId;
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ error: 'Unauthorized to permanently delete this scenario' });
+    }
+
+    permanentlyDeleteScenarioById(req.params.id);
+    res.status(204).send();
+  } catch (err) {
+    console.error('Permanent delete scenario error:', err);
+    res.status(500).json({ error: 'Server error permanently deleting scenario' });
+  }
+});
+
+/**
+ * DELETE /api/trash/empty
+ * Permanently deletes all trashed items (chats and scenarios) for the authenticated user.
+ */
+app.delete('/api/trash/empty', auth, (req, res) => {
+  try {
+    emptyChatTrashByUserId(req.userId);
+    emptyScenarioTrashByUserId(req.userId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Empty trash error:', err);
+    res.status(500).json({ error: 'Server error emptying trash' });
+  }
+});
 
 // ─── System Settings (Admin Only) ─────────────────────────────────────
 

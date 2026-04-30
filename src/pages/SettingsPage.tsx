@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { User as UserIcon, Trash2, AlertTriangle, Save, CheckCircle, LogOut, Palette, Lock } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { User as UserIcon, Trash2, AlertTriangle, Save, CheckCircle, LogOut, Palette, Lock, Archive } from 'lucide-react';
 
 import { apiService } from '../services/api';
 import { PersonaManager } from '../components/PersonaManager';
@@ -7,6 +8,7 @@ import { useNotifications } from '../utils/notifications';
 
 export const SettingsPage: React.FC = () => {
   const { showToast, showConfirm } = useNotifications();
+  const navigate = useNavigate();
 
   const [siteName, setSiteName] = useState('');
 
@@ -285,6 +287,19 @@ export const SettingsPage: React.FC = () => {
         </div>
 
         <div>
+          <button 
+            onClick={() => navigate('/trash')}
+            className="w-full flex items-center justify-center gap-2 py-4 bg-amber-900/10 text-amber-500 border border-amber-900/30 rounded-2xl hover:bg-amber-900/20 transition-all font-bold"
+          >
+            <Archive size={20} />
+            Trash (Deleted Items)
+          </button>
+          <p className="mt-2 text-xs text-center text-zinc-600">
+            View and manage your recently deleted chats and scenarios.
+          </p>
+        </div>
+
+        <div className="border-t border-red-900/20 pt-4">
           <button 
             onClick={clearAllData}
             className="w-full flex items-center justify-center gap-2 py-4 bg-red-900/10 text-red-500 border border-red-900/30 rounded-2xl hover:bg-red-900/20 transition-all font-bold"

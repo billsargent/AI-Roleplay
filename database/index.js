@@ -144,6 +144,10 @@ function initTables() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
   `);
+
+  // ── Safe migration: add soft-delete columns if they don't exist ──
+  try { db.exec(`ALTER TABLE scenarios ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
+  try { db.exec(`ALTER TABLE chats ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
 }
 
 // ─── Users ────────────────────────────────────────────────────────────
@@ -267,28 +271,29 @@ function scenarioToCamelCase(s) {
   };
 }
 
-/** Gets all scenarios (admin use) */
+/** Gets all scenarios (admin use) — excludes soft-deleted items */
 export function getAllScenarios() {
-  const scenarios = db.prepare(`SELECT * FROM scenarios ORDER BY created_at DESC`).all();
+  const scenarios = db.prepare(`SELECT * FROM scenarios WHERE deleted_at IS NULL ORDER BY created_at DESC`).all();
   return scenarios.map(scenarioToCamelCase);
 }
 
 /**
- * Gets scenarios that are either public OR owned by the requesting user.
+ * Gets scenarios that are either public OR owned by the requesting user — excludes soft-deleted items.
  * This ensures users only see scenarios they have access to.
  */
 export function getAccessibleScenarios(userId) {
-  const scenarios = db.prepare(`SELECT * FROM scenarios WHERE json_extract(settings, '$.isPublic') = 1 OR user_id = ? ORDER BY created_at DESC`).all(userId);
+  const scenarios = db.prepare(`SELECT * FROM scenarios WHERE (json_extract(settings, '$.isPublic') = 1 OR user_id = ?) AND deleted_at IS NULL ORDER BY created_at DESC`).all(userId);
   return scenarios.map(scenarioToCamelCase);
 }
 
 /**
- * Gets a full scenario by ID including characters and lore pieces.
+ * Gets a full scenario by ID including characters and lore pieces — excludes soft-deleted items.
  * Lore pieces are enriched with parsed JSON and boolean conversions.
  */
 export function getScenarioById(id) {
-  const raw = db.prepare(`SELECT * FROM scenarios WHERE id = ?`).get(id);
+  const raw = db.prepare(`SELECT * FROM scenarios WHERE id = ? AND deleted_at IS NULL`).get(id);
   if (!raw) return null;
+
   const characters = db.prepare(`SELECT * FROM characters WHERE scenario_id = ?`).all(id);
   const lorePieces = db.prepare(`SELECT * FROM lore_pieces WHERE scenario_id = ?`).all(id);
 
@@ -363,22 +368,49 @@ export function saveScenarioTransaction(scenario) {
   return scenario;
 }
 
-/** Deletes a scenario and all cascade-related data */
+/** Soft-deletes a scenario by setting deleted_at timestamp (moves to trash) */
 export function deleteScenarioById(id) {
+  db.prepare(`UPDATE scenarios SET deleted_at = ? WHERE id = ?`).run(Date.now(), id);
+}
+
+/** Gets all soft-deleted scenarios for a user */
+export function getTrashedScenariosByUserId(userId) {
+  const scenarios = db.prepare(`SELECT * FROM scenarios WHERE user_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC`).all(userId);
+  return scenarios.map(scenarioToCamelCase);
+}
+
+/** Restores a soft-deleted scenario (removes from trash) */
+export function restoreScenarioById(id) {
+  db.prepare(`UPDATE scenarios SET deleted_at = NULL WHERE id = ?`).run(id);
+}
+
+/** Permanently deletes a scenario from the database (final deletion after trash) */
+export function permanentlyDeleteScenarioById(id) {
   db.prepare(`DELETE FROM scenarios WHERE id = ?`).run(id);
+}
+
+/** Permanently deletes all soft-deleted scenarios for a user (empties trash) */
+export function emptyScenarioTrashByUserId(userId) {
+  db.prepare(`DELETE FROM scenarios WHERE user_id = ? AND deleted_at IS NOT NULL`).run(userId);
+}
+
+/** Permanently deletes scenarios that have been in the trash for more than the specified number of days */
+export function purgeExpiredScenarioTrash(daysOld = 30) {
+  const cutoff = Date.now() - (daysOld * 24 * 60 * 60 * 1000);
+  db.prepare(`DELETE FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff);
 }
 
 // ─── Chats ────────────────────────────────────────────────────────────
 
 /** Gets all chats for a specific user, enriched with messages and memories */
 export function getChatsByUserId(userId) {
-  const chats = db.prepare(`SELECT * FROM chats WHERE user_id = ? ORDER BY created_at DESC`).all(userId);
+  const chats = db.prepare(`SELECT * FROM chats WHERE user_id = ? AND deleted_at IS NULL ORDER BY created_at DESC`).all(userId);
   return chats.map(chat => enrichChat(chat));
 }
 
 /** Gets a single chat by ID with full message/memory data */
 export function getChatById(chatId) {
-  const chat = db.prepare(`SELECT * FROM chats WHERE id = ?`).get(chatId);
+  const chat = db.prepare(`SELECT * FROM chats WHERE id = ? AND deleted_at IS NULL`).get(chatId);
   return chat ? enrichChat(chat) : null;
 }
 
@@ -449,12 +481,39 @@ export function saveChatTransaction(chat) {
   return chat;
 }
 
-/** Deletes a single chat by ID */
+/** Soft-deletes a chat by setting deleted_at timestamp (moves to trash) */
 export function deleteChatById(chatId) {
+  db.prepare(`UPDATE chats SET deleted_at = ? WHERE id = ?`).run(Date.now(), chatId);
+}
+
+/** Gets all soft-deleted chats for a user, enriched with messages and memories */
+export function getTrashedChatsByUserId(userId) {
+  const chats = db.prepare(`SELECT * FROM chats WHERE user_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC`).all(userId);
+  return chats.map(chat => enrichChat(chat));
+}
+
+/** Restores a soft-deleted chat (removes from trash) */
+export function restoreChatById(chatId) {
+  db.prepare(`UPDATE chats SET deleted_at = NULL WHERE id = ?`).run(chatId);
+}
+
+/** Permanently deletes a chat from the database (final deletion after trash) */
+export function permanentlyDeleteChatById(chatId) {
   db.prepare(`DELETE FROM chats WHERE id = ?`).run(chatId);
 }
 
-/** Deletes all chats owned by a specific user */
+/** Permanently deletes all soft-deleted chats for a user (empties trash) */
+export function emptyChatTrashByUserId(userId) {
+  db.prepare(`DELETE FROM chats WHERE user_id = ? AND deleted_at IS NOT NULL`).run(userId);
+}
+
+/** Permanently deletes chats that have been in the trash for more than the specified number of days */
+export function purgeExpiredChatTrash(daysOld = 30) {
+  const cutoff = Date.now() - (daysOld * 24 * 60 * 60 * 1000);
+  db.prepare(`DELETE FROM chats WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff);
+}
+
+/** Deletes all chats owned by a specific user (permanent — used by "Delete All My Chats") */
 export function deleteAllChatsByUserId(userId) {
   db.prepare(`DELETE FROM chats WHERE user_id = ?`).run(userId);
 }

@@ -429,13 +429,14 @@ export const ScenarioDetail: React.FC = () => {
                    <Download size={18} /> Export Scenario
                  </button>
                  {/* Delete — removes the scenario entirely */}
-                 <button 
-                  onClick={async () => {
-                    if (await showConfirm('Are you sure you want to delete this scenario?')) {
-                      await apiService.deleteScenario(scenario.id);
-                      navigate('/');
-                    }
-                  }}
+                  <button 
+                   onClick={async () => {
+                     if (await showConfirm('Move this scenario to trash? You can restore it later.')) {
+                       await apiService.deleteScenario(scenario.id);
+                       showToast('Scenario moved to trash', 'success');
+                       navigate('/');
+                     }
+                   }}
                   className="w-full bg-red-900/20 hover:bg-red-900/30 text-red-500 py-3 rounded-xl flex items-center justify-center gap-2 font-bold transition-colors border border-red-900/30"
                  >
                    <Trash2 size={18} /> Delete Scenario

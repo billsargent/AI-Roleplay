@@ -22,6 +22,7 @@ import { ChatsList } from './pages/ChatsList';
 import { SettingsPage } from './pages/SettingsPage';
 import { ScenarioDetail } from './pages/ScenarioDetail';
 import { AdminPage } from './pages/AdminPage';
+import { TrashPage } from './pages/TrashPage';
 
 import { AuthPage } from './pages/AuthPage';
 
@@ -45,6 +46,7 @@ const getCachedSiteName = (): string => localStorage.getItem('fl_siteName') || '
  * - `/chats` → Chat list/management
  * - `/chat/:chatId` → Active chat session
  * - `/settings` → User settings
+ * - `/trash` → Trash/recycle bin
  * - `/admin` → Admin panel (protected server-side)
  * 
  * @param siteName - The configured site/brand name
@@ -62,6 +64,7 @@ const AuthenticatedApp: React.FC<{ siteName: string }> = ({ siteName }) => {
           <Route path="/chats" element={<ChatsList />} />
           <Route path="/chat/:chatId" element={<ChatPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/trash" element={<TrashPage />} />
           <Route path="/admin" element={<AdminPage />} />
         </Routes>
       </main>

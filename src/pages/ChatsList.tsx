@@ -42,10 +42,11 @@ export const ChatsList: React.FC = () => {
 
   const deleteChat = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    if (await showConfirm('Are you sure you want to delete this chat?')) {
+    if (await showConfirm('Move this chat to trash? You can restore it later.')) {
       try {
         await apiService.deleteChat(id);
         setChats(prev => prev.filter(c => c.id !== id));
+        showToast('Chat moved to trash', 'success');
       } catch (err) {
         showToast('Failed to delete chat', 'error');
       }

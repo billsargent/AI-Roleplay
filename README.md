@@ -39,6 +39,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **JWT Authentication** — Secure token-based auth with 7-day session expiry
 - **Registration & Login** — First user auto-gains admin role
 - **Password Management** — Change your password with current verification
+- **Trash / Recycle Bin** — Deleted chats and scenarios go to trash instead of being permanently removed. Restore them or permanently delete from the Trash page in Settings. Items auto-purge after 30 days.
 - **Chat Appearance Customization** — Set your own dialog highlight color, narration text color, and chat bubble background color
 
 ### 🛠️ Admin Panel
@@ -168,7 +169,8 @@ AI-Roleplay/
 │   │   ├── CreateScenario.tsx    # Scenario editor
 │   │   ├── Home.tsx              # Scenario discovery / landing page
 │   │   ├── ScenarioDetail.tsx    # Scenario detail view
-│   │   └── SettingsPage.tsx      # User settings & personas
+│   │   ├── SettingsPage.tsx      # User settings & personas
+│   │   └── TrashPage.tsx         # Trash / recycle bin (restore, permanent delete)
 │   ├── services/
 │   │   ├── api.ts               # Axios client + API service methods
 │   │   └── deepseek.ts          # AI prompt assembly + proxy calls
@@ -256,6 +258,16 @@ AI-Roleplay/
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
 | POST | `/api/users/change-password` | Auth | Change password |
+
+### Trash / Recycle Bin
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| GET | `/api/trash` | Auth | List all trashed chats and scenarios |
+| POST | `/api/trash/restore/chat/:id` | Auth | Restore a trashed chat |
+| POST | `/api/trash/restore/scenario/:id` | Auth | Restore a trashed scenario |
+| DELETE | `/api/trash/chat/:id` | Auth | Permanently delete a trashed chat |
+| DELETE | `/api/trash/scenario/:id` | Auth | Permanently delete a trashed scenario |
+| DELETE | `/api/trash/empty` | Auth | Empty all trash items for the current user |
 
 ---
 

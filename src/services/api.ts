@@ -62,6 +62,7 @@ api.interceptors.response.use(
  * - User Settings: Per-user preferences (colors, etc.)
  * - Scenarios: CRUD for story scenarios
  * - Chats: CRUD for chat sessions
+ * - Trash: Soft-delete, restore, permanent delete for chats and scenarios
  * - Admin/Users: Admin-only user management
  */
 export const apiService = {
@@ -253,7 +254,7 @@ export const apiService = {
   },
 
   /**
-   * Deletes a scenario by its ID.
+   * Deletes (soft-deletes) a scenario by its ID — moves to trash.
    * @param id - The scenario's unique identifier
    */
   deleteScenario: async (id: string) => {
@@ -297,7 +298,7 @@ export const apiService = {
   },
 
   /**
-   * Deletes a single chat by its ID.
+   * Deletes (soft-deletes) a chat by its ID — moves to trash.
    * @param id - The chat's unique identifier
    */
   deleteChat: async (id: string) => {
@@ -320,6 +321,65 @@ export const apiService = {
    */
   deleteAllChats: async () => {
     await api.delete('/chats/all');
+  },
+
+  // ── Trash / Recycle Bin ──
+
+  /**
+   * Fetches all trashed items (chats and scenarios) for the current user.
+   * @returns An object with `chats` and `scenarios` arrays
+   */
+  getTrash: async (): Promise<{ chats: any[]; scenarios: any[] }> => {
+    try {
+      const response = await api.get('/trash');
+      return response.data;
+    } catch (e) {
+      console.error('Failed to fetch trash', e);
+      return { chats: [], scenarios: [] };
+    }
+  },
+
+  /**
+   * Restores a soft-deleted chat from the trash.
+   * @param id - The chat's unique identifier
+   */
+  restoreChat: async (id: string) => {
+    const response = await api.post(`/trash/restore/chat/${id}`);
+    return response.data;
+  },
+
+  /**
+   * Restores a soft-deleted scenario from the trash.
+   * @param id - The scenario's unique identifier
+   */
+  restoreScenario: async (id: string) => {
+    const response = await api.post(`/trash/restore/scenario/${id}`);
+    return response.data;
+  },
+
+  /**
+   * Permanently deletes a chat from the trash (final deletion).
+   * @param id - The chat's unique identifier
+   */
+  permanentlyDeleteChat: async (id: string) => {
+    await api.delete(`/trash/chat/${id}`);
+  },
+
+  /**
+   * Permanently deletes a scenario from the trash (final deletion).
+   * @param id - The scenario's unique identifier
+   */
+  permanentlyDeleteScenario: async (id: string) => {
+    await api.delete(`/trash/scenario/${id}`);
+  },
+
+  /**
+   * Empties all trashed items for the current user.
+   * Permanently deletes all trashed chats and scenarios.
+   */
+  emptyTrash: async () => {
+    const response = await api.delete('/trash/empty');
+    return response.data;
   },
 
   // ── Admin: User Management ──
