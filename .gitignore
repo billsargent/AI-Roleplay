@@ -6,5 +6,3 @@ dist/
 .env
 .DS_Store
 *.log
-c
-RP Chat.exe
