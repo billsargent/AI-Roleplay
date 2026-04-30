@@ -506,9 +506,9 @@ export const ChatPage: React.FC = () => {
                     !isReadOnly && handleSend();
                   }
                 }}
-                placeholder={isReadOnly ? "This chat is read-only" : "Write your response..."}
+                placeholder={scenarioDeleted ? "⚠ This scenario has been deleted by its creator — chat is read-only" : (isReadOnly ? "This chat is read-only" : "Write your response...")}
                 disabled={isReadOnly}
-                className={`w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-4 pr-24 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[60px] max-h-[200px] resize-none transition-all ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
+                className={`w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-4 pr-28 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[60px] max-h-[200px] resize-none transition-all ${scenarioDeleted ? 'placeholder:text-red-400/60 text-red-300/50 border-red-800/50' : ''} ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
                 rows={1}
               />
               {/* Input action buttons */}
@@ -517,7 +517,7 @@ export const ChatPage: React.FC = () => {
                   onClick={() => { setOverlay('settings'); setOverlayTab('settings'); }}
                   className="p-2 rounded-xl transition-colors text-purple-400 hover:text-white hover:bg-zinc-800" title="Chat Settings"
                 >
-                  <SettingsIcon size={18} />
+                  <SettingsIcon size={22} />
                 </button>
                 <button 
                   onClick={handleSend}
