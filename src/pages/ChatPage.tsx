@@ -752,8 +752,9 @@ const ChatSettingsView: React.FC<{
   };
 
   /**
-   * Exports the chat messages as a PDF using html2canvas + jsPDF.
-   * Captures the messages area as images and lays them out as PDF pages.
+   * Exports the chat messages as a PDF using jsPDF native text rendering.
+   * Uses print-optimized colors (dark text on white) regardless of the user's
+   * app theme, then appends the AI memories section at the end.
    */
   const exportAsPDF = () => {
     try {
@@ -778,7 +779,7 @@ const ChatSettingsView: React.FC<{
       // ── Title Page ──
       pdf.setFont('helvetica', 'bold');
       pdf.setFontSize(22);
-      pdf.setTextColor(255, 255, 255);
+      pdf.setTextColor(30, 30, 30);
       const title = chat.title || 'Chat Export';
       const titleLines = pdf.splitTextToSize(title, maxWidth);
       y = 60;
@@ -790,10 +791,14 @@ const ChatSettingsView: React.FC<{
 
       pdf.setFont('helvetica', 'normal');
       pdf.setFontSize(10);
-      pdf.setTextColor(180, 180, 180);
+      pdf.setTextColor(120, 120, 120);
       pdf.text(`Exported: ${format(new Date(), 'MMM d, yyyy HH:mm')}`, pageWidth / 2, y, { align: 'center' });
       y += 6;
       pdf.text(`Messages: ${chat.messages.length}`, pageWidth / 2, y, { align: 'center' });
+      if (chat.memories.length > 0) {
+        y += 6;
+        pdf.text(`Memories: ${chat.memories.length}`, pageWidth / 2, y, { align: 'center' });
+      }
 
       // ── Message Pages ──
       pdf.addPage();
@@ -804,7 +809,7 @@ const ChatSettingsView: React.FC<{
           checkPage(10);
           pdf.setFont('helvetica', 'italic');
           pdf.setFontSize(8);
-          pdf.setTextColor(120, 120, 120);
+          pdf.setTextColor(160, 160, 160);
           const sysLines = pdf.splitTextToSize(msg.content, maxWidth - 20);
           sysLines.forEach((line: string) => {
             pdf.text(line, pageWidth / 2, y, { align: 'center' });
@@ -825,9 +830,9 @@ const ChatSettingsView: React.FC<{
         pdf.setFont('helvetica', 'bold');
         pdf.setFontSize(8);
         if (msg.role === 'user') {
-          pdf.setTextColor(130, 200, 255);
+          pdf.setTextColor(0, 90, 180); // Dark blue for user
         } else {
-          pdf.setTextColor(160, 160, 255);
+          pdf.setTextColor(110, 50, 160); // Dark purple for AI
         }
         pdf.text(`${sender}  •  ${timeStr}`, margin, y);
         y += 4;
@@ -835,7 +840,7 @@ const ChatSettingsView: React.FC<{
         // Message content with word wrap
         pdf.setFont('helvetica', 'normal');
         pdf.setFontSize(10);
-        pdf.setTextColor(220, 220, 220);
+        pdf.setTextColor(40, 40, 40); // Near-black for readability
 
         const contentLines = pdf.splitTextToSize(msg.content, maxWidth);
         checkPage(contentLines.length * lineH);
@@ -846,6 +851,64 @@ const ChatSettingsView: React.FC<{
         });
 
         y += 3; // spacing between messages
+      }
+
+      // ── Memories Section ──
+      if (chat.memories.length > 0) {
+        pdf.addPage();
+        y = margin;
+
+        checkPage(20);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(16);
+        pdf.setTextColor(110, 50, 160);
+        pdf.text('AI Memories', margin, y);
+        y += 4;
+
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(8);
+        pdf.setTextColor(140, 140, 140);
+        pdf.text(`Total: ${chat.memories.length} memory${chat.memories.length !== 1 ? 'ies' : 'y'}`, margin, y);
+        y += 12;
+
+        // Sort: pinned first, then newest first
+        const sortedMemories = [...chat.memories].sort((a, b) => {
+          if (a.pinned && !b.pinned) return -1;
+          if (!a.pinned && b.pinned) return 1;
+          return b.timestamp - a.timestamp;
+        });
+
+        for (const mem of sortedMemories) {
+          checkPage(14);
+
+          // Date line with pin indicator
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(8);
+          if (mem.pinned) {
+            pdf.setTextColor(110, 50, 160);
+            pdf.text('📌', margin, y);
+            pdf.text(format(mem.timestamp, 'MMM d, yyyy HH:mm'), margin + 5, y);
+          } else {
+            pdf.setTextColor(140, 140, 140);
+            pdf.text(format(mem.timestamp, 'MMM d, yyyy HH:mm'), margin, y);
+          }
+          y += 5;
+
+          // Content
+          pdf.setFont('helvetica', 'normal');
+          pdf.setFontSize(10);
+          pdf.setTextColor(40, 40, 40);
+
+          const memLines = pdf.splitTextToSize(mem.content, maxWidth);
+          checkPage(memLines.length * lineH);
+
+          memLines.forEach((line: string) => {
+            pdf.text(line, margin, y);
+            y += lineH;
+          });
+
+          y += 4; // spacing between memories
+        }
       }
 
       pdf.save(`${chat.title || 'chat'}-${Date.now()}.pdf`);
