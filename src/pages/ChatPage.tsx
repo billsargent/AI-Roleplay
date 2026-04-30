@@ -29,7 +29,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
 import { useNotifications } from '../utils/notifications';
 import { jsPDF } from 'jspdf';
-import html2canvas from 'html2canvas';
 
 /**
  * Global LLM settings cached on the window object for memory management.
@@ -571,7 +570,7 @@ export const ChatPage: React.FC = () => {
           <div className="flex-1 overflow-y-auto p-6">
             <div className="max-w-xl mx-auto">
               {overlayTab === 'matrix' && scenario && <MemoryMatrixView chat={chat} scenario={scenario} setChat={setChat} />}
-              {overlayTab === 'settings' && <ChatSettingsView chat={chat} setChat={setChat} messagesContainerRef={messagesContainerRef} />}
+              {overlayTab === 'settings' && <ChatSettingsView chat={chat} setChat={setChat} />}
               {overlayTab === 'info' && scenario && <ScenarioInfoView scenario={scenario} />}
             </div>
           </div>
@@ -713,8 +712,7 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
 const ChatSettingsView: React.FC<{ 
   chat: Chat, 
   setChat: (chat: Chat) => void,
-  messagesContainerRef?: React.RefObject<HTMLDivElement | null>
-}> = ({ chat, setChat, messagesContainerRef }) => {
+}> = ({ chat, setChat }) => {
   const { showToast, showConfirm } = useNotifications();
   const [personas, setPersonas] = React.useState<Persona[]>([]);
 
@@ -757,54 +755,97 @@ const ChatSettingsView: React.FC<{
    * Exports the chat messages as a PDF using html2canvas + jsPDF.
    * Captures the messages area as images and lays them out as PDF pages.
    */
-  const exportAsPDF = async () => {
-    if (!messagesContainerRef?.current) {
-      showToast('Cannot capture messages area', 'error');
-      return;
-    }
-
+  const exportAsPDF = () => {
     try {
       showToast('Generating PDF...', 'success');
 
-      const element = messagesContainerRef.current;
-      const canvas = await html2canvas(element, {
-        backgroundColor: '#09090b', // zinc-950
-        scale: 2,
-        useCORS: true,
-        logging: false,
-      });
-
-      const imgData = canvas.toDataURL('image/png');
       const pdf = new jsPDF('p', 'mm', 'a4');
-      const pdfWidth = pdf.internal.pageSize.getWidth();
-      const pdfHeight = pdf.internal.pageSize.getHeight();
-      const imgWidth = canvas.width;
-      const imgHeight = canvas.height;
-      const ratio = Math.min(pdfWidth / imgWidth, pdfHeight / imgHeight);
-      const imgX = (pdfWidth - imgWidth * ratio) / 2;
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 20;
+      const maxWidth = pageWidth - margin * 2;
+      const lineH = 5;
 
-      let heightLeft = imgHeight * ratio;
-      let position = 0;
+      let y = margin;
 
-      // Add title page
-      pdf.setFontSize(18);
+      const checkPage = (needed: number) => {
+        if (y + needed > pageHeight - margin) {
+          pdf.addPage();
+          y = margin;
+        }
+      };
+
+      // ── Title Page ──
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(22);
       pdf.setTextColor(255, 255, 255);
-      pdf.text(chat.title || 'Chat Export', pdfWidth / 2, 40, { align: 'center' });
+      const title = chat.title || 'Chat Export';
+      const titleLines = pdf.splitTextToSize(title, maxWidth);
+      y = 60;
+      titleLines.forEach((line: string) => {
+        pdf.text(line, pageWidth / 2, y, { align: 'center' });
+        y += 10;
+      });
+      y += 8;
+
+      pdf.setFont('helvetica', 'normal');
       pdf.setFontSize(10);
-      pdf.setTextColor(160, 160, 160);
-      pdf.text(`Exported: ${format(new Date(), 'MMM d, yyyy HH:mm')}`, pdfWidth / 2, 50, { align: 'center' });
-      pdf.text(`Messages: ${chat.messages.length}`, pdfWidth / 2, 56, { align: 'center' });
+      pdf.setTextColor(180, 180, 180);
+      pdf.text(`Exported: ${format(new Date(), 'MMM d, yyyy HH:mm')}`, pageWidth / 2, y, { align: 'center' });
+      y += 6;
+      pdf.text(`Messages: ${chat.messages.length}`, pageWidth / 2, y, { align: 'center' });
 
-      // Add pages of captured messages
+      // ── Message Pages ──
       pdf.addPage();
-      pdf.addImage(imgData, 'PNG', imgX, position, imgWidth * ratio, imgHeight * ratio);
-      heightLeft -= pdfHeight;
+      y = margin;
 
-      while (heightLeft > 0) {
-        position = heightLeft - imgHeight * ratio + pdfHeight;
-        pdf.addPage();
-        pdf.addImage(imgData, 'PNG', imgX, position, imgWidth * ratio, imgHeight * ratio);
-        heightLeft -= pdfHeight;
+      for (const msg of chat.messages) {
+        if (msg.role === 'system') {
+          checkPage(10);
+          pdf.setFont('helvetica', 'italic');
+          pdf.setFontSize(8);
+          pdf.setTextColor(120, 120, 120);
+          const sysLines = pdf.splitTextToSize(msg.content, maxWidth - 20);
+          sysLines.forEach((line: string) => {
+            pdf.text(line, pageWidth / 2, y, { align: 'center' });
+            y += 3.5;
+          });
+          y += 3;
+          continue;
+        }
+
+        // Sender + timestamp header
+        const sender = msg.role === 'user'
+          ? (chat.userCharacter?.name || 'YOU')
+          : (msg.characterName || 'AI');
+        const timeStr = format(msg.timestamp, 'MMM d, HH:mm');
+
+        checkPage(10);
+
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(8);
+        if (msg.role === 'user') {
+          pdf.setTextColor(130, 200, 255);
+        } else {
+          pdf.setTextColor(160, 160, 255);
+        }
+        pdf.text(`${sender}  •  ${timeStr}`, margin, y);
+        y += 4;
+
+        // Message content with word wrap
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(10);
+        pdf.setTextColor(220, 220, 220);
+
+        const contentLines = pdf.splitTextToSize(msg.content, maxWidth);
+        checkPage(contentLines.length * lineH);
+
+        contentLines.forEach((line: string) => {
+          pdf.text(line, margin, y);
+          y += lineH;
+        });
+
+        y += 3; // spacing between messages
       }
 
       pdf.save(`${chat.title || 'chat'}-${Date.now()}.pdf`);
