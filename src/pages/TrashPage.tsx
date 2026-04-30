@@ -4,14 +4,6 @@ import { Trash2, RefreshCw, RotateCcw, AlertTriangle, MessageSquare, FileText, C
 import { apiService } from '../services/api';
 import { useNotifications } from '../utils/notifications';
 
-type TrashItem = {
-  id: string;
-  type: 'chat' | 'scenario';
-  title: string;
-  deletedAt: number;
-  scenarioName?: string;
-};
-
 export const TrashPage: React.FC = () => {
   const { showToast, showConfirm } = useNotifications();
   const navigate = useNavigate();

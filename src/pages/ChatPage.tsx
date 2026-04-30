@@ -20,7 +20,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { 
   Send, Settings as SettingsIcon, Brain, Info, 
   ChevronLeft, MessageSquare, RefreshCw, Trash2,
-  X, Pin, User, Edit2
+  X, Pin, User, Edit2, FileDown
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
@@ -28,6 +28,8 @@ import { Chat, Message, Scenario, Persona } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
 import { useNotifications } from '../utils/notifications';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
 
 /**
  * Global LLM settings cached on the window object for memory management.
@@ -63,6 +65,10 @@ export const ChatPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isReadOnly, setIsReadOnly] = useState(false);
+  const [scenarioDeleted, setScenarioDeleted] = useState(false);
+
+  // ── Reference to messages container for PDF capture ──
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   // ── User-facing color preferences ──
   const [dialogColor, setDialogColor] = useState('#4f46e5');
@@ -133,8 +139,20 @@ export const ChatPage: React.FC = () => {
           setIsReadOnly(true); // Admins view other users' chats read-only
         }
         setChat(storedChat);
-        const storedScenario = await apiService.getScenario(storedChat.scenarioId);
-        if (storedScenario) setScenario(storedScenario);
+        try {
+          const storedScenario = await apiService.getScenario(storedChat.scenarioId);
+          if (storedScenario) {
+            setScenario(storedScenario);
+          }
+        } catch (err: any) {
+          // Scenario was soft-deleted by the creator — enter read-only mode
+          if (err.response?.status === 404) {
+            setScenarioDeleted(true);
+            setIsReadOnly(true);
+          } else {
+            throw err; // Re-throw other errors to be caught below
+          }
+        }
       } else {
         setError('Chat not found.');
       }
@@ -314,7 +332,8 @@ export const ChatPage: React.FC = () => {
       </button>
     </div>
   );
-  if (!chat || !scenario) return <div className="p-8 text-white">Chat not found.</div>;
+  if (!chat) return <div className="p-8 text-white">Chat not found.</div>;
+  if (!scenario && !scenarioDeleted) return <div className="p-8 text-white">Chat not found.</div>;
 
   return (
     <div className="flex flex-1 min-h-0 max-h-screen bg-zinc-950 text-zinc-200 relative">
@@ -323,7 +342,7 @@ export const ChatPage: React.FC = () => {
       <div className="flex-1 flex flex-col min-w-0 h-full">
 
         {/* Read-Only Banner (shown when admin views another user's chat) */}
-        {isReadOnly && (
+        {isReadOnly && !scenarioDeleted && (
           <div className="flex-shrink-0 bg-amber-600/10 border-b border-amber-600/20 px-4 py-2 text-center">
             <span className="text-xs font-bold text-amber-500 uppercase tracking-wider flex items-center justify-center gap-2">
               <User size={14} />
@@ -332,8 +351,18 @@ export const ChatPage: React.FC = () => {
           </div>
         )}
 
+        {/* Scenario Deleted Banner (shown when the scenario has been soft-deleted by its creator) */}
+        {scenarioDeleted && (
+          <div className="flex-shrink-0 bg-red-600/10 border-b border-red-600/20 px-4 py-2 text-center">
+            <span className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center justify-center gap-2">
+              <Info size={14} />
+              This scenario has been deleted by its creator — chat is now read-only
+            </span>
+          </div>
+        )}
+
         {/* ── Messages Area ── */}
-        <div className="flex-1 overflow-y-auto space-y-6 py-6"
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6"
           style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px' }}>
           
           {/* Empty state */}
@@ -357,7 +386,7 @@ export const ChatPage: React.FC = () => {
                       </div>
                     )}
                     <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">
-                      {m.role === 'assistant' ? (m.characterName || scenario.name) : (chat.userCharacter?.name || 'YOU')}
+                      {m.role === 'assistant' ? (m.characterName || scenario?.name || 'AI') : (chat.userCharacter?.name || 'YOU')}
                     </span>
                     <span className="text-[10px] text-zinc-600">
                       {format(m.timestamp, 'HH:mm')}
@@ -486,8 +515,7 @@ export const ChatPage: React.FC = () => {
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
                 <button 
                   onClick={() => { setOverlay('settings'); setOverlayTab('settings'); }}
-                  disabled={isReadOnly}
-                  className={`p-2 rounded-xl transition-colors ${isReadOnly ? 'text-zinc-700 cursor-not-allowed' : 'text-purple-400 hover:text-white hover:bg-zinc-800'}`} title="Chat Settings"
+                  className="p-2 rounded-xl transition-colors text-purple-400 hover:text-white hover:bg-zinc-800" title="Chat Settings"
                 >
                   <SettingsIcon size={18} />
                 </button>
@@ -542,9 +570,9 @@ export const ChatPage: React.FC = () => {
           {/* Scrollable overlay content */}
           <div className="flex-1 overflow-y-auto p-6">
             <div className="max-w-xl mx-auto">
-              {overlayTab === 'matrix' && <MemoryMatrixView chat={chat} scenario={scenario} setChat={setChat} />}
-              {overlayTab === 'settings' && <ChatSettingsView chat={chat} setChat={setChat} />}
-              {overlayTab === 'info' && <ScenarioInfoView scenario={scenario} />}
+              {overlayTab === 'matrix' && scenario && <MemoryMatrixView chat={chat} scenario={scenario} setChat={setChat} />}
+              {overlayTab === 'settings' && <ChatSettingsView chat={chat} setChat={setChat} messagesContainerRef={messagesContainerRef} />}
+              {overlayTab === 'info' && scenario && <ScenarioInfoView scenario={scenario} />}
             </div>
           </div>
         </div>
@@ -682,8 +710,12 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
  * - Clear chat history
  * Each change is saved to the server immediately.
  */
-const ChatSettingsView: React.FC<{ chat: Chat, setChat: (chat: Chat) => void }> = ({ chat, setChat }) => {
-  const { showConfirm } = useNotifications();
+const ChatSettingsView: React.FC<{ 
+  chat: Chat, 
+  setChat: (chat: Chat) => void,
+  messagesContainerRef?: React.RefObject<HTMLDivElement | null>
+}> = ({ chat, setChat, messagesContainerRef }) => {
+  const { showToast, showConfirm } = useNotifications();
   const [personas, setPersonas] = React.useState<Persona[]>([]);
 
   // Load available personas on mount
@@ -694,6 +726,94 @@ const ChatSettingsView: React.FC<{ chat: Chat, setChat: (chat: Chat) => void }> 
     };
     loadPersonas();
   }, []);
+
+  /**
+   * Exports the entire chat (messages + metadata) as a downloadable JSON file.
+   */
+  const exportAsJSON = () => {
+    const exportData = {
+      title: chat.title,
+      scenarioId: chat.scenarioId,
+      createdAt: chat.createdAt,
+      userCharacter: chat.userCharacter,
+      settings: chat.settings,
+      messages: chat.messages,
+      memories: chat.memories,
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${chat.title || 'chat'}-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Chat exported as JSON', 'success');
+  };
+
+  /**
+   * Exports the chat messages as a PDF using html2canvas + jsPDF.
+   * Captures the messages area as images and lays them out as PDF pages.
+   */
+  const exportAsPDF = async () => {
+    if (!messagesContainerRef?.current) {
+      showToast('Cannot capture messages area', 'error');
+      return;
+    }
+
+    try {
+      showToast('Generating PDF...', 'success');
+
+      const element = messagesContainerRef.current;
+      const canvas = await html2canvas(element, {
+        backgroundColor: '#09090b', // zinc-950
+        scale: 2,
+        useCORS: true,
+        logging: false,
+      });
+
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = pdf.internal.pageSize.getHeight();
+      const imgWidth = canvas.width;
+      const imgHeight = canvas.height;
+      const ratio = Math.min(pdfWidth / imgWidth, pdfHeight / imgHeight);
+      const imgX = (pdfWidth - imgWidth * ratio) / 2;
+
+      let heightLeft = imgHeight * ratio;
+      let position = 0;
+
+      // Add title page
+      pdf.setFontSize(18);
+      pdf.setTextColor(255, 255, 255);
+      pdf.text(chat.title || 'Chat Export', pdfWidth / 2, 40, { align: 'center' });
+      pdf.setFontSize(10);
+      pdf.setTextColor(160, 160, 160);
+      pdf.text(`Exported: ${format(new Date(), 'MMM d, yyyy HH:mm')}`, pdfWidth / 2, 50, { align: 'center' });
+      pdf.text(`Messages: ${chat.messages.length}`, pdfWidth / 2, 56, { align: 'center' });
+
+      // Add pages of captured messages
+      pdf.addPage();
+      pdf.addImage(imgData, 'PNG', imgX, position, imgWidth * ratio, imgHeight * ratio);
+      heightLeft -= pdfHeight;
+
+      while (heightLeft > 0) {
+        position = heightLeft - imgHeight * ratio + pdfHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, 'PNG', imgX, position, imgWidth * ratio, imgHeight * ratio);
+        heightLeft -= pdfHeight;
+      }
+
+      pdf.save(`${chat.title || 'chat'}-${Date.now()}.pdf`);
+      showToast('Chat exported as PDF', 'success');
+    } catch (err) {
+      console.error('PDF export error:', err);
+      showToast('Failed to generate PDF', 'error');
+    }
+  };
 
   /**
    * Updates a chat setting and optionally appends a system notification message.
@@ -829,6 +949,27 @@ const ChatSettingsView: React.FC<{ chat: Chat, setChat: (chat: Chat) => void }> 
             className={`w-10 h-5 rounded-full transition-colors relative flex-shrink-0 ${chat.settings.showSuggestions ? 'bg-indigo-600' : 'bg-zinc-700'}`}
           >
             <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all shadow ${chat.settings.showSuggestions ? 'right-1' : 'left-1'}`} />
+          </button>
+        </div>
+      </section>
+
+      {/* ── Export Section ── */}
+      <section>
+        <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-3 px-1">Export Chat</label>
+        <div className="flex gap-3">
+          <button 
+            onClick={exportAsJSON}
+            className="flex-1 flex items-center justify-center gap-2 py-3 bg-emerald-600/10 text-emerald-400 border border-emerald-600/20 rounded-xl hover:bg-emerald-600/20 transition-colors text-sm font-bold"
+          >
+            <FileDown size={16} />
+            Export JSON
+          </button>
+          <button 
+            onClick={exportAsPDF}
+            className="flex-1 flex items-center justify-center gap-2 py-3 bg-indigo-600/10 text-indigo-400 border border-indigo-600/20 rounded-xl hover:bg-indigo-600/20 transition-colors text-sm font-bold"
+          >
+            <FileDown size={16} />
+            Export PDF
           </button>
         </div>
       </section>

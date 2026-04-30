@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- **Deleted Scenario Handling** — When a scenario creator deletes their scenario (soft-delete), users with active chats in that scenario now see a red "scenario deleted by creator" banner and the chat enters read-only mode
+- **Chat Export** — Two export options added to Chat Settings:
+  - **Export JSON** — Downloads the full chat (messages, metadata, settings) as a JSON file
+  - **Export PDF** — Uses `html2canvas` + `jsPDF` to capture the chat messages area and generate a multi-page A4 PDF with a title page
+  - Export buttons are always visible in Chat Settings, even in read-only mode (deleted scenario or admin viewing)
 - **Trash / Recycle Bin** — Soft-delete system for chats and scenarios:
   - Deleted items are moved to trash instead of being permanently removed immediately
   - New Trash page accessible from Settings (also at `/trash`)
