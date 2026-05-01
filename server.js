@@ -97,34 +97,34 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'dist')));
 
 // General rate limiter for all API routes to prevent abuse
-// Auth endpoints (/api/login, /api/register) are skipped since they
-// have their own dedicated authLimiter (20 req/15min for brute force prevention).
-// Any authenticated user with admin role gets unlimited access (return 0).
+// Important: when mounted at '/api', req.path is relative (e.g. '/login' not '/api/login').
+// Auth endpoints are skipped since they have their own dedicated authLimiter.
+// Any authenticated admin user gets unlimited access (return 0).
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  // Skip auth endpoints — they have their own authLimiter
-  skip: (req) => req.path === '/api/login' || req.path === '/api/register',
+  // Skip auth endpoints — they are rate-limited by their own authLimiter
+  skip: (req) => req.path === '/login' || req.path === '/register',
   max: async (req) => {
+    // Admin users bypass rate limiting entirely (return 0 = unlimited)
     try {
       const auth = req.headers.authorization;
       if (auth) {
         const token = auth.split(' ')[1];
         const decoded = jwt.verify(token, JWT_SECRET);
         const user = getUserById(decoded.userId);
-        if (user?.role === 'admin') return 0; // 0 = unlimited for admins
+        if (user?.role === 'admin') return 0;
       }
     } catch {
       // Token invalid/expired — fall through to default limit
     }
-    const configured = getSystemSetting('rateLimitMax');
-    const limit = parseInt(configured);
-    // Enforce a minimum floor of 50 (never go below) and default of 500
-    return Math.max(limit || 500, 50);
+    // Generous default: 1000 requests per 15 minute window
+    return 1000;
   },
   message: { error: 'Too many requests. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
+
 
 // Apply general rate limiting to all API routes
 app.use('/api', generalLimiter);
