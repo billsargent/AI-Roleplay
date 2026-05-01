@@ -1,6 +1,18 @@
 # Changelog
 
+## [v1.0.2] — 2026-05-01
+
+### Fixed
+- **Rate Limiter Lockouts on Fresh Deploy** — Completely rewrote the rate limiter logic to prevent false 429 errors:
+  - Auth endpoints (`/api/login`, `/api/register`) are now properly skipped by the general rate limiter (they have their own dedicated `authLimiter`). Previously, the `skip` function checked `req.path === '/api/login'` which could never match because Express mounts middleware at `/api`, making `req.path` relative (`/login`).
+  - Admin bypass now uses the synchronous `skip` function instead of an async `max` returning `0`, eliminating race conditions where the request counter could increment before the async resolution completed.
+  - Increased default limit from 200 to 1000 requests per 15-minute window.
+
+### Changed
+- **Removed `package-lock.json` from Git tracking** — Added to `.gitignore` and deleted from repository to avoid merge conflicts across environments. Developers should rely on `npm install` to generate their own lockfile.
+
 ## [v1.0.1] — 2026-04-30
+
 
 ### Added
 - **Deleted Scenario Handling** — When a scenario creator deletes their scenario (soft-delete), users with active chats in that scenario now see a red "scenario deleted by creator" banner and the chat enters read-only mode
