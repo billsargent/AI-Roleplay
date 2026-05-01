@@ -287,8 +287,9 @@ export const ChatPage: React.FC = () => {
    * Public send handler — reads from the input state and sends.
    */
   const handleSend = async () => {
+    const text = input;
     setInput('');
-    await sendMessage(input.trim());
+    await sendMessage(text.trim());
   };
 
   /**
@@ -369,7 +370,7 @@ export const ChatPage: React.FC = () => {
         )}
 
         {/* ── Messages Area ── */}
-        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6 pb-36"
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6 pb-24"
           style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px' }}>
           
           {/* Empty state */}
