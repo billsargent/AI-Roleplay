@@ -130,7 +130,8 @@ export const CreateScenario: React.FC = () => {
           greetingMessage: data.customGreeting || '',
           customInstructions: data.customInstructions || '',
           lorePieces: (data.lorePieces || []).map((lp: any) => ({
-            id: lp.id || uuidv4(),
+            id: uuidv4(),
+
             type: lp.type === 'premise' ? 'other' : (lp.type || 'other'),
             title: lp.title || '',
             description: lp.description || '',
@@ -155,7 +156,8 @@ export const CreateScenario: React.FC = () => {
         // Import characters if present in the JSON
         if (data.characters && Array.isArray(data.characters) && data.characters.length > 0) {
           imported.characters = data.characters.map((c: any) => ({
-            id: c.id || uuidv4(),
+            id: uuidv4(),
+
             name: c.displayName || c.name || 'Unknown',
             description: c.description || '',
             personality: c.personality || c.traits?.join(', ') || '',
@@ -167,7 +169,8 @@ export const CreateScenario: React.FC = () => {
         for (const lp of charLorePieces) {
           if (!imported.characters.find(c => c.name === lp.title)) {
             imported.characters.push({
-              id: lp.id || uuidv4(),
+              id: uuidv4(),
+
               name: lp.title || 'Unknown',
               description: lp.content || '',
               personality: (lp.traits || []).join(', '),

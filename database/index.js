@@ -342,7 +342,7 @@ export function saveScenarioTransaction(scenario) {
     // Replace all characters for this scenario (delete old, insert new)
     db.prepare(`DELETE FROM characters WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.characters && scenario.characters.length > 0) {
-      const insertChar = db.prepare(`INSERT INTO characters (id, scenario_id, name, description, personality, avatar) VALUES (?, ?, ?, ?, ?, ?)`);
+      const insertChar = db.prepare(`INSERT OR REPLACE INTO characters (id, scenario_id, name, description, personality, avatar) VALUES (?, ?, ?, ?, ?, ?)`);
       for (const c of scenario.characters) {
         insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', c.avatar || '');
       }
@@ -351,7 +351,7 @@ export function saveScenarioTransaction(scenario) {
     // Replace all lore pieces for this scenario
     db.prepare(`DELETE FROM lore_pieces WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.lorePieces && scenario.lorePieces.length > 0) {
-      const insertLore = db.prepare(`INSERT INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insertLore = db.prepare(`INSERT OR REPLACE INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const p of scenario.lorePieces) {
         insertLore.run(
           p.id, scenario.id, p.type || 'other', p.title || '', p.content || '', p.weight || 100,
