@@ -99,31 +99,34 @@ app.use(express.static(path.join(__dirname, 'dist')));
 // General rate limiter for all API routes to prevent abuse
 // Important: when mounted at '/api', req.path is relative (e.g. '/login' not '/api/login').
 // Auth endpoints are skipped since they have their own dedicated authLimiter.
-// Any authenticated admin user gets unlimited access (return 0).
+// Admin users are also skipped (bypass rate limiting entirely).
+// Non-skipped users get a generous 1000 requests per 15 minute window.
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  // Skip auth endpoints — they are rate-limited by their own authLimiter
-  skip: (req) => req.path === '/login' || req.path === '/register',
-  max: async (req) => {
-    // Admin users bypass rate limiting entirely (return 0 = unlimited)
+  // Skip auth endpoints (they have their own authLimiter) AND admin users
+  skip: (req) => {
+    if (req.path === '/login' || req.path === '/register') return true;
+    // Admin users bypass rate limiting entirely
     try {
       const auth = req.headers.authorization;
       if (auth) {
         const token = auth.split(' ')[1];
         const decoded = jwt.verify(token, JWT_SECRET);
         const user = getUserById(decoded.userId);
-        if (user?.role === 'admin') return 0;
+        if (user?.role === 'admin') return true;
       }
     } catch {
-      // Token invalid/expired — fall through to default limit
+      // Token invalid/expired — don't skip
     }
-    // Generous default: 1000 requests per 15 minute window
-    return 1000;
+    return false;
   },
+  // Static limit — no async function to avoid any potential issues
+  max: 1000,
   message: { error: 'Too many requests. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
+
 
 
 // Apply general rate limiting to all API routes
