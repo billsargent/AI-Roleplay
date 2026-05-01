@@ -301,7 +301,7 @@ export function getScenarioById(id) {
   scenario.lorePieces = lorePieces.map(p => ({
     ...p,
     pinned: !!p.pinned,
-    smartActivation: !!p.smartActivation,
+    smartActivation: !!p.smart_activation,
     playable: !!p.playable,
     hidden: !!p.hidden,
     triggers: JSON.parse(p.triggers || '[]'),
