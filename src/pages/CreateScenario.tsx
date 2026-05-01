@@ -85,6 +85,7 @@ export const CreateScenario: React.FC = () => {
 
   const [newTag, setNewTag] = useState('');
   const [showAiGenerator, setShowAiGenerator] = useState(false);
+  const [triggerInputs, setTriggerInputs] = useState<Record<string, string>>({});
   const importInputRef = React.useRef<HTMLInputElement>(null);
 
   /**
@@ -533,15 +534,15 @@ export const CreateScenario: React.FC = () => {
                         <input
                           className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-300"
                           placeholder="e.g. forest, dark, shadows"
-                          value=""
+                          value={triggerInputs[piece.id] || ''}
+                          onChange={e => setTriggerInputs(prev => ({ ...prev, [piece.id]: e.target.value }))}
                           onKeyDown={e => {
                             if (e.key === 'Enter') {
-                              const input = e.currentTarget;
-                              const words = input.value.split(',').map(s => s.trim()).filter(Boolean);
+                              const words = (triggerInputs[piece.id] || '').split(',').map(s => s.trim()).filter(Boolean);
                               if (words.length > 0) {
                                 updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, triggers: [...new Set([...(p.triggers || []), ...words])] } : p) });
                               }
-                              input.value = '';
+                              setTriggerInputs(prev => ({ ...prev, [piece.id]: '' }));
                             }
                           }}
                         />
