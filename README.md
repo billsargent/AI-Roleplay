@@ -13,6 +13,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Copy & Customize** — Fork any public scenario and make it your own
 - **Tag-Based Discovery** — Search and browse community scenarios by name, tags, or creator
 - **Scenario Detail View** — Inspect full backstory, character profiles, and lore before playing
+- **Scenario Import** — Import scenarios from external sources (currently supports Fictionlab format)
 
 ### 🤖 AI Chat & Roleplay
 - **Real-Time Streaming** — AI responses stream character-by-character via Server-Sent Events (SSE) for instant feedback
@@ -268,6 +269,29 @@ AI-Roleplay/
 | DELETE | `/api/trash/chat/:id` | Auth | Permanently delete a trashed chat |
 | DELETE | `/api/trash/scenario/:id` | Auth | Permanently delete a trashed scenario |
 | DELETE | `/api/trash/empty` | Auth | Empty all trash items for the current user |
+
+---
+
+## 🔮 Future Options
+
+### 🗄️ MySQL Database Support
+Planned support for **MySQL** as an alternative to the current SQLite backend. This would enable:
+- **Better concurrency** — Handle multiple simultaneous write operations without locking
+- **Larger deployments** — Scale to more users, scenarios, and chats
+- **Robust data management** — Native user management, replication, and backup tooling
+- **Migration tooling** — A future migration path from SQLite to MySQL will be provided
+
+### 🤖 Multi-Model AI Support
+Currently powered exclusively by **DeepSeek**. Future updates may add support for additional LLM providers:
+
+| Provider | Models |
+|----------|--------|
+| **OpenAI** | GPT-4, GPT-4o, GPT-4o-mini |
+| **Anthropic** | Claude 3.5 Sonnet, Claude 3 Haiku, Claude 4 |
+| **OpenRouter** | Unified API accessing 200+ models including Mixtral, Llama, and more |
+| **Local / Self-Hosted** | Ollama, LM Studio, llama.cpp (run models entirely on your own hardware) |
+
+This would give users the flexibility to choose the model that best fits their needs — whether prioritizing cost, speed, quality, or privacy.
 
 ---
 
