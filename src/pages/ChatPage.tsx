@@ -20,7 +20,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { 
   Send, Settings as SettingsIcon, Brain, Info, 
   ChevronLeft, MessageSquare, RefreshCw, Trash2,
-  X, Pin, User, Edit2, FileDown
+  X, Pin, User, Edit2, FileDown, Play
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
@@ -181,7 +181,8 @@ export const ChatPage: React.FC = () => {
   }, [loading]);
 
   /**
-   * Sends a user message to the AI and handles the response.
+   * Core send logic — creates a user message with the given text and sends it to the AI.
+   * Handles streaming/non-streaming responses, memory generation, and saving.
    * 
    * Flow:
    * 1. Creates a user message and adds it to the chat
@@ -192,20 +193,19 @@ export const ChatPage: React.FC = () => {
    * 6. Trims oldest non-pinned memories if the max count is exceeded
    * 7. Saves the final chat state to the server
    */
-  const handleSend = async () => {
-    if (!input.trim() || !chat || !scenario || isTyping || isReadOnly) return;
+  const sendMessage = async (text: string) => {
+    if (!text || !chat || !scenario || isTyping || isReadOnly) return;
 
     const userMessage: Message = {
       id: uuidv4(),
       role: 'user',
-      content: input,
+      content: text,
       timestamp: Date.now(),
     };
 
     const updatedMessages = [...chat.messages, userMessage];
     const updatedChat = { ...chat, messages: updatedMessages };
     setChat(updatedChat);
-    setInput('');
     setIsTyping(true);
 
     try {
@@ -281,6 +281,14 @@ export const ChatPage: React.FC = () => {
     } finally {
       setIsTyping(false);
     }
+  };
+
+  /**
+   * Public send handler — reads from the input state and sends.
+   */
+  const handleSend = async () => {
+    await sendMessage(input.trim());
+    setInput('');
   };
 
   /**
@@ -470,6 +478,19 @@ export const ChatPage: React.FC = () => {
               )}
             </div>
           ))}
+
+          {/* Continue button — appears when last message is from the AI and not read-only/typing */}
+          {!isReadOnly && !isTyping && chat.messages.length > 0 && chat.messages[chat.messages.length - 1].role === 'assistant' && (
+            <div className="flex justify-center">
+              <button
+                onClick={() => sendMessage('*continue*')}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-purple-500/30 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:border-purple-500/50 hover:text-purple-300 transition-all text-xs font-bold"
+              >
+                <Play size={12} fill="currentColor" />
+                Continue
+              </button>
+            </div>
+          )}
 
           {/* Typing indicator for non-streaming mode */}
           {isTyping && !chat.settings.streamResponse && (
