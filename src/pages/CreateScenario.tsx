@@ -516,7 +516,7 @@ export const CreateScenario: React.FC = () => {
                         <input type="checkbox" checked={piece.pinned} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, pinned: e.target.checked } : p) }); }} /> Pinned
                       </label>
                       <label className="flex items-center gap-2 text-[10px] font-black text-zinc-500 uppercase cursor-pointer">
-                        <input type="checkbox" checked={piece.smartActivation} onChange={e => { if (e.target.checked && (!piece.triggers || piece.triggers.length === 0)) return; updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, smartActivation: e.target.checked } : p) }); }} /> Smart
+                        <input type="checkbox" checked={piece.smartActivation} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, smartActivation: e.target.checked } : p) }); }} /> Smart
                       </label>
                     </div>
                     {/* Trigger words input (only shown for smart-activated lore) */}
