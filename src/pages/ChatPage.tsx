@@ -77,22 +77,6 @@ export const ChatPage: React.FC = () => {
   const [chatPaddingRight, setChatPaddingRight] = useState(16);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputAreaRef = useRef<HTMLDivElement>(null);
-  const [inputAreaHeight, setInputAreaHeight] = useState(0);
-
-  // Measure input area height so messages area padding matches exactly
-  useEffect(() => {
-    const el = inputAreaRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(entries => {
-      for (const entry of entries) {
-        setInputAreaHeight(entry.contentRect.height);
-      }
-    });
-    ro.observe(el);
-    setInputAreaHeight(el.getBoundingClientRect().height);
-    return () => ro.disconnect();
-  }, []);
 
   // Load chat data on mount or when chatId changes
   useEffect(() => {
@@ -386,8 +370,8 @@ export const ChatPage: React.FC = () => {
         )}
 
         {/* ── Messages Area ── */}
-        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6"
-          style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px', paddingBottom: (inputAreaHeight + 24) + 'px' }}>
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6 pb-40"
+          style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px' }}>
           
           {/* Empty state */}
           {chat.messages.length === 0 && (
@@ -532,7 +516,7 @@ export const ChatPage: React.FC = () => {
       </div>
 
       {/* ── Floating Input Area (fixed at bottom) ── */}
-      <div ref={inputAreaRef} className="fixed bottom-0 left-0 right-0 z-40">
+      <div className="fixed bottom-0 left-0 right-0 z-40">
         {/* Footer bar with back button and scenario name */}
         <div className="px-4 pb-2 flex items-center justify-center gap-2">
           <button onClick={() => navigate('/chats')} className="text-zinc-500 hover:text-white transition-colors" title="Back to Chats">
