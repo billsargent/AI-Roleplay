@@ -360,7 +360,7 @@ export const ChatPage: React.FC = () => {
   if (!scenario && !scenarioDeleted) return <div className="p-8 text-white">Chat not found.</div>;
 
   return (
-    <div className="flex flex-1 min-h-0 max-h-screen bg-zinc-950 text-zinc-200 relative">
+    <div className="flex flex-1 min-h-0 h-screen bg-zinc-950 text-zinc-200">
 
       {/* ── Main Chat Area ── */}
       <div className="flex-1 flex flex-col min-w-0 h-full">
@@ -529,52 +529,52 @@ export const ChatPage: React.FC = () => {
           )}
           <div ref={messagesEndRef} />
         </div>
+      </div>
 
-        {/* ── Input Area ── */}
-        <div ref={inputAreaRef} className="flex-shrink-0">
-          <div className="px-4 pt-4 bg-gradient-to-t from-zinc-950 via-zinc-950 to-transparent">
-            <div className="max-w-4xl mx-auto relative group">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    !isReadOnly && handleSend();
-                  }
-                }}
-                placeholder={scenarioDeleted ? "⚠ This scenario has been deleted by its creator — chat is read-only" : (isReadOnly ? "This chat is read-only" : "Write your response...")}
-                disabled={isReadOnly}
-                className={`w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-4 pr-28 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[60px] max-h-[200px] resize-none transition-all ${scenarioDeleted ? 'placeholder:text-red-400/60 text-red-300/50 border-red-800/50' : ''} ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
-                rows={1}
-              />
-              {/* Input action buttons */}
-              <div className="absolute right-2 bottom-2 flex items-center gap-1">
-                <button 
-                  onClick={() => { setOverlay('settings'); setOverlayTab('settings'); }}
-                  className="p-2 rounded-xl transition-colors text-purple-400 hover:text-white hover:bg-zinc-800" title="Chat Settings"
-                >
-                  <SettingsIcon size={22} />
-                </button>
-                <button 
-                  onClick={handleSend}
-                  disabled={!input.trim() || isTyping || isReadOnly}
-                  className={`p-2 rounded-xl transition-all ${
-                    input.trim() && !isTyping && !isReadOnly ? 'bg-indigo-600 text-white shadow-lg' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
-                  }`}
-                >
-                  <Send size={20} />
-                </button>
-              </div>
+      {/* ── Floating Input Area (fixed at bottom) ── */}
+      <div ref={inputAreaRef} className="fixed bottom-0 left-0 right-0 z-40">
+        <div className="px-4 pt-4 bg-gradient-to-t from-zinc-950 via-zinc-950 to-transparent">
+          <div className="max-w-4xl mx-auto relative group">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  !isReadOnly && handleSend();
+                }
+              }}
+              placeholder={scenarioDeleted ? "⚠ This scenario has been deleted by its creator — chat is read-only" : (isReadOnly ? "This chat is read-only" : "Write your response...")}
+              disabled={isReadOnly}
+              className={`w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-4 pr-28 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[60px] max-h-[200px] resize-none transition-all ${scenarioDeleted ? 'placeholder:text-red-400/60 text-red-300/50 border-red-800/50' : ''} ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
+              rows={1}
+            />
+            {/* Input action buttons */}
+            <div className="absolute right-2 bottom-2 flex items-center gap-1">
+              <button 
+                onClick={() => { setOverlay('settings'); setOverlayTab('settings'); }}
+                className="p-2 rounded-xl transition-colors text-purple-400 hover:text-white hover:bg-zinc-800" title="Chat Settings"
+              >
+                <SettingsIcon size={22} />
+              </button>
+              <button 
+                onClick={handleSend}
+                disabled={!input.trim() || isTyping || isReadOnly}
+                className={`p-2 rounded-xl transition-all ${
+                  input.trim() && !isTyping && !isReadOnly ? 'bg-indigo-600 text-white shadow-lg' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                }`}
+              >
+                <Send size={20} />
+              </button>
             </div>
           </div>
-          {/* Footer bar with back button and scenario name */}
-          <div className="px-4 pb-4 pt-2 flex items-center justify-center gap-2">
-            <button onClick={() => navigate('/chats')} className="text-zinc-500 hover:text-white transition-colors" title="Back to Chats">
-              <ChevronLeft size={16} />
-            </button>
-            <span className="text-xs text-zinc-500 font-bold truncate max-w-[200px]">{scenario?.name || 'Chat'}</span>
-          </div>
+        </div>
+        {/* Footer bar with back button and scenario name */}
+        <div className="px-4 pb-4 pt-2 flex items-center justify-center gap-2">
+          <button onClick={() => navigate('/chats')} className="text-zinc-500 hover:text-white transition-colors" title="Back to Chats">
+            <ChevronLeft size={16} />
+          </button>
+          <span className="text-xs text-zinc-500 font-bold truncate max-w-[200px]">{scenario?.name || 'Chat'}</span>
         </div>
       </div>
 
