@@ -77,6 +77,22 @@ export const ChatPage: React.FC = () => {
   const [chatPaddingRight, setChatPaddingRight] = useState(16);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputAreaRef = useRef<HTMLDivElement>(null);
+  const [inputAreaHeight, setInputAreaHeight] = useState(0);
+
+  // Measure input area height so messages area padding matches exactly
+  useEffect(() => {
+    const el = inputAreaRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setInputAreaHeight(entry.contentRect.height);
+      }
+    });
+    ro.observe(el);
+    setInputAreaHeight(el.getBoundingClientRect().height);
+    return () => ro.disconnect();
+  }, []);
 
   // Load chat data on mount or when chatId changes
   useEffect(() => {
@@ -370,8 +386,8 @@ export const ChatPage: React.FC = () => {
         )}
 
         {/* ── Messages Area ── */}
-        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6 pb-24"
-          style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px' }}>
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6"
+          style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px', paddingBottom: inputAreaHeight + 'px' }}>
           
           {/* Empty state */}
           {chat.messages.length === 0 && (
@@ -515,7 +531,7 @@ export const ChatPage: React.FC = () => {
         </div>
 
         {/* ── Input Area ── */}
-        <div className="flex-shrink-0">
+        <div ref={inputAreaRef} className="flex-shrink-0">
           <div className="px-4 pt-4 bg-gradient-to-t from-zinc-950 via-zinc-950 to-transparent">
             <div className="max-w-4xl mx-auto relative group">
               <textarea
