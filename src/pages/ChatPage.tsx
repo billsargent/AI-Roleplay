@@ -385,9 +385,19 @@ export const ChatPage: React.FC = () => {
           </div>
         )}
 
+        {/* ── Top Header Bar: back button + scenario name ── */}
+        <div className="flex-shrink-0 px-4 py-3 border-b border-zinc-800/50 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <button onClick={() => navigate('/chats')} className="text-zinc-500 hover:text-white transition-colors" title="Back to Chats">
+              <ChevronLeft size={18} />
+            </button>
+            <span className="text-sm font-bold text-zinc-400 truncate max-w-[240px]">{scenario?.name || 'Chat'}</span>
+          </div>
+        </div>
+
         {/* ── Messages Area ── */}
         <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6"
-          style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px', paddingBottom: inputAreaHeight + 'px' }}>
+          style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px', paddingBottom: (inputAreaHeight + 24) + 'px' }}>
           
           {/* Empty state */}
           {chat.messages.length === 0 && (
@@ -533,7 +543,7 @@ export const ChatPage: React.FC = () => {
 
       {/* ── Floating Input Area (fixed at bottom) ── */}
       <div ref={inputAreaRef} className="fixed bottom-0 left-0 right-0 z-40">
-        <div className="px-4 pt-4 bg-gradient-to-t from-zinc-950 via-zinc-950 to-transparent">
+        <div className="px-4 pb-4 pt-4 bg-gradient-to-t from-zinc-950 via-zinc-950 to-transparent">
           <div className="max-w-4xl mx-auto relative group">
             <textarea
               value={input}
@@ -568,13 +578,6 @@ export const ChatPage: React.FC = () => {
               </button>
             </div>
           </div>
-        </div>
-        {/* Footer bar with back button and scenario name */}
-        <div className="px-4 pb-4 pt-2 flex items-center justify-center gap-2">
-          <button onClick={() => navigate('/chats')} className="text-zinc-500 hover:text-white transition-colors" title="Back to Chats">
-            <ChevronLeft size={16} />
-          </button>
-          <span className="text-xs text-zinc-500 font-bold truncate max-w-[200px]">{scenario?.name || 'Chat'}</span>
         </div>
       </div>
 
