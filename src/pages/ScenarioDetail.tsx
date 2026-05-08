@@ -4,8 +4,8 @@
  * Full-screen view of a single scenario with:
  * - Header image, name, tags, creation date, public/private badge
  * - Story description (quoted)
- * - The Backstory (expandable, hidden if hidePrompts is set)
- * - Key Characters & Lore cards (hidden if hidePrompts is set)
+ * - The Backstory
+ * - Key Characters & Lore cards
  * - Sidebar: START CHAT button → persona selection modal → chat creation
  * - Favorite, Edit/Customize, Export (owner/admin only), Delete (owner/admin only) buttons
  * - Scenario metadata (user character model, model support, safety/content warning)
@@ -47,6 +47,16 @@ export const ScenarioDetail: React.FC = () => {
   const [canEdit, setCanEdit] = useState(false);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [expandedLoreIds, setExpandedLoreIds] = useState<Set<string>>(new Set());
+
+  const toggleLoreExpand = (id: string) => {
+    setExpandedLoreIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   /** Load scenario data and user's personas on mount */
   useEffect(() => {
@@ -176,7 +186,7 @@ export const ScenarioDetail: React.FC = () => {
   if (!scenario) return <div className="p-8 text-white">Scenario not found.</div>;
 
   return (
-    <div className="pb-24 pt-4 px-4 max-w-5xl mx-auto">
+    <div className="pb-24 pt-4 px-4 max-w-7xl mx-auto">
       {/* Back navigation */}
       <button 
         onClick={() => navigate('/')}
@@ -232,36 +242,45 @@ export const ScenarioDetail: React.FC = () => {
             </p>
           </div>
 
-          {/* The Backstory (hidden if hidePrompts is enabled) */}
-          {!scenario.settings.hidePrompts && (
-            <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
-              <div className="flex items-center gap-3 border-b border-zinc-800 pb-4">
-                <Book className="text-green-500" size={24} />
-                <h2 className="text-xl font-bold text-white uppercase tracking-widest">The Backstory</h2>
-              </div>
-              <p className="text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                {scenario.backstory}
-              </p>
+          {/* The Backstory */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
+            <div className="flex items-center gap-3 border-b border-zinc-800 pb-4">
+              <Book className="text-green-500" size={24} />
+              <h2 className="text-xl font-bold text-white uppercase tracking-widest">The Backstory</h2>
             </div>
-          )}
+            <p className="text-zinc-300 leading-relaxed whitespace-pre-wrap">
+              {scenario.backstory}
+            </p>
+          </div>
 
-          {/* Key Characters & Lore cards (hidden if hidePrompts is enabled) */}
-          {scenario.lorePieces.length > 0 && !scenario.settings.hidePrompts && (
+          {/* Key Characters & Lore */}
+          {scenario.lorePieces.length > 0 && (
             <div className="space-y-4">
               <h3 className="text-lg font-bold text-white uppercase tracking-widest px-2">Key Characters & Lore</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {scenario.lorePieces.map(piece => (
-                  <div key={piece.id} className="bg-zinc-900/50 border border-zinc-800 p-4 rounded-2xl flex gap-4">
-                    <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center flex-shrink-0">
-                       <User size={24} className="text-zinc-600" />
+                {scenario.lorePieces.map(piece => {
+                  const isExpanded = expandedLoreIds.has(piece.id);
+                  return (
+                    <div key={piece.id} className="bg-zinc-900/50 border border-zinc-800 p-4 rounded-2xl flex gap-4">
+                      <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center flex-shrink-0">
+                         <User size={24} className="text-zinc-600" />
+                      </div>
+                      <div className="min-w-0">
+                        <h4 className="font-bold text-white">{piece.title}</h4>
+                        <p className="text-xs text-zinc-500 uppercase font-black">{piece.type}</p>
+                        <p className={`text-sm text-zinc-400 mt-2 ${isExpanded ? '' : 'line-clamp-2'}`}>{piece.content}</p>
+                        {piece.content.length > 150 && (
+                          <button
+                            onClick={() => toggleLoreExpand(piece.id)}
+                            className="text-xs text-indigo-400 hover:text-indigo-300 font-bold mt-1 transition-colors"
+                          >
+                            {isExpanded ? 'less' : 'more...'}
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <div>
-                      <h4 className="font-bold text-white">{piece.title}</h4>
-                      <p className="text-xs text-zinc-500 uppercase font-black">{piece.type}</p>
-                      <p className="text-sm text-zinc-400 mt-2 line-clamp-2">{piece.content}</p>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

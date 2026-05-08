@@ -616,6 +616,16 @@ export const ChatPage: React.FC = () => {
 const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (chat: Chat) => void }> = ({ chat, scenario, setChat }) => {
   const { showConfirm } = useNotifications();
   const [activeTab, setActiveTab] = useState<'lore' | 'memories'>('lore');
+  const [expandedLoreIds, setExpandedLoreIds] = useState<Set<string>>(new Set());
+
+  const toggleLoreExpand = (id: string) => {
+    setExpandedLoreIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   return (
     <div className="space-y-6">
@@ -641,18 +651,29 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
           {scenario.lorePieces.length === 0 && (
             <p className="text-zinc-600 text-sm italic text-center py-8">No lore pieces defined for this scenario.</p>
           )}
-          {scenario.lorePieces.map(piece => (
-            <div key={piece.id} className="bg-zinc-800/50 backdrop-blur-sm border border-zinc-700/50 rounded-xl p-4 hover:border-zinc-600/50 transition-colors">
-              <div className="flex items-center justify-between mb-2">
-                <span className={`text-[10px] uppercase font-black px-2 py-0.5 rounded-full ${piece.type === 'character' ? 'bg-blue-900/50 text-blue-300' : 'bg-zinc-700/50 text-zinc-400'}`}>
-                  {piece.type}
-                </span>
-                {piece.pinned && <Pin size={14} className="text-indigo-400 fill-indigo-400" />}
+          {scenario.lorePieces.map(piece => {
+            const isExpanded = expandedLoreIds.has(piece.id);
+            return (
+              <div key={piece.id} className="bg-zinc-800/50 backdrop-blur-sm border border-zinc-700/50 rounded-xl p-4 hover:border-zinc-600/50 transition-colors">
+                <div className="flex items-center justify-between mb-2">
+                  <span className={`text-[10px] uppercase font-black px-2 py-0.5 rounded-full ${piece.type === 'character' ? 'bg-blue-900/50 text-blue-300' : 'bg-zinc-700/50 text-zinc-400'}`}>
+                    {piece.type}
+                  </span>
+                  {piece.pinned && <Pin size={14} className="text-indigo-400 fill-indigo-400" />}
+                </div>
+                <h4 className="font-bold text-white mb-1 text-sm">{piece.title}</h4>
+                <p className={`text-xs text-zinc-500 leading-relaxed ${isExpanded ? '' : 'line-clamp-3'}`}>{piece.content}</p>
+                {piece.content.length > 200 && (
+                  <button
+                    onClick={() => toggleLoreExpand(piece.id)}
+                    className="text-xs text-indigo-400 hover:text-indigo-300 font-bold mt-1 transition-colors"
+                  >
+                    {isExpanded ? 'less' : 'more...'}
+                  </button>
+                )}
               </div>
-              <h4 className="font-bold text-white mb-1 text-sm">{piece.title}</h4>
-              <p className="text-xs text-zinc-500 leading-relaxed line-clamp-3">{piece.content}</p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         /* AI-generated memories */
