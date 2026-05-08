@@ -1,5 +1,19 @@
 # Changelog
 
+## [v1.0.4] — 2026-05-08
+
+### Added
+- **Lore Card Expand/Collapse** — Truncated lore card text in both the scenario preview (ScenarioDetail) and the Memory Matrix Lore Database tab can now be expanded with a "more..." / "less" toggle to view full content.
+
+### Fixed
+- **Lore Cards Hidden in Scenario Preview** — Lore cards and backstory sections were hidden when `hidePrompts` was enabled in scenario settings. They now always display regardless of this setting.
+- **Narrow Scenario Detail Layout** — The scenario preview page used a cramped `max-w-5xl` container. Widened to `max-w-7xl` for better readability.
+
+## [v1.0.3] — 2026-05-05
+
+### Changed
+- **Restructured Prompt Layering** — Moved global instructions from the system prompt prefix to a post-conversation final reminder. This improves response quality by placing tone/style instructions immediately before the model's response, where they have stronger recency influence, while keeping the system prompt focused on core roleplay setup (scenario, personas, characters, lore).
+
 ## [v1.0.2] — 2026-05-01
 
 ### Added
