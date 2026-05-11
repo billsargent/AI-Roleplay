@@ -22,7 +22,7 @@ import { AiGeneratedScenarioData } from '../services/deepseek';
 
 import { Scenario, LorePiece, StoryCharacter } from '../types';
 import { v4 as uuidv4 } from 'uuid';
-import { fileToBase64 } from '../utils/image';
+import { fileToBase64, urlToBase64 } from '../utils/image';
 import { useLocation } from 'react-router-dom';
 import { useNotifications } from '../utils/notifications';
 import { AIGeneratorModal } from '../components/AIGeneratorModal';
@@ -87,6 +87,7 @@ export const CreateScenario: React.FC = () => {
   const [newTag, setNewTag] = useState('');
   const [showAiGenerator, setShowAiGenerator] = useState(false);
   const [triggerInputs, setTriggerInputs] = useState<Record<string, string>>({});
+  const [rteKey, setRteKey] = useState(0);
   const importInputRef = React.useRef<HTMLInputElement>(null);
 
   /**
@@ -108,17 +109,73 @@ export const CreateScenario: React.FC = () => {
     setShowAiGenerator(true);
   };
 
+  /** FictionLab Image CDN base for relative image paths. */
+  const FICTIONLAB_CDN = 'https://fictionlab.ai/image-cdn/';
+
+  /**
+   * Parses an HTML string, finds all <img> tags, fetches each image URL,
+   * converts it to base64, and replaces the src attributes in the HTML.
+   * Falls back to the original URL if fetching fails.
+   */
+  const embedImagesInHtml = async (html: string): Promise<string> => {
+    const imgRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    let match;
+    const replacements: { url: string; base64: string }[] = [];
+    const urls = new Set<string>();
+    while ((match = imgRegex.exec(html)) !== null) {
+      urls.add(match[1]);
+    }
+    console.log(`[DEBUG] embedImagesInHtml: found ${urls.size} image URLs in introduction HTML`);
+    if (urls.size === 0) {
+      console.log('[DEBUG] No images found in introduction HTML, returning as-is');
+      return html;
+    }
+    const results = await Promise.allSettled(
+      Array.from(urls).map(async (url) => {
+        console.log(`[DEBUG] Fetching image: ${url}`);
+        const base64 = await urlToBase64(url);
+        console.log(`[DEBUG] Image result: ${base64 === url ? 'FAILED (returned original URL)' : 'SUCCESS (converted to base64, length: ' + base64.length + ')'}`);
+        return { url, base64 };
+      })
+    );
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        replacements.push(result.value);
+      } else {
+        console.warn('[DEBUG] Promise rejected:', result.reason);
+      }
+    }
+    console.log(`[DEBUG] Successfully embedded ${replacements.length} of ${urls.size} images`);
+    let resultHtml = html;
+    for (const { url, base64 } of replacements) {
+      resultHtml = resultHtml.split(url).join(base64);
+    }
+    return resultHtml;
+  };
+
+  /**
+   * Resolves a FictionLab image path to a full URL.
+   * If the path is already absolute, returns it as-is.
+   */
+  const flImageUrl = (path: string): string => {
+    if (!path) return '';
+    if (path.startsWith('http://') || path.startsWith('https://')) return path;
+    return `${FICTIONLAB_CDN}${path}`;
+  };
+
   /**
    * Imports a scenario from a JSON file.
-   * Compatible with Risuprompt export format — maps displayName, genres,
-   * backStory, customGreeting, lorePieces, characters, etc. into the app's
-   * Scenario type structure.
+   * Supports both plain JSON (Risuprompt format) and FictionLab format
+   * with image downloading (cover, introduction, character avatars, lore avatars).
    */
-  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    showToast('📥 Importing scenario with images...', 'info');
+
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       try {
         const data = JSON.parse(ev.target?.result as string);
         const imported: Scenario = {
@@ -131,19 +188,7 @@ export const CreateScenario: React.FC = () => {
           backstory: data.backStory || '',
           greetingMessage: data.customGreeting || '',
           customInstructions: data.customInstructions || '',
-          lorePieces: (data.lorePieces || []).map((lp: any) => ({
-            id: uuidv4(),
-
-            type: lp.type === 'premise' ? 'other' : (lp.type || 'other'),
-            title: lp.title || '',
-            description: lp.description || '',
-            content: lp.content || '',
-            weight: lp.weight || 100,
-            pinned: !!lp.pinned,
-            smartActivation: lp.smartActivation !== undefined ? !!lp.smartActivation : true,
-            triggers: lp.triggers || [],
-            linkedPieces: lp.linkedPieces || [],
-          })),
+          lorePieces: [],
           characters: [],
           settings: {
             separateUserCharacter: data.separateUser !== undefined ? !!data.separateUser : true,
@@ -155,34 +200,76 @@ export const CreateScenario: React.FC = () => {
           },
           createdAt: Date.now(),
         };
-        // Import characters if present in the JSON
-        if (data.characters && Array.isArray(data.characters) && data.characters.length > 0) {
-          imported.characters = data.characters.map((c: any) => ({
-            id: uuidv4(),
 
-            name: c.displayName || c.name || 'Unknown',
-            description: c.description || '',
-            personality: c.personality || c.traits?.join(', ') || '',
-            avatar: c.avatarURL || '',
-          }));
+        // ── 1. Download scenario cover image ──
+        if (data.mainImage) {
+          imported.image = await urlToBase64(flImageUrl(data.mainImage));
         }
-        // Also create character entries from lore pieces of type 'character'
+        if (!imported.image && data.avatarURL) {
+          imported.image = await urlToBase64(flImageUrl(data.avatarURL));
+        }
+
+        // ── 2. Download and embed introduction images ──
+        if (data.customIntroduction) {
+          imported.introduction = await embedImagesInHtml(data.customIntroduction);
+        }
+
+        // ── 3. Import lore pieces ──
+        imported.lorePieces = (data.lorePieces || []).map((lp: any) => ({
+          id: uuidv4(),
+          type: lp.type === 'premise' ? 'other' : (lp.type || 'other'),
+          title: lp.title || '',
+          description: lp.description || '',
+          content: lp.content || '',
+          weight: lp.weight || 100,
+          pinned: !!lp.pinned,
+          smartActivation: lp.smartActivation !== undefined ? !!lp.smartActivation : true,
+          triggers: lp.triggers || [],
+          linkedPieces: lp.linkedPieces || [],
+        }));
+
+        // ── 4. Import characters from "characters" array ──
+        if (data.characters && Array.isArray(data.characters) && data.characters.length > 0) {
+          imported.characters = await Promise.all(
+            data.characters.map(async (c: any) => {
+              let avatar = '';
+              if (c.avatarURL) {
+                avatar = await urlToBase64(flImageUrl(c.avatarURL));
+              }
+              return {
+                id: uuidv4(),
+                name: c.displayName || c.name || 'Unknown',
+                description: c.description || '',
+                personality: c.personality || c.traits?.join(', ') || '',
+                avatar,
+              };
+            })
+          );
+        }
+
+        // ── 5. Create character entries from lore pieces of type 'character' ──
         const charLorePieces = (data.lorePieces || []).filter((lp: any) => lp.type === 'character');
         for (const lp of charLorePieces) {
           if (!imported.characters.find(c => c.name === lp.title)) {
+            let avatar = '';
+            if (lp.avatarURL) {
+              avatar = await urlToBase64(flImageUrl(lp.avatarURL));
+            }
             imported.characters.push({
               id: uuidv4(),
-
               name: lp.title || 'Unknown',
               description: lp.content || '',
               personality: (lp.traits || []).join(', '),
-              avatar: lp.avatarURL || '',
+              avatar,
             });
           }
         }
+
         setScenario(imported);
+        setRteKey(prev => prev + 1);
+        showToast('✅ Import successful! All images downloaded and embedded.', 'success');
       } catch (err) {
-        showToast('Failed to import scenario: Invalid JSON file', 'error');
+        showToast('Import failed: Invalid JSON file', 'error');
         console.error('Import error:', err);
       }
     };
@@ -425,6 +512,7 @@ export const CreateScenario: React.FC = () => {
               <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Engaging Story Introduction</label>
               <p className="text-xs text-zinc-600 mb-4">Craft a rich, visually compelling introduction to set the scene. Use images, formatting, and layout to draw players in.</p>
               <RichtextEditor
+                key={rteKey}
                 content={scenario.introduction || ''}
                 onChange={(html) => updateScenario({ introduction: html })}
                 placeholder="Write a captivating introduction for your story..."
