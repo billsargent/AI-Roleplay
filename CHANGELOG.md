@@ -1,5 +1,18 @@
 # Changelog
 
+## [v1.0.5] — 2026-05-11
+
+### Added
+- **Landing / Welcome Page** — Site root (`/`) now shows a welcome page with site description, feature overview cards, and a Help & Tips section explaining how to create scenarios, use custom instructions, and tips & tricks. Unauthenticated visitors see a "Sign In" button; authenticated users see "Explore Scenarios" and "Create New" buttons.
+- **3-Tab Scenario Browser** — The Home/Explore page now has three tabs: "Explore" (all public scenarios), "My Public" (user's own public scenarios), and "My Private" (user's own private/hidden scenarios). Private scenarios are never shown in Explore.
+
+### Changed
+- **Routing Restructure** — Migrated to React Router v6 layout routes. Protected routes now share a common layout (`AuthenticatedApp`) that renders the Navbar, so the navigation bar appears on **all** authenticated pages (scenarios, create, chats, settings, admin, etc.), not just the scenario browser.
+- **Navbar Simplified** — Removed the redundant "Home" nav link (which pointed to `/`). The "Explore" link is now the primary entry point for browsing scenarios at `/scenarios`.
+
+### Fixed
+- **TypeScript Error TS6133** — Fixed unused `user` variable in `App.tsx` that prevented compilation.
+
 ## [v1.0.4] — 2026-05-08
 
 ### Added
