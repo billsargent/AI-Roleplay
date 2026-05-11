@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /** Path to the SQLite database file (stored in project root) */
-const DB_PATH = path.join(__dirname, '..', 'fictionlab.sqlite');
+const DB_PATH = path.join(__dirname, '..', 'database.sqlite');
 
 let db;
 
