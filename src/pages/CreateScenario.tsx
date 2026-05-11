@@ -125,27 +125,18 @@ export const CreateScenario: React.FC = () => {
     while ((match = imgRegex.exec(html)) !== null) {
       urls.add(match[1]);
     }
-    console.log(`[DEBUG] embedImagesInHtml: found ${urls.size} image URLs in introduction HTML`);
-    if (urls.size === 0) {
-      console.log('[DEBUG] No images found in introduction HTML, returning as-is');
-      return html;
-    }
+    if (urls.size === 0) return html;
     const results = await Promise.allSettled(
       Array.from(urls).map(async (url) => {
-        console.log(`[DEBUG] Fetching image: ${url}`);
         const base64 = await urlToBase64(url);
-        console.log(`[DEBUG] Image result: ${base64 === url ? 'FAILED (returned original URL)' : 'SUCCESS (converted to base64, length: ' + base64.length + ')'}`);
         return { url, base64 };
       })
     );
     for (const result of results) {
       if (result.status === 'fulfilled') {
         replacements.push(result.value);
-      } else {
-        console.warn('[DEBUG] Promise rejected:', result.reason);
       }
     }
-    console.log(`[DEBUG] Successfully embedded ${replacements.length} of ${urls.size} images`);
     let resultHtml = html;
     for (const { url, base64 } of replacements) {
       resultHtml = resultHtml.split(url).join(base64);

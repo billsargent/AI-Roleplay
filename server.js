@@ -1034,6 +1034,43 @@ app.delete('/api/admin/users/:id', adminAuth, (req, res) => {
   }
 });
 
+// ─── Image Proxy ──────────────────────────────────────────────────────
+
+/**
+ * GET /api/proxy-image
+ * Fetches a remote image server-side and returns it as a base64 data URL.
+ * Used by the FictionLab import flow to bypass CORS restrictions when
+ * fetching images from CDNs that don't set Access-Control-Allow-Origin.
+ *
+ * Query params:
+ *   url - The full URL of the image to fetch (required)
+ *
+ * Returns: { dataUrl: "data:image/webp;base64,..." }
+ */
+app.get('/api/proxy-image', async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ error: 'Missing or invalid "url" query parameter' });
+    }
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      return res.status(response.status).json({ error: `Upstream HTTP ${response.status}` });
+    }
+
+    const contentType = response.headers.get('content-type') || 'image/webp';
+    const buffer = await response.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+    const dataUrl = `data:${contentType};base64,${base64}`;
+
+    res.json({ dataUrl });
+  } catch (err) {
+    console.error('Proxy-image error:', err);
+    res.status(500).json({ error: 'Failed to proxy image' });
+  }
+});
+
 // ─── Serve Frontend ───────────────────────────────────────────────────
 
 // Catch-all: serve index.html for all non-API routes (SPA support)
