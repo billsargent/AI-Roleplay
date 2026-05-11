@@ -4,8 +4,9 @@
  * The landing page users see after login. Features:
  *
  * - Site branding header (name from localStorage 'fl_siteName')
- * - "Explore" tab (default): shows scenarios from OTHER users (community scenarios)
- * - "My Scenarios" tab: shows scenarios the current user owns
+ * - "Explore" tab (default): shows ALL public scenarios from everyone (including own)
+ * - "My Public" tab: shows only the current user's public scenarios
+ * - "My Private" tab: shows only the current user's private (hidden) scenarios
  * - Search bar filters by name, description, tags, and creatorName
  * - Each scenario card shows image, tags, name, description, and creator attribution
  * - Click a card → navigate to /scenario/:id (ScenarioDetail)
@@ -14,9 +15,10 @@
  * - Logout button in the header bar
  * - "Create" button to open the scenario editor
  *
- * The active tab toggles between showing all scenarios (excluding user's own)
- * and only the user's own scenarios.
+ * Security: private/non-public scenarios are never shown in Explore — they are
+ * only ever visible in the "My Private" tab to the scenario owner (and admins).
  */
+
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, Play, Plus, BookOpen, Trash2, LogOut } from 'lucide-react';
@@ -33,7 +35,7 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
 
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [search, setSearch] = useState('');
-  const [activeTab, setActiveTab] = useState<'all' | 'mine'>('all');
+  const [activeTab, setActiveTab] = useState<'explore' | 'mine-public' | 'mine-private'>('explore');
   const navigate = useNavigate();
   const user = apiService.getCurrentUser();
 
@@ -65,18 +67,24 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
   };
 
   /** Filter scenarios by search text + active tab.
-   *  - 'all' tab: show scenarios NOT owned by the current user (community)
-   *  - 'mine' tab: show scenarios owned by the current user */
+   *  - 'explore' tab: show all public scenarios from everyone (including own)
+   *  - 'mine-public' tab: show only the current user's public scenarios
+   *  - 'mine-private' tab: show only the current user's private (non-public) scenarios */
   const filteredScenarios = scenarios.filter(s => {
     const matchesSearch = s.name.toLowerCase().includes(search.toLowerCase()) ||
       s.description.toLowerCase().includes(search.toLowerCase()) ||
       s.creatorName?.toLowerCase().includes(search.toLowerCase()) ||
       s.tags.some(t => t.toLowerCase().includes(search.toLowerCase()));
     
-    if (activeTab === 'mine') {
-      return matchesSearch && s.userId === user?.id;
+    if (activeTab === 'explore') {
+      // Show all public scenarios (everyone's, including the current user's)
+      return matchesSearch && s.settings?.isPublic === true;
     }
-    return matchesSearch && s.userId !== user?.id;
+    if (activeTab === 'mine-public') {
+      return matchesSearch && s.userId === user?.id && s.settings?.isPublic === true;
+    }
+    // mine-private: only the user's non-public scenarios
+    return matchesSearch && s.userId === user?.id && s.settings?.isPublic !== true;
   });
 
   /** Navigate to the scenario detail page */
@@ -114,20 +122,26 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
         </div>
       </div>
 
-      {/* ─── Tab Bar: Explore / My Scenarios ─── */}
+      {/* ─── Tab Bar: Explore / My Public Scenarios / My Private Scenarios ─── */}
       <div className="flex items-center gap-4 mb-6">
         <div className="flex bg-zinc-900 p-1 rounded-xl border border-zinc-800">
           <button 
-            onClick={() => setActiveTab('all')}
-            className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'all' ? 'bg-zinc-800 text-white shadow-lg' : 'text-zinc-500 hover:text-zinc-300'}`}
+            onClick={() => setActiveTab('explore')}
+            className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'explore' ? 'bg-zinc-800 text-white shadow-lg' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
             Explore
           </button>
           <button 
-            onClick={() => setActiveTab('mine')}
-            className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'mine' ? 'bg-zinc-800 text-white shadow-lg' : 'text-zinc-500 hover:text-zinc-300'}`}
+            onClick={() => setActiveTab('mine-public')}
+            className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'mine-public' ? 'bg-zinc-800 text-white shadow-lg' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
-            My Scenarios
+            My Public
+          </button>
+          <button 
+            onClick={() => setActiveTab('mine-private')}
+            className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'mine-private' ? 'bg-zinc-800 text-white shadow-lg' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            My Private
           </button>
         </div>
       </div>

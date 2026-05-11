@@ -12,10 +12,11 @@
  */
 
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, useNavigate, Navigate, Outlet } from 'react-router-dom';
 import { AlertTriangle } from 'lucide-react';
 import { Navbar } from './components/Navbar';
 import { Home } from './pages/Home';
+import { LandingPage } from './pages/LandingPage';
 import { ChatPage } from './pages/ChatPage';
 import { CreateScenario } from './pages/CreateScenario';
 import { ChatsList } from './pages/ChatsList';
@@ -36,11 +37,23 @@ import { NotificationProvider, useNotifications } from './utils/notifications';
 const getCachedSiteName = (): string => localStorage.getItem('fl_siteName') || 'AI Roleplay';
 
 /**
+ * Component that requires authentication to view its children.
+ * Redirects to /auth if the user is not logged in.
+ */
+const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const user = apiService.getCurrentUser();
+  if (!user) {
+    return <Navigate to="/auth" replace />;
+  }
+  return <>{children}</>;
+};
+
+/**
  * The authenticated application shell.
  * Renders the navigation bar and all authenticated routes.
  * 
- * Routes:
- * - `/` or `/scenarios` → Home (scenario discovery/browsing)
+ * Inner Routes (require auth):
+ * - `/scenarios` → Home (scenario discovery/browsing)
  * - `/scenario/:scenarioId` → Scenario detail page
  * - `/create` → Scenario editor
  * - `/chats` → Chat list/management
@@ -51,7 +64,7 @@ const getCachedSiteName = (): string => localStorage.getItem('fl_siteName') || '
  * 
  * @param siteName - The configured site/brand name
  */
-const AuthenticatedApp: React.FC<{ siteName: string }> = ({ siteName }) => {
+const AuthenticatedApp: React.FC = () => {
   const { showToast } = useNotifications();
 
   // Listen for rate limit exceeded events from the API interceptor
@@ -66,17 +79,7 @@ const AuthenticatedApp: React.FC<{ siteName: string }> = ({ siteName }) => {
     <>
       <Navbar />
       <main className="md:pt-16 pb-16 md:pb-0 flex-1 flex flex-col min-h-0">
-        <Routes>
-          <Route path="/" element={<Home siteName={siteName} />} />
-          <Route path="/scenarios" element={<Home siteName={siteName} />} />
-          <Route path="/scenario/:scenarioId" element={<ScenarioDetail />} />
-          <Route path="/create" element={<CreateScenario />} />
-          <Route path="/chats" element={<ChatsList />} />
-          <Route path="/chat/:chatId" element={<ChatPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/trash" element={<TrashPage />} />
-          <Route path="/admin" element={<AdminPage />} />
-        </Routes>
+        <Outlet />
       </main>
     </>
   );
@@ -85,13 +88,12 @@ const AuthenticatedApp: React.FC<{ siteName: string }> = ({ siteName }) => {
 /**
  * Core application content component that manages auth state.
  * 
- * - Checks for an existing user session from localStorage
  * - Loads the site name from server settings on mount
- * - Shows AuthPage if no user is logged in
- * - Wraps authenticated content in the app shell layout
+ * - Public routes: `/` (LandingPage), `/auth` (AuthPage)
+ * - Protected routes: all others (wrapped in ProtectedRoute)
  */
 const AppContent: React.FC = () => {
-  const [user, setUser] = React.useState(apiService.getCurrentUser());
+  const [, setUser] = React.useState(apiService.getCurrentUser());
   const [siteName, setSiteName] = React.useState(getCachedSiteName());
   const navigate = useNavigate();
 
@@ -118,17 +120,30 @@ const AppContent: React.FC = () => {
     return () => window.removeEventListener('auth:unauthorized', handleUnauthorized);
   }, []);
 
-  // Show login/register page if not authenticated
-  if (!user) {
-    return <AuthPage onLogin={() => {
-      setUser(apiService.getCurrentUser());
-      navigate('/');
-    }} />;
-  }
+  const handleLogin = () => {
+    setUser(apiService.getCurrentUser());
+    navigate('/');
+  };
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-200 flex flex-col">
-      <AuthenticatedApp siteName={siteName} />
+      <Routes>
+        {/* ── Public Routes (no Navbar) ── */}
+        <Route path="/" element={<LandingPage siteName={siteName} />} />
+        <Route path="/auth" element={<AuthPage onLogin={handleLogin} />} />
+
+        {/* ── Protected Routes (with Navbar via AuthenticatedApp layout) ── */}
+        <Route element={<ProtectedRoute><AuthenticatedApp /></ProtectedRoute>}>
+          <Route path="/scenarios" element={<Home siteName={siteName} />} />
+          <Route path="/scenario/:scenarioId" element={<ScenarioDetail />} />
+          <Route path="/create" element={<CreateScenario />} />
+          <Route path="/chats" element={<ChatsList />} />
+          <Route path="/chat/:chatId" element={<ChatPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/trash" element={<TrashPage />} />
+          <Route path="/admin" element={<AdminPage />} />
+        </Route>
+      </Routes>
     </div>
   );
 };
