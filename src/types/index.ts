@@ -19,6 +19,8 @@ export interface Scenario {
   image?: string;
   tags: string[];
   backstory: string;
+  /** Rich text HTML content for the scenario introduction */
+  introduction?: string;
   /** Optional first message from the AI when starting a new chat */
   greetingMessage?: string;
   customInstructions?: string;

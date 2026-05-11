@@ -144,9 +144,10 @@ function initTables() {
     );
   `);
 
-  // ── Safe migration: add soft-delete columns if they don't exist ──
+  // ── Safe migrations ──
   try { db.exec(`ALTER TABLE scenarios ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
   try { db.exec(`ALTER TABLE chats ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
+  try { db.exec(`ALTER TABLE scenarios ADD COLUMN introduction TEXT DEFAULT ''`); } catch {}
 }
 
 // ─── Users ────────────────────────────────────────────────────────────
@@ -263,6 +264,7 @@ function scenarioToCamelCase(s) {
     image: s.image,
     tags: (() => { try { return JSON.parse(s.tags); } catch { return []; } })(),
     backstory: s.backstory,
+    introduction: s.introduction || '',
     greetingMessage: s.greeting_message,
     customInstructions: s.custom_instructions,
     settings: (() => { try { return JSON.parse(s.settings); } catch { return {}; } })(),
@@ -324,17 +326,17 @@ export function saveScenarioTransaction(scenario) {
     const tagsJson = JSON.stringify(scenario.tags || []);
 
     if (existing) {
-      db.prepare(`UPDATE scenarios SET name=?, description=?, image=?, tags=?, backstory=?, greeting_message=?, custom_instructions=?, settings=?, creator_name=? WHERE id=?`)
+      db.prepare(`UPDATE scenarios SET name=?, description=?, image=?, tags=?, backstory=?, introduction=?, greeting_message=?, custom_instructions=?, settings=?, creator_name=? WHERE id=?`)
         .run(
           scenario.name, scenario.description || '', scenario.image || '', tagsJson,
-          scenario.backstory || '', scenario.greetingMessage || '', scenario.customInstructions || '',
+          scenario.backstory || '', scenario.introduction || '', scenario.greetingMessage || '', scenario.customInstructions || '',
           settingsJson, scenario.creatorName || '', scenario.id
         );
     } else {
-      db.prepare(`INSERT INTO scenarios (id, user_id, creator_name, name, description, image, tags, backstory, greeting_message, custom_instructions, settings, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      db.prepare(`INSERT INTO scenarios (id, user_id, creator_name, name, description, image, tags, backstory, introduction, greeting_message, custom_instructions, settings, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(
           scenario.id, scenario.userId, scenario.creatorName || '', scenario.name, scenario.description || '',
-          scenario.image || '', tagsJson, scenario.backstory || '', scenario.greetingMessage || '',
+          scenario.image || '', tagsJson, scenario.backstory || '', scenario.introduction || '', scenario.greetingMessage || '',
           scenario.customInstructions || '', settingsJson, scenario.createdAt || Date.now()
         );
     }

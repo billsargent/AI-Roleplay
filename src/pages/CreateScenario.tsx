@@ -15,7 +15,7 @@ import {
   X, Image as ImageIcon, Info, BookOpen, Brain, 
   Settings as SettingsIcon, Save, Plus, Trash2, 
   UserPlus, MessageSquare, ChevronLeft, Globe, Lock, Upload,
-  FileJson, Sparkles
+  FileJson, Sparkles, FileText
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { AiGeneratedScenarioData } from '../services/deepseek';
@@ -26,6 +26,7 @@ import { fileToBase64 } from '../utils/image';
 import { useLocation } from 'react-router-dom';
 import { useNotifications } from '../utils/notifications';
 import { AIGeneratorModal } from '../components/AIGeneratorModal';
+import { RichtextEditor } from '../components/RichtextEditor';
 
 
 export const CreateScenario: React.FC = () => {
@@ -414,6 +415,20 @@ export const CreateScenario: React.FC = () => {
                 <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Brief Summary</label>
                 <textarea className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 h-24 resize-none" placeholder={scenario.description ? "" : "A short hook to grab players' attention..."} value={scenario.description} onChange={e => updateScenario({ description: e.target.value })} />
               </div>
+            </div>
+          </section>
+
+          {/* Introduction: Rich Text Editor */}
+          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
+            <h2 className="text-xl font-bold flex items-center gap-3"><FileText className="text-amber-500" /> Introduction</h2>
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Engaging Story Introduction</label>
+              <p className="text-xs text-zinc-600 mb-4">Craft a rich, visually compelling introduction to set the scene. Use images, formatting, and layout to draw players in.</p>
+              <RichtextEditor
+                content={scenario.introduction || ''}
+                onChange={(html) => updateScenario({ introduction: html })}
+                placeholder="Write a captivating introduction for your story..."
+              />
             </div>
           </section>
 

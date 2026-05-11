@@ -23,7 +23,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { 
   Play, ChevronLeft, Calendar, User, 
   Book, Info, Settings as SettingsIcon,
-  Globe, Lock, ShieldAlert, Heart, X, Check, Trash2, Download
+  Globe, Lock, ShieldAlert, Heart, X, Check, Trash2, Download,
+  FileText
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
@@ -241,6 +242,20 @@ export const ScenarioDetail: React.FC = () => {
               "{scenario.description}"
             </p>
           </div>
+
+          {/* Introduction (rich text) — rendered conditionally */}
+          {scenario.introduction && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
+              <div className="flex items-center gap-3 border-b border-zinc-800 pb-4">
+                <FileText className="text-amber-500" size={24} />
+                <h2 className="text-xl font-bold text-white uppercase tracking-widest">Introduction</h2>
+              </div>
+              <div
+                className="prose prose-invert max-w-none [&_img]:rounded-xl [&_img]:max-h-96 [&_img]:w-auto"
+                dangerouslySetInnerHTML={{ __html: scenario.introduction }}
+              />
+            </div>
+          )}
 
           {/* The Backstory */}
           <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">

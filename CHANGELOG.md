@@ -1,5 +1,13 @@
 # Changelog
 
+## [v1.0.6] — 2026-05-11
+
+### Added
+- **Rich Text Editor (Introduction)** — A full-featured rich text editor (Tiptap) for creating an "Introduction" section in scenarios. Supports bold, italic, underline, headings (H1/H2/H3), bullet/ordered lists, blockquotes, text alignment, hyperlinks, embedded images (base64, 5MB limit), and undo/redo.
+- **Introduction Rendering** — The Introduction content (HTML with images and formatting) is rendered in `ScenarioDetail.tsx` between the Story Description and The Backstory sections. If no introduction is supplied, it is conditionally hidden.
+- **New Component: `RichtextEditor.tsx`** — Reusable Tiptap-based rich text editor with a floating BubbleMenu for inline formatting on text selection.
+- **Database Migration** — Added `introduction TEXT` column to the `scenarios` table for storing rich text HTML content.
+
 ## [v1.0.5] — 2026-05-11
 
 ### Added
