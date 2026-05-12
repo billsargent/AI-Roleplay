@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.0.7] — 2026-05-13
+
+### Fixed
+- **Scenario Export Missing Introduction & Cover Image** — The export function in `ScenarioDetail.tsx` now includes `customIntroduction` (rich HTML with embedded base64 images) and `mainImage` (cover image) so that the complete scenario — including formatted text and images — is preserved across export/import. Lore piece `avatarURL` was also fixed to use the actual avatar value instead of being hardcoded to `null`.
+
 ## [v1.0.6] — 2026-05-11
 
 ### Added
