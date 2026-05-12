@@ -413,6 +413,8 @@ export const ScenarioDetail: React.FC = () => {
                         customGreeting: s.greetingMessage || '',
                         customInstructions: s.customInstructions || '',
                         genres: s.tags,
+                        mainImage: s.image || null,
+                        customIntroduction: s.introduction || null,
                         lorePieces: s.lorePieces.map((lp: any) => ({
                           id: lp.id,
                           title: lp.title,
@@ -426,7 +428,7 @@ export const ScenarioDetail: React.FC = () => {
                           hidden: !!lp.hidden,
                           smartActivation: !!lp.smartActivation,
                           traits: [],
-                          avatarURL: null,
+                          avatarURL: lp.avatar || null,
                           isPlayable: false,
                         })),
                         characters: s.characters.map((c: any) => ({
