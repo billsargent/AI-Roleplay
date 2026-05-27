@@ -190,4 +190,6 @@ export interface LlmSettings {
   memoryWordCount?: string;
   /** Maximum number of memories to retain (oldest are trimmed) */
   memoryMaxCount?: string;
+  /** DeepSeek model ID to use for all AI requests (e.g., "deepseek-chat", "deepseek-reasoner") */
+  deepseekModel?: string;
 }

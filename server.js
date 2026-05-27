@@ -674,14 +674,16 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const memoryGenerateInterval = getSystemSetting('memoryGenerateInterval');
   const memoryWordCount = getSystemSetting('memoryWordCount');
   const memoryMaxCount = getSystemSetting('memoryMaxCount');
-  res.json({ deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount });
+  const deepseekModel = getSystemSetting('deepseekModel');
+  res.json({ deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel });
+
 
 
 });
 
 /** POST /api/system/settings — Updates system settings (admin only) */
 app.post('/api/system/settings', adminAuth, (req, res) => {
-  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount } = req.body;
+  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel } = req.body;
   if (deepseekKey !== undefined) setSystemSetting('deepseekKey', deepseekKey);
   if (globalInstructions !== undefined) setSystemSetting('globalInstructions', globalInstructions);
   if (temperature !== undefined) setSystemSetting('temperature', String(temperature));
@@ -698,6 +700,8 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   if (memoryGenerateInterval !== undefined) setSystemSetting('memoryGenerateInterval', String(memoryGenerateInterval));
   if (memoryWordCount !== undefined) setSystemSetting('memoryWordCount', String(memoryWordCount));
   if (memoryMaxCount !== undefined) setSystemSetting('memoryMaxCount', String(memoryMaxCount));
+  if (deepseekModel !== undefined) setSystemSetting('deepseekModel', deepseekModel);
+
   res.json({ success: true });
 
 
@@ -712,6 +716,37 @@ app.get('/api/system/deepseek-key', adminAuth, (req, res) => {
 // ─── DeepSeek Proxy Routes ───────────────────────────────────────────
 
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+
+/**
+ * GET /api/deepseek/models — Fetches available model IDs from DeepSeek API (admin only)
+ * This endpoint proxies DeepSeek's list-models endpoint:
+ * https://api-docs.deepseek.com/api/list-models
+ */
+app.get('/api/deepseek/models', adminAuth, async (req, res) => {
+  try {
+    const deepseekKey = getSystemSetting('deepseekKey');
+    if (!deepseekKey) {
+      return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+    }
+
+    const response = await fetch(`${DEEPSEEK_BASE_URL}/models`, {
+      headers: {
+        'Authorization': `Bearer ${deepseekKey}`,
+        'Accept': 'application/json',
+      },
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      return res.status(response.status).json({ error: data.error?.message || 'DeepSeek API error' });
+    }
+    res.json(data);
+  } catch (err) {
+    console.error('DeepSeek models fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch models from DeepSeek API' });
+  }
+});
+
 
 /**
  * POST /api/deepseek/chat — Proxies non-streaming chat to DeepSeek API
@@ -835,7 +870,7 @@ app.post('/api/deepseek/generate', auth, async (req, res) => {
     if (!deepseekKey) {
       return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
     }
-    const { messages, temperature, max_tokens } = req.body;
+    const { messages, model, temperature, max_tokens } = req.body;
 
     const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -844,7 +879,7 @@ app.post('/api/deepseek/generate', auth, async (req, res) => {
         'Authorization': `Bearer ${deepseekKey}`,
       },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: model || 'deepseek-chat',
         messages,
         temperature: temperature || 0.8,
         max_tokens: max_tokens || 4000,
@@ -879,7 +914,9 @@ app.get('/api/system/llm-settings', auth, (req, res) => {
   const memoryGenerateInterval = getSystemSetting('memoryGenerateInterval');
   const memoryWordCount = getSystemSetting('memoryWordCount');
   const memoryMaxCount = getSystemSetting('memoryMaxCount');
-  res.json({ globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount });
+  const deepseekModel = getSystemSetting('deepseekModel');
+  res.json({ globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel });
+
 
 
 });

@@ -45,6 +45,8 @@ interface BuildPromptResult {
   frequencyPenalty: number;
   /** Presence penalty (-2 to 2) */
   presencePenalty: number;
+  /** DeepSeek model ID (e.g., "deepseek-chat", "deepseek-reasoner") */
+  model: string;
 }
 
 /**
@@ -77,6 +79,7 @@ function preparePrompt(
   llmSettings: any
 ): BuildPromptResult {
   // Extract LLM parameters with sensible defaults
+  const model = llmSettings?.deepseekModel || 'deepseek-chat';
   const globalInstructions = llmSettings?.globalInstructions || 'Maintain immersive roleplay, focusing on sensory details and character consistency.';
   const temperature = llmSettings?.temperature ? parseFloat(llmSettings.temperature) : 0.9;
   const frequencyPenalty = llmSettings?.frequencyPenalty ? parseFloat(llmSettings.frequencyPenalty) : 0;
@@ -190,7 +193,7 @@ OUTPUT FORMATTING (MANDATORY — ALSO SYSTEM-ENFORCED):
 
   ];
 
-  return { apiMessages, responseTokens, temperature, frequencyPenalty, presencePenalty };
+  return { apiMessages, responseTokens, temperature, frequencyPenalty, presencePenalty, model };
 }
 
 /**
@@ -281,11 +284,15 @@ export const deepseek = {
    * @throws If the API call fails or the response JSON is invalid
    */
   async generateScenario(userDescription: string): Promise<AiGeneratedScenarioData> {
+    const llmSettings = await fetchLlmSettings();
+    const model = llmSettings?.deepseekModel || 'deepseek-chat';
+
     const response = await api.post('/deepseek/generate', {
       messages: [
         { role: 'system', content: SCENARIO_GENERATION_PROMPT },
         { role: 'user', content: userDescription }
       ],
+      model,
       temperature: 0.8,
       max_tokens: 4000,
     });
@@ -334,13 +341,14 @@ export const deepseek = {
    */
   async chat(messages: Message[], settings: ChatSettings, scenario: Scenario, chat: Chat): Promise<string> {
     const llmSettings = await fetchLlmSettings();
-    const { apiMessages, responseTokens, temperature, frequencyPenalty, presencePenalty } = preparePrompt(
+    const { apiMessages, responseTokens, temperature, frequencyPenalty, presencePenalty, model } = preparePrompt(
       messages, settings, scenario, chat, llmSettings
     );
 
     try {
       const response = await api.post('/deepseek/chat', {
         messages: apiMessages,
+        model,
         temperature,
         max_tokens: responseTokens,
         frequency_penalty: frequencyPenalty,
@@ -378,7 +386,7 @@ export const deepseek = {
     onChunk: (chunk: string) => void
   ): Promise<string> {
     const llmSettings = await fetchLlmSettings();
-    const { apiMessages, responseTokens, temperature, frequencyPenalty, presencePenalty } = preparePrompt(
+    const { apiMessages, responseTokens, temperature, frequencyPenalty, presencePenalty, model } = preparePrompt(
       messages, settings, scenario, chat, llmSettings
     );
 
@@ -394,6 +402,7 @@ export const deepseek = {
         },
         body: JSON.stringify({
           messages: apiMessages,
+          model,
           temperature,
           max_tokens: responseTokens,
           frequency_penalty: frequencyPenalty,
@@ -467,6 +476,9 @@ export const deepseek = {
     // Use the last 10 messages as context for memory generation
     const recentMessages = messages.slice(-10).map(m => `${m.role}: ${m.content}`).join('\n');
 
+    const llmSettings = await fetchLlmSettings();
+    const model = llmSettings?.deepseekModel || 'deepseek-chat';
+
     try {
       const response = await api.post('/deepseek/chat', {
         messages: [
@@ -476,6 +488,7 @@ export const deepseek = {
           },
           { role: 'user', content: recentMessages }
         ],
+        model,
         temperature: 0.5, // Low temperature for factual summarization
         max_tokens: Math.max(targetWords * 2, 100),
       });

@@ -16,10 +16,10 @@
  */
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { 
-  Key, Shield, BookOpen, Thermometer, Save, CheckCircle, 
-  ExternalLink, AlignLeft, Brain, ChevronLeft, Users, 
-  Settings, Cpu
+import {
+  Key, Shield, BookOpen, Thermometer, Save, CheckCircle,
+  ExternalLink, AlignLeft, Brain, ChevronLeft, Users,
+  Settings, Cpu, RefreshCw, Loader
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useNotifications } from '../utils/notifications';
@@ -60,6 +60,9 @@ export const AdminPage: React.FC = () => {
   const [memoryMaxCount, setMemoryMaxCount] = useState('50');
   const [frequencyPenalty, setFrequencyPenalty] = useState('0');
   const [presencePenalty, setPresencePenalty] = useState('0');
+  const [deepseekModel, setDeepseekModel] = useState('deepseek-chat');
+  const [availableModels, setAvailableModels] = useState<Array<{ id: string }>>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
 
   /** On mount: check admin role, load all saved settings */
   useEffect(() => {
@@ -90,12 +93,38 @@ export const AdminPage: React.FC = () => {
         setMemoryWordCount(settings.memoryWordCount || '100');
         setMemoryMaxCount(settings.memoryMaxCount || '50');
         setRateLimitMax(settings.rateLimitMax || '200');
+        setDeepseekModel(settings.deepseekModel || 'deepseek-chat');
       } catch (e) {
         console.error('Failed to load settings', e);
       }
     };
     loadSettings();
   }, [navigate]);
+
+  /** Fetch available model IDs from DeepSeek API */
+  const fetchModels = async () => {
+    setLoadingModels(true);
+    try {
+      const data = await apiService.getDeepseekModels();
+      if (data?.data && Array.isArray(data.data)) {
+        setAvailableModels(data.data);
+      } else {
+        showToast('No models returned from DeepSeek API', 'error');
+      }
+    } catch (err) {
+      console.error('Failed to fetch models:', err);
+      showToast('Failed to fetch available models. Check API key.', 'error');
+    } finally {
+      setLoadingModels(false);
+    }
+  };
+
+  /** Fetch models when switching to the LLM tab */
+  useEffect(() => {
+    if (activeTab === 'llm') {
+      fetchModels();
+    }
+  }, [activeTab]);
 
   /** Save only the DeepSeek API key */
   const handleSaveKey = async () => {
@@ -132,6 +161,7 @@ export const AdminPage: React.FC = () => {
         globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong,
         chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName,
         memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount,
+        deepseekModel,
       });
       setLlmSaved(true);
       setTimeout(() => setLlmSaved(false), 3000);
@@ -303,6 +333,48 @@ export const AdminPage: React.FC = () => {
               className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-4 text-sm text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[200px] font-mono leading-relaxed"
               placeholder={DEFAULT_GLOBAL_INSTRUCTIONS}
             />
+          </div>
+
+          {/* DeepSeek Model Selection */}
+          <div className="border-t border-zinc-800 pt-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-indigo-600/20 text-indigo-500 rounded-lg">
+                <Cpu size={20} />
+              </div>
+              <h3 className="text-lg font-bold text-white">AI Model</h3>
+            </div>
+            <div>
+              <label className="block text-sm font-bold text-zinc-400 mb-2">DeepSeek Model</label>
+              <div className="flex gap-2">
+                <select
+                  value={deepseekModel}
+                  onChange={(e) => setDeepseekModel(e.target.value)}
+                  className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none cursor-pointer"
+                >
+                  {availableModels.length > 0 ? (
+                    availableModels.map(m => (
+                      <option key={m.id} value={m.id}>{m.id}</option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="deepseek-chat">deepseek-chat</option>
+                      <option value="deepseek-reasoner">deepseek-reasoner</option>
+                    </>
+                  )}
+                </select>
+                <button
+                  onClick={fetchModels}
+                  disabled={loadingModels}
+                  className="bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-white px-4 rounded-xl font-bold transition-all flex items-center gap-2"
+                  title="Refresh model list from DeepSeek API"
+                >
+                  {loadingModels ? <Loader size={18} className="animate-spin" /> : <RefreshCw size={18} />}
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-zinc-500">
+                Select which DeepSeek model to use for all AI responses. Click refresh to fetch the latest available models from the DeepSeek API.
+              </p>
+            </div>
           </div>
 
           {/* LLM Parameters */}

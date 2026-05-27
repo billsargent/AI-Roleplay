@@ -223,6 +223,23 @@ export const apiService = {
     return response.data;
   },
 
+  // ── DeepSeek Models ──
+
+  /**
+   * Fetches available model IDs from the DeepSeek API.
+   * Admin-only endpoint that proxies DeepSeek's list-models API.
+   * @returns The DeepSeek API response with model data, or null on failure
+   */
+  getDeepseekModels: async () => {
+    try {
+      const response = await api.get('/deepseek/models');
+      return response.data;
+    } catch (e) {
+      console.error('Failed to fetch DeepSeek models:', e);
+      return null;
+    }
+  },
+
   // ── Scenarios ──
 
   /**
