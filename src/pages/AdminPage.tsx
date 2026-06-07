@@ -19,7 +19,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Key, Shield, BookOpen, Thermometer, Save, CheckCircle,
   ExternalLink, AlignLeft, Brain, ChevronLeft, Users,
-  Settings, Cpu, RefreshCw, Loader
+  Settings, Cpu, RefreshCw, Loader, Bug, Terminal
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useNotifications } from '../utils/notifications';
@@ -38,12 +38,14 @@ export const AdminPage: React.FC = () => {
   const [apiKeySaved, setApiKeySaved] = useState(false);
   const [siteNameSaved, setSiteNameSaved] = useState(false);
   const [llmSaved, setLlmSaved] = useState(false);
+  const [debugSaved, setDebugSaved] = useState(false);
 
   // ─── System settings ───
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [siteName, setSiteName] = useState('');
   const [rateLimitMax, setRateLimitMax] = useState('200');
+  const [debugLlmPrompt, setDebugLlmPrompt] = useState(false);
 
   // ─── LLM settings ───
   const [globalInstructions, setGlobalInstructions] = useState('');
@@ -94,6 +96,7 @@ export const AdminPage: React.FC = () => {
         setMemoryMaxCount(settings.memoryMaxCount || '50');
         setRateLimitMax(settings.rateLimitMax || '200');
         setDeepseekModel(settings.deepseekModel || 'deepseek-chat');
+        setDebugLlmPrompt(settings.debugLlmPrompt === 'true');
       } catch (e) {
         console.error('Failed to load settings', e);
       }
@@ -151,6 +154,19 @@ export const AdminPage: React.FC = () => {
     } catch (err) {
       console.error('Failed to save settings:', err);
       showToast('Failed to save settings', 'error');
+    }
+  };
+
+  /** Save the debug toggle setting */
+  const handleSaveDebug = async () => {
+    try {
+      await apiService.updateSystemSettings({ debugLlmPrompt });
+      setDebugSaved(true);
+      setTimeout(() => setDebugSaved(false), 3000);
+      showToast('Debug setting saved', 'success');
+    } catch (err) {
+      console.error('Failed to save debug setting:', err);
+      showToast('Failed to save debug setting', 'error');
     }
   };
 
@@ -308,6 +324,46 @@ export const AdminPage: React.FC = () => {
             >
               {siteNameSaved ? <CheckCircle size={20} /> : <Save size={20} />}
               {siteNameSaved ? 'Saved' : 'Save Settings'}
+            </button>
+          </section>
+
+          {/* LLM Debug Logging */}
+          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-6">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="p-2 bg-rose-600/20 text-rose-500 rounded-lg">
+                <Bug size={20} />
+              </div>
+              <h2 className="text-xl font-bold text-white">LLM Debug Logging</h2>
+            </div>
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <p className="text-sm font-bold text-zinc-300">Log LLM Prompt Payloads to Terminal</p>
+                <p className="text-xs text-zinc-500 mt-1 flex items-center gap-1">
+                  <Terminal size={12} />
+                  When enabled, every prompt sent to DeepSeek (full system instructions, conversation history,
+                  lore, memories, and LLM parameters) will be printed to the server terminal for debugging.
+                  Only applies to requests made by admin users.
+                </p>
+              </div>
+              <button
+                onClick={() => setDebugLlmPrompt(!debugLlmPrompt)}
+                className={`relative w-14 h-7 rounded-full transition-colors flex-shrink-0 ml-4 ${
+                  debugLlmPrompt ? 'bg-rose-600' : 'bg-zinc-700'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-transform ${
+                    debugLlmPrompt ? 'translate-x-7' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+            <button
+              onClick={handleSaveDebug}
+              className="w-full bg-rose-600 hover:bg-rose-700 text-white py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2"
+            >
+              {debugSaved ? <CheckCircle size={20} /> : <Save size={20} />}
+              {debugSaved ? 'Saved' : 'Save Debug Setting'}
             </button>
           </section>
         </div>

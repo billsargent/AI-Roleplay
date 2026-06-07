@@ -675,7 +675,8 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const memoryWordCount = getSystemSetting('memoryWordCount');
   const memoryMaxCount = getSystemSetting('memoryMaxCount');
   const deepseekModel = getSystemSetting('deepseekModel');
-  res.json({ deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel });
+  const debugLlmPrompt = getSystemSetting('debugLlmPrompt');
+  res.json({ deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt });
 
 
 
@@ -683,7 +684,7 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
 
 /** POST /api/system/settings — Updates system settings (admin only) */
 app.post('/api/system/settings', adminAuth, (req, res) => {
-  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel } = req.body;
+  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt } = req.body;
   if (deepseekKey !== undefined) setSystemSetting('deepseekKey', deepseekKey);
   if (globalInstructions !== undefined) setSystemSetting('globalInstructions', globalInstructions);
   if (temperature !== undefined) setSystemSetting('temperature', String(temperature));
@@ -701,6 +702,7 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   if (memoryWordCount !== undefined) setSystemSetting('memoryWordCount', String(memoryWordCount));
   if (memoryMaxCount !== undefined) setSystemSetting('memoryMaxCount', String(memoryMaxCount));
   if (deepseekModel !== undefined) setSystemSetting('deepseekModel', deepseekModel);
+  if (debugLlmPrompt !== undefined) setSystemSetting('debugLlmPrompt', debugLlmPrompt ? 'true' : 'false');
 
   res.json({ success: true });
 
@@ -712,6 +714,58 @@ app.get('/api/system/deepseek-key', adminAuth, (req, res) => {
   const deepseekKey = getSystemSetting('deepseekKey');
   res.json({ deepseekKey });
 });
+
+// ─── LLM Debug Logging Helper ────────────────────────────────────────
+
+/**
+ * Checks if LLM debug logging is enabled AND the requesting user is an admin.
+ * If both conditions are met, logs the full prompt payload to the console.
+ * 
+ * @param {string} userId - The user ID from the authenticated request
+ * @param {object} payload - The request body being sent to DeepSeek
+ * @param {string} endpoint - Label describing which endpoint is being called
+ */
+function debugLogLlmPrompt(userId, payload, endpoint) {
+  try {
+    const debugEnabled = getSystemSetting('debugLlmPrompt');
+    if (debugEnabled !== 'true') return;
+
+    const user = getUserById(userId);
+    if (user?.role !== 'admin') return;
+
+    const { messages, model, temperature, max_tokens, frequency_penalty, presence_penalty } = payload;
+
+    console.log('');
+    console.log('┌─────────────────────────────────────────────────────────────┐');
+    console.log(`│ 🔍 LLM DEBUG — ${endpoint.padEnd(40)}│`);
+    console.log('├─────────────────────────────────────────────────────────────┤');
+    console.log(`│ Model:            ${String(model || 'deepseek-chat').padEnd(37)}│`);
+    console.log(`│ Temperature:      ${String(temperature ?? 'N/A').padEnd(37)}│`);
+    console.log(`│ Max Tokens:       ${String(max_tokens ?? 'N/A').padEnd(37)}│`);
+    console.log(`│ Freq Penalty:     ${String(frequency_penalty ?? 'N/A').padEnd(37)}│`);
+    console.log(`│ Pres Penalty:     ${String(presence_penalty ?? 'N/A').padEnd(37)}│`);
+    console.log(`│ Messages Count:   ${String(messages?.length ?? 0).padEnd(37)}│`);
+    console.log('├─────────────────────────────────────────────────────────────┤');
+    console.log('│ FULL MESSAGES PAYLOAD:                                      │');
+    console.log('└─────────────────────────────────────────────────────────────┘');
+
+    if (messages && Array.isArray(messages)) {
+      messages.forEach((msg, i) => {
+        const role = msg.role || 'unknown';
+        const contentPreview = msg.content?.substring(0, 200) || '';
+        console.log(`  [${i}] role: ${role}`);
+        console.log(`       content: ${contentPreview}${msg.content?.length > 200 ? '...' : ''}`);
+        console.log('');
+      });
+    }
+
+    console.log('└─────────────────────────────────────────────────────────────┘');
+    console.log('');
+  } catch (err) {
+    // Debug logging should never break the actual request
+    console.error('Debug log error:', err);
+  }
+}
 
 // ─── DeepSeek Proxy Routes ───────────────────────────────────────────
 
@@ -760,6 +814,9 @@ app.post('/api/deepseek/chat', auth, async (req, res) => {
     }
     const { messages, model, temperature, max_tokens, frequency_penalty, presence_penalty } = req.body;
 
+    // Debug logging for admin users
+    debugLogLlmPrompt(req.userId, req.body, 'Chat');
+
     const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -798,6 +855,9 @@ app.post('/api/deepseek/chat/stream', auth, async (req, res) => {
       return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
     }
     const { messages, model, temperature, max_tokens, frequency_penalty, presence_penalty } = req.body;
+
+    // Debug logging for admin users
+    debugLogLlmPrompt(req.userId, req.body, 'Chat Stream');
 
     const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -871,6 +931,9 @@ app.post('/api/deepseek/generate', auth, async (req, res) => {
       return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
     }
     const { messages, model, temperature, max_tokens } = req.body;
+
+    // Debug logging for admin users
+    debugLogLlmPrompt(req.userId, req.body, 'Generate');
 
     const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
       method: 'POST',
