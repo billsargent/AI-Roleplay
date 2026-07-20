@@ -1,5 +1,24 @@
 # Changelog
 
+## [v1.0.8] - 2026-07-20
+
+### Added
+- **File-System Image Storage** - Images are no longer stored as base64 blobs in the SQLite database. Instead, they are extracted to the file system under uploads/{type}/{prefix}/{id}.{ext} with a 256-bucket directory structure.
+  - New database/images.js module with utilities: saveImage(), deleteImage(), copyImage(), readImage(), resolveImageUrl(), ensureUploadsDirs(), parseDataUrl(), relativePath()
+  - Schema migrations: image_path column on scenarios, avatar_path on characters, lore_pieces, and personas
+  - Automatic image extraction on save: saveScenarioTransaction() and upsertPersona() now extract base64 images to disk and store the relative path
+  - Image cleanup on delete: permanentlyDeleteScenarioById() and deletePersonaById() clean up associated image files
+- **Image Serving Endpoint** - GET /api/images/* serves uploaded images with 1-year immutable cache headers. Placed before the rate limiter for performance.
+- **One-Time Migration Script** - scripts/migrate-images.js migrates existing base64 blobs from scenarios.image, characters.avatar, and personas.avatar to the file system, then clears the base64 from the database.
+- **Introduction Embedded Image Migration** - The migration script also extracts embedded base64 images from the rich-text scenarios.introduction HTML field, replacing data URLs with /api/images/embedded/ paths. New extractIntroImages() and cleanupIntroImages() functions handle this on future saves and permanent deletes.
+- **Top Pagination** - Pagination controls (Previous/Page X of Y/Next) now appear at both the top and bottom of the scenario grid on the Home page.
+
+### Changed
+- **.gitignore** - Added uploads/ and *.tar.gz to prevent user-generated images and backup archives from being committed to the repository.
+
+### Fixed
+- **Cross-platform image paths** - Embedded image URLs in introductions now include the correct prefix subdirectory (e.g., /api/images/embedded/78/abc...webp instead of /api/images/embedded/abc...webp), fixing broken images on all platforms.
+
 ## [v1.0.7] — 2026-05-13
 
 ### Fixed

@@ -9,6 +9,8 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
+import { saveImage, deleteImage, copyImage, resolveImageUrl, parseDataUrl, relativePath } from './images.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -148,6 +150,11 @@ function initTables() {
   try { db.exec(`ALTER TABLE scenarios ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
   try { db.exec(`ALTER TABLE chats ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
   try { db.exec(`ALTER TABLE scenarios ADD COLUMN introduction TEXT DEFAULT ''`); } catch {}
+  // ── Image path columns (file-system storage) ──
+  try { db.exec(`ALTER TABLE scenarios ADD COLUMN image_path TEXT DEFAULT ''`); } catch {}
+  try { db.exec(`ALTER TABLE characters ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
+  try { db.exec(`ALTER TABLE lore_pieces ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
+  try { db.exec(`ALTER TABLE personas ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
 }
 
 // ─── Users ────────────────────────────────────────────────────────────
@@ -177,9 +184,15 @@ export function getUserById(id) {
 export function getUserWithPersonas(id) {
   const user = db.prepare(`SELECT id, username, role, created_at FROM users WHERE id = ?`).get(id);
   if (!user) return null;
-  user.personas = db.prepare(`SELECT * FROM personas WHERE user_id = ?`).all(id);
+  const personas = db.prepare(`SELECT * FROM personas WHERE user_id = ?`).all(id);
+  user.personas = personas.map(p => ({
+    ...p,
+    avatar: p.avatar_path ? `/api/images/${p.avatar_path.replace(/\\/g, '/')}` : (p.avatar || ''),
+    avatarPath: p.avatar_path || '',
+  }));
   return user;
 }
+
 
 /**
  * Gets all real users (excluding the internal 'system' user) ordered by creation date.
@@ -215,38 +228,62 @@ export function deleteUserById(id) {
 
 // ─── Personas ─────────────────────────────────────────────────────────
 
-/** Gets all personas owned by a specific user */
+/** Gets all personas owned by a specific user, resolving avatar paths to URLs */
 export function getPersonasByUserId(userId) {
-  return db.prepare(`SELECT * FROM personas WHERE user_id = ?`).all(userId);
+  const personas = db.prepare(`SELECT * FROM personas WHERE user_id = ?`).all(userId);
+  return personas.map(p => ({
+    ...p,
+    avatar: p.avatar_path ? `/api/images/${p.avatar_path.replace(/\\/g, '/')}` : (p.avatar || ''),
+    avatarPath: p.avatar_path || '',
+  }));
 }
+
 
 /**
  * Creates or updates a persona. If the persona ID exists it updates, otherwise inserts.
+ * Handles avatar extraction from base64 data URLs to file system storage.
  * @param {Object} persona - Persona object with id, userId, name, description, avatar
  */
 export function upsertPersona(persona) {
-  const existing = db.prepare(`SELECT id FROM personas WHERE id = ?`).get(persona.id);
+  const existing = db.prepare(`SELECT id, avatar_path FROM personas WHERE id = ?`).get(persona.id);
+
+  // ── Extract avatar to file system ──
+  let avatarPath = existing?.avatar_path || '';
+  if (persona.avatar && persona.avatar.startsWith('data:image/')) {
+    // Delete old avatar file if exists
+    if (existing?.avatar_path) deleteImage(existing.avatar_path);
+    const saved = saveImage(persona.avatar, 'personas', persona.id);
+    if (saved) avatarPath = saved;
+  } else if (persona.avatar && persona.avatar.startsWith('/api/images/')) {
+    avatarPath = persona.avatar.replace('/api/images/', '');
+  }
+
   if (existing) {
-    db.prepare(`UPDATE personas SET name = ?, description = ?, avatar = ? WHERE id = ?`)
-      .run(persona.name, persona.description || '', persona.avatar || '', persona.id);
+    db.prepare(`UPDATE personas SET name = ?, description = ?, avatar = ?, avatar_path = ? WHERE id = ?`)
+      .run(persona.name, persona.description || '', persona.avatar || '', avatarPath, persona.id);
   } else {
-    db.prepare(`INSERT INTO personas (id, user_id, name, description, avatar) VALUES (?, ?, ?, ?, ?)`)
-      .run(persona.id, persona.userId, persona.name, persona.description || '', persona.avatar || '');
+    db.prepare(`INSERT INTO personas (id, user_id, name, description, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(persona.id, persona.userId, persona.name, persona.description || '', persona.avatar || '', avatarPath);
   }
   return persona;
 }
 
+
 /**
  * Deletes a persona only if the requesting user is the owner.
+ * Also cleans up the avatar file from disk.
  * @returns {boolean} Whether the deletion was performed
  */
 export function deletePersonaById(personaId, userId) {
   const p = db.prepare(`SELECT * FROM personas WHERE id = ?`).get(personaId);
   if (!p) return false;
   if (p.user_id !== userId) return false;
+  // Clean up avatar file
+  if (p.avatar_path) deleteImage(p.avatar_path);
   db.prepare(`DELETE FROM personas WHERE id = ?`).run(personaId);
   return true;
 }
+
 
 // ─── Scenarios ────────────────────────────────────────────────────────
 
@@ -261,7 +298,8 @@ function scenarioToCamelCase(s) {
     creatorName: s.creator_name,
     name: s.name,
     description: s.description,
-    image: s.image,
+    image: s.image_path ? `/api/images/${s.image_path.replace(/\\/g, '/')}` : (s.image || ''),
+    imagePath: s.image_path || '',
     tags: (() => { try { return JSON.parse(s.tags); } catch { return []; } })(),
     backstory: s.backstory,
     introduction: s.introduction || '',
@@ -272,10 +310,36 @@ function scenarioToCamelCase(s) {
   };
 }
 
+/** Columns needed for scenario list cards (excludes heavy content fields) */
+const SCENARIO_LIST_COLUMNS = `
+  id, user_id, creator_name, name, description,
+  image_path, tags, settings, created_at
+`;
+
+/**
+ * Lightweight mapper for scenario list display — excludes heavy content
+ * fields (backstory, introduction, greeting_message, custom_instructions)
+ * that are not shown on explore/list cards.
+ */
+function scenarioToListCamelCase(s) {
+  return {
+    id: s.id,
+    userId: s.user_id,
+    creatorName: s.creator_name,
+    name: s.name,
+    description: s.description,
+    image: s.image_path ? `/api/images/${s.image_path.replace(/\\/g, '/')}` : '',
+    imagePath: s.image_path || '',
+    tags: (() => { try { return JSON.parse(s.tags); } catch { return []; } })(),
+    settings: (() => { try { return JSON.parse(s.settings); } catch { return {}; } })(),
+    createdAt: s.created_at,
+  };
+}
+
 /** Gets all scenarios (admin use) — excludes soft-deleted items */
 export function getAllScenarios() {
-  const scenarios = db.prepare(`SELECT * FROM scenarios WHERE deleted_at IS NULL ORDER BY created_at DESC`).all();
-  return scenarios.map(scenarioToCamelCase);
+  const scenarios = db.prepare(`SELECT ${SCENARIO_LIST_COLUMNS} FROM scenarios WHERE deleted_at IS NULL ORDER BY created_at DESC`).all();
+  return scenarios.map(scenarioToListCamelCase);
 }
 
 /**
@@ -283,8 +347,8 @@ export function getAllScenarios() {
  * This ensures users only see scenarios they have access to.
  */
 export function getAccessibleScenarios(userId) {
-  const scenarios = db.prepare(`SELECT * FROM scenarios WHERE (json_extract(settings, '$.isPublic') = 1 OR user_id = ?) AND deleted_at IS NULL ORDER BY created_at DESC`).all(userId);
-  return scenarios.map(scenarioToCamelCase);
+  const scenarios = db.prepare(`SELECT ${SCENARIO_LIST_COLUMNS} FROM scenarios WHERE (json_extract(settings, '$.isPublic') = 1 OR user_id = ?) AND deleted_at IS NULL ORDER BY created_at DESC`).all(userId);
+  return scenarios.map(scenarioToListCamelCase);
 }
 
 /**
@@ -299,9 +363,15 @@ export function getScenarioById(id) {
   const lorePieces = db.prepare(`SELECT * FROM lore_pieces WHERE scenario_id = ?`).all(id);
 
   const scenario = scenarioToCamelCase(raw);
-  scenario.characters = characters;
+  scenario.characters = characters.map(c => ({
+    ...c,
+    avatar: c.avatar_path ? `/api/images/${c.avatar_path.replace(/\\/g, '/')}` : (c.avatar || ''),
+    avatarPath: c.avatar_path || '',
+  }));
   scenario.lorePieces = lorePieces.map(p => ({
     ...p,
+    avatar: p.avatar_path ? `/api/images/${p.avatar_path.replace(/\\/g, '/')}` : (p.avatar || ''),
+    avatarPath: p.avatar_path || '',
     pinned: !!p.pinned,
     smartActivation: !!p.smart_activation,
     playable: !!p.playable,
@@ -318,48 +388,98 @@ export function getScenarioById(id) {
  * If the scenario exists it updates; otherwise inserts.
  * Then replaces all associated characters and lore pieces (delete + re-insert).
  * This atomic approach ensures data consistency.
+ *
+ * Images are extracted from base64 data URLs and saved to the file system,
+ * with the relative path stored in the image_path / avatar_path columns.
+ * The original image/avatar fields remain (they may still hold base64 for
+ * legacy data until the migration script clears them).
  */
 export function saveScenarioTransaction(scenario) {
   const transaction = db.transaction(() => {
-    const existing = db.prepare(`SELECT id FROM scenarios WHERE id = ?`).get(scenario.id);
+    const existing = db.prepare(`SELECT id, image_path FROM scenarios WHERE id = ?`).get(scenario.id);
     const settingsJson = JSON.stringify(scenario.settings || {});
     const tagsJson = JSON.stringify(scenario.tags || []);
 
+    // ── Extract scenario image to file system ──
+    let imagePath = existing?.image_path || '';
+    if (scenario.image && scenario.image.startsWith('data:image/')) {
+      // New base64 image — save to disk
+      const saved = saveImage(scenario.image, 'scenarios', scenario.id);
+      if (saved) {
+        imagePath = saved;
+        // keep image field as base64 for now (migration will clear it later)
+      }
+    } else if (scenario.image && scenario.image.startsWith('/api/images/')) {
+      // Already a URL — extract path from it
+      imagePath = scenario.image.replace('/api/images/', '');
+    }
+    // If image is a plain URL (e.g., Unsplash), keep it in image field — no file to save
+
     if (existing) {
-      db.prepare(`UPDATE scenarios SET name=?, description=?, image=?, tags=?, backstory=?, introduction=?, greeting_message=?, custom_instructions=?, settings=?, creator_name=? WHERE id=?`)
+      db.prepare(`UPDATE scenarios SET name=?, description=?, image=?, image_path=?, tags=?, backstory=?, introduction=?, greeting_message=?, custom_instructions=?, settings=?, creator_name=? WHERE id=?`)
         .run(
-          scenario.name, scenario.description || '', scenario.image || '', tagsJson,
-          scenario.backstory || '', scenario.introduction || '', scenario.greetingMessage || '', scenario.customInstructions || '',
+          scenario.name, scenario.description || '', scenario.image || '', imagePath, tagsJson,
+          scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '', scenario.customInstructions || '',
           settingsJson, scenario.creatorName || '', scenario.id
         );
     } else {
-      db.prepare(`INSERT INTO scenarios (id, user_id, creator_name, name, description, image, tags, backstory, introduction, greeting_message, custom_instructions, settings, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      db.prepare(`INSERT INTO scenarios (id, user_id, creator_name, name, description, image, image_path, tags, backstory, introduction, greeting_message, custom_instructions, settings, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(
           scenario.id, scenario.userId, scenario.creatorName || '', scenario.name, scenario.description || '',
-          scenario.image || '', tagsJson, scenario.backstory || '', scenario.introduction || '', scenario.greetingMessage || '',
+          scenario.image || '', imagePath, tagsJson, scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '',
           scenario.customInstructions || '', settingsJson, scenario.createdAt || Date.now()
         );
+    }
+
+    // ── Delete old character avatar files (if scenario already existed) ──
+    if (existing) {
+      const oldChars = db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenario.id);
+      for (const oc of oldChars) {
+        if (oc.avatar_path) deleteImage(oc.avatar_path);
+      }
     }
 
     // Replace all characters for this scenario (delete old, insert new)
     db.prepare(`DELETE FROM characters WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.characters && scenario.characters.length > 0) {
-      const insertChar = db.prepare(`INSERT OR REPLACE INTO characters (id, scenario_id, name, description, personality, avatar) VALUES (?, ?, ?, ?, ?, ?)`);
+      const insertChar = db.prepare(`INSERT OR REPLACE INTO characters (id, scenario_id, name, description, personality, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?)`);
       for (const c of scenario.characters) {
-        insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', c.avatar || '');
+        let charAvatarPath = '';
+        if (c.avatar && c.avatar.startsWith('data:image/')) {
+          const saved = saveImage(c.avatar, 'characters', c.id);
+          if (saved) charAvatarPath = saved;
+        } else if (c.avatar && c.avatar.startsWith('/api/images/')) {
+          charAvatarPath = c.avatar.replace('/api/images/', '');
+        }
+        insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', c.avatar || '', charAvatarPath);
+      }
+    }
+
+    // ── Delete old lore piece avatar files ──
+    if (existing) {
+      const oldLore = db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenario.id);
+      for (const ol of oldLore) {
+        if (ol.avatar_path) deleteImage(ol.avatar_path);
       }
     }
 
     // Replace all lore pieces for this scenario
     db.prepare(`DELETE FROM lore_pieces WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.lorePieces && scenario.lorePieces.length > 0) {
-      const insertLore = db.prepare(`INSERT OR REPLACE INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insertLore = db.prepare(`INSERT OR REPLACE INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const p of scenario.lorePieces) {
+        let loreAvatarPath = '';
+        if (p.avatar && p.avatar.startsWith('data:image/')) {
+          const saved = saveImage(p.avatar, 'lore-pieces', p.id);
+          if (saved) loreAvatarPath = saved;
+        } else if (p.avatar && p.avatar.startsWith('/api/images/')) {
+          loreAvatarPath = p.avatar.replace('/api/images/', '');
+        }
         insertLore.run(
           p.id, scenario.id, p.type || 'other', p.title || '', p.content || '', p.weight || 100,
           p.pinned ? 1 : 0, p.smartActivation ? 1 : 0,
           JSON.stringify(p.triggers || []), JSON.stringify(p.linkedPieces || []),
-          p.playable ? 1 : 0, p.hidden ? 1 : 0
+          p.playable ? 1 : 0, p.hidden ? 1 : 0, loreAvatarPath
         );
       }
     }
@@ -368,6 +488,7 @@ export function saveScenarioTransaction(scenario) {
   transaction();
   return scenario;
 }
+
 
 /** Soft-deletes a scenario by setting deleted_at timestamp (moves to trash) */
 export function deleteScenarioById(id) {
@@ -385,16 +506,39 @@ export function restoreScenarioById(id) {
   db.prepare(`UPDATE scenarios SET deleted_at = NULL WHERE id = ?`).run(id);
 }
 
-/** Permanently deletes a scenario from the database (final deletion after trash) */
+/** Permanently deletes a scenario and all its associated image files from disk (final deletion after trash) */
 export function permanentlyDeleteScenarioById(id) {
+  // Clean up scenario image file
+  const scenarioImage = db.prepare(`SELECT image_path FROM scenarios WHERE id = ?`).get(id);
+  if (scenarioImage?.image_path) deleteImage(scenarioImage.image_path);
+
+  // Clean up character avatar files
+  const charAvatars = db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(id);
+  for (const ca of charAvatars) {
+    if (ca.avatar_path) deleteImage(ca.avatar_path);
+  }
+
+  // Clean up lore piece avatar files
+  const loreAvatars = db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(id);
+  for (const la of loreAvatars) {
+    if (la.avatar_path) deleteImage(la.avatar_path);
+  }
+
   // Orphan all chats referencing this scenario so they remain accessible in read-only mode
   db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id = ?`).run(id);
   // Then safely delete the scenario (no cascade — FK was removed)
   db.prepare(`DELETE FROM scenarios WHERE id = ?`).run(id);
 }
 
+
 /** Permanently deletes all soft-deleted scenarios for a user (empties trash) */
 export function emptyScenarioTrashByUserId(userId) {
+  // Clean up image files for all trashed scenarios
+  const trashed = db.prepare(`SELECT id FROM scenarios WHERE user_id = ? AND deleted_at IS NOT NULL`).all(userId);
+  for (const ts of trashed) {
+    cleanupScenarioImages(ts.id);
+  }
+
   // Orphan all chats referencing these scenarios so they remain accessible in read-only mode
   db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id IN (SELECT id FROM scenarios WHERE user_id = ? AND deleted_at IS NOT NULL)`).run(userId);
   db.prepare(`DELETE FROM scenarios WHERE user_id = ? AND deleted_at IS NOT NULL`).run(userId);
@@ -403,10 +547,73 @@ export function emptyScenarioTrashByUserId(userId) {
 /** Permanently deletes scenarios that have been in the trash for more than the specified number of days */
 export function purgeExpiredScenarioTrash(daysOld = 30) {
   const cutoff = Date.now() - (daysOld * 24 * 60 * 60 * 1000);
+
+  // Clean up image files for all expired scenarios
+  const expired = db.prepare(`SELECT id FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?`).all(cutoff);
+  for (const es of expired) {
+    cleanupScenarioImages(es.id);
+  }
+
   // Orphan all chats referencing expired scenarios first
   db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id IN (SELECT id FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?)`).run(cutoff);
   db.prepare(`DELETE FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff);
 }
+
+/**
+ * Helper: cleans up all image files (scenario image + character avatars + lore piece avatars)
+ * associated with a given scenario ID. Used before permanent deletion.
+ * @param {string} scenarioId
+ */
+function cleanupScenarioImages(scenarioId) {
+  const scenarioImage = db.prepare(`SELECT image_path FROM scenarios WHERE id = ?`).get(scenarioId);
+  if (scenarioImage?.image_path) deleteImage(scenarioImage.image_path);
+
+  const charAvatars = db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenarioId);
+  for (const ca of charAvatars) {
+    if (ca.avatar_path) deleteImage(ca.avatar_path);
+  }
+
+  // Clean up embedded introduction images
+  cleanupIntroImages(scenarioId);
+
+  const loreAvatars = db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenarioId);
+  for (const la of loreAvatars) {
+    if (la.avatar_path) deleteImage(la.avatar_path);
+  }
+}
+
+/**
+ * Extracts embedded base64 images from the scenario introduction (rich HTML)
+ * and saves them to the file system, replacing data URLs with /api/images/ URLs.
+ */
+function extractIntroImages(scenarioId, introduction) {
+  if (!introduction || !introduction.includes("data:image/")) {
+    return introduction || "";
+  }
+  return introduction.replace(/<img[^>]*src="(data:image\/[^"]+)"/gi, function(match, dataUrl) {
+    var parsed = parseDataUrl(dataUrl);
+    if (!parsed) return match;
+    var hash = crypto.createHash("md5").update(dataUrl).digest("hex");
+    var embeddedId = scenarioId.substring(0, 14) + "_" + hash.substring(0, 12);
+    var saved = saveImage(dataUrl, "embedded", embeddedId);
+    if (saved) {
+      return match.replace(dataUrl, "/api/images/" + relativePath("embedded", embeddedId, parsed.ext));
+    }
+    return match;
+  });
+}
+
+function cleanupIntroImages(scenarioId) {
+  var scenario = db.prepare("SELECT introduction FROM scenarios WHERE id = ?").get(scenarioId);
+  if (!scenario || !scenario.introduction) return;
+  var urls = scenario.introduction.match(/\/api\/images\/embedded\/[^"']+/g);
+  if (!urls) return;
+  for (var i = 0; i < urls.length; i++) {
+    deleteImage(urls[i].replace("/api/images/", ""));
+  }
+}
+
+
 
 // ─── Chats ────────────────────────────────────────────────────────────
 

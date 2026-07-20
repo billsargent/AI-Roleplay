@@ -7,5 +7,5 @@ dist/
 .DS_Store
 *.log
 package-lock.json
-
-
+uploads/
+*.tar.gz

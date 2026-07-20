@@ -14,14 +14,15 @@
  * - Delete button (visible to owner or admin): confirmation dialog then delete
  * - Logout button in the header bar
  * - "Create" button to open the scenario editor
+ * - Pagination with page navigation controls (20 per page)
  *
  * Security: private/non-public scenarios are never shown in Explore — they are
  * only ever visible in the "My Private" tab to the scenario owner (and admins).
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Play, Plus, BookOpen, Trash2, LogOut } from 'lucide-react';
+import { Search, Play, Plus, BookOpen, Trash2, LogOut, ChevronLeft, ChevronRight } from 'lucide-react';
 
 import { apiService } from '../services/api';
 import { Scenario } from '../types';
@@ -30,28 +31,42 @@ import { useNotifications } from '../utils/notifications';
 /** Reads the cached site name from localStorage (set by admin via AdminPage) */
 const getCachedSiteName = (): string => localStorage.getItem('fl_siteName') || 'AI Roleplay';
 
+/** Number of scenarios per page */
+const PAGE_SIZE = 20;
+
 export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSiteName() }) => {
   const { showToast, showConfirm } = useNotifications();
 
-  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [allScenarios, setAllScenarios] = useState<Scenario[]>([]);
+  const [page, setPage] = useState(1);
+  const [totalScenarios, setTotalScenarios] = useState(0);
   const [search, setSearch] = useState('');
   const [activeTab, setActiveTab] = useState<'explore' | 'mine-public' | 'mine-private'>('explore');
   const navigate = useNavigate();
   const user = apiService.getCurrentUser();
 
-  /** Fetch all accessible scenarios from the API */
-  const loadScenarios = async () => {
+  const totalPages = Math.ceil(totalScenarios / PAGE_SIZE);
+
+  /** Fetch scenarios from the API */
+  const loadScenarios = useCallback(async (pageNum: number = 1) => {
     try {
-      const fetched = await apiService.getScenarios();
-      setScenarios(fetched);
+      const data = await apiService.getScenarios(pageNum, PAGE_SIZE);
+      if (data && Array.isArray(data.scenarios)) {
+        setAllScenarios(data.scenarios);
+        setTotalScenarios(data.pagination?.total || 0);
+      } else if (Array.isArray(data)) {
+        // Fallback: if server doesn't support pagination yet, handle plain array
+        setAllScenarios(data);
+        setTotalScenarios(data.length);
+      }
     } catch (e) {
       console.error('Failed to load scenarios', e);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    loadScenarios();
-  }, []);
+    loadScenarios(page);
+  }, [page, loadScenarios]);
 
   /** Delete a scenario after confirmation. Requires ownership or admin role. */
   const handleDelete = async (e: React.MouseEvent, id: string) => {
@@ -59,7 +74,8 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
     if (await showConfirm('Are you sure you want to delete this scenario?')) {
       try {
         await apiService.deleteScenario(id);
-        setScenarios(prev => prev.filter(s => s.id !== id));
+        setAllScenarios(prev => prev.filter(s => s.id !== id));
+        setTotalScenarios(prev => prev - 1);
       } catch (err) {
         showToast('Failed to delete scenario', 'error');
       }
@@ -70,7 +86,7 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
    *  - 'explore' tab: show all public scenarios from everyone (including own)
    *  - 'mine-public' tab: show only the current user's public scenarios
    *  - 'mine-private' tab: show only the current user's private (non-public) scenarios */
-  const filteredScenarios = scenarios.filter(s => {
+  const filteredScenarios = allScenarios.filter(s => {
     const matchesSearch = s.name.toLowerCase().includes(search.toLowerCase()) ||
       s.description.toLowerCase().includes(search.toLowerCase()) ||
       s.creatorName?.toLowerCase().includes(search.toLowerCase()) ||
@@ -90,6 +106,16 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
   /** Navigate to the scenario detail page */
   const startScenario = (scenario: Scenario) => {
     navigate(`/scenario/${scenario.id}`);
+  };
+
+  /** Go to previous page */
+  const prevPage = () => {
+    if (page > 1) setPage(page - 1);
+  };
+
+  /** Go to next page */
+  const nextPage = () => {
+    if (page < totalPages) setPage(page + 1);
   };
 
   return (
@@ -126,19 +152,19 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
       <div className="flex items-center gap-4 mb-6">
         <div className="flex bg-zinc-900 p-1 rounded-xl border border-zinc-800">
           <button 
-            onClick={() => setActiveTab('explore')}
+            onClick={() => { setActiveTab('explore'); setPage(1); }}
             className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'explore' ? 'bg-zinc-800 text-white shadow-lg' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
             Explore
           </button>
           <button 
-            onClick={() => setActiveTab('mine-public')}
+            onClick={() => { setActiveTab('mine-public'); setPage(1); }}
             className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'mine-public' ? 'bg-zinc-800 text-white shadow-lg' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
             My Public
           </button>
           <button 
-            onClick={() => setActiveTab('mine-private')}
+            onClick={() => { setActiveTab('mine-private'); setPage(1); }}
             className={`px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'mine-private' ? 'bg-zinc-800 text-white shadow-lg' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
             My Private
@@ -157,6 +183,32 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
           onChange={(e) => setSearch(e.target.value)}
         />
       </div>
+      {/* --- Pagination Controls (top) --- */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-4 mb-6">
+          <button
+            onClick={prevPage}
+            disabled={page <= 1}
+            className="bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl flex items-center gap-2 transition-all active:scale-95"
+          >
+            <ChevronLeft size={18} />
+            <span>Previous</span>
+          </button>
+          <span className="text-zinc-400 text-sm">
+            Page {page} of {totalPages}
+            <span className="text-zinc-600 ml-2">({totalScenarios} total)</span>
+          </span>
+          <button
+            onClick={nextPage}
+            disabled={page >= totalPages}
+            className="bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl flex items-center gap-2 transition-all active:scale-95"
+          >
+            <span>Next</span>
+            <ChevronRight size={18} />
+          </button>
+        </div>
+      )}
+
 
       {/* ─── Scenario Grid ─── */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -171,6 +223,7 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
               <img 
                 src={scenario.image || "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='450'%3E%3Crect fill='%23d1d5db' width='800' height='450'/%3E%3C/svg%3E"}
                 alt={scenario.name}
+                loading="lazy"
                 className="w-full h-full object-contain bg-zinc-950 group-hover:scale-105 transition-transform duration-500"
               />
               {/* Gradient overlay for readability */}
@@ -224,6 +277,32 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
           </div>
         ))}
       </div>
+
+      {/* ─── Pagination Controls (bottom) ─── */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-4 mt-8">
+          <button
+            onClick={prevPage}
+            disabled={page <= 1}
+            className="bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl flex items-center gap-2 transition-all active:scale-95"
+          >
+            <ChevronLeft size={18} />
+            <span>Previous</span>
+          </button>
+          <span className="text-zinc-400 text-sm">
+            Page {page} of {totalPages}
+            <span className="text-zinc-600 ml-2">({totalScenarios} total)</span>
+          </span>
+          <button
+            onClick={nextPage}
+            disabled={page >= totalPages}
+            className="bg-zinc-900 border border-zinc-800 hover:border-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl flex items-center gap-2 transition-all active:scale-95"
+          >
+            <span>Next</span>
+            <ChevronRight size={18} />
+          </button>
+        </div>
+      )}
     </div>
   );
 };

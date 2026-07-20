@@ -243,16 +243,18 @@ export const apiService = {
   // ── Scenarios ──
 
   /**
-   * Fetches all scenarios accessible to the current user.
-   * @returns Array of scenario objects (empty on failure)
+   * Fetches scenarios accessible to the current user with pagination.
+   * @param page - Page number (1-based, defaults to 1)
+   * @param limit - Items per page (defaults to 50, max 100)
+   * @returns Object with `scenarios` array and `pagination` metadata
    */
-  getScenarios: async () => {
+  getScenarios: async (page: number = 1, limit: number = 50) => {
     try {
-      const response = await api.get('/scenarios');
+      const response = await api.get(`/scenarios?page=${page}&limit=${limit}`);
       return response.data;
     } catch (e) {
       console.error('Failed to fetch scenarios', e);
-      return [];
+      return { scenarios: [], pagination: { page: 1, limit, total: 0, totalPages: 0 } };
     }
   },
 

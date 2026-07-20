@@ -57,6 +57,8 @@ import {
   seedDefaultScenariosIfEmpty,
 } from './database/index.js';
 
+import { ensureUploadsDirs, saveImage, deleteImage, readImage } from './database/images.js';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -67,6 +69,49 @@ const PORT = process.env.PORT || 3000;
 // Generate a random JWT secret if one isn't provided via environment variable
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
 
+// ─── Image Serving Endpoint (BEFORE rate limiter for performance) ─────
+
+/**
+ * GET /api/images/*
+ * Serves uploaded image files from the filesystem.
+ * Path format: /api/images/{entityType}/{prefix}/{id}.{ext}
+ * 
+ * Images are public by design — access control is enforced at the
+ * entity level (scenarios, characters, etc.) through the API.
+ * 
+ * Sets a long cache duration (1 year, immutable) since uploaded images
+ * never change (they get new paths on update via the delete+recreate pattern).
+ * 
+ * NOTE: Using app.use() with mount path to avoid path-to-regexp v8 issues.
+ * The bundled version in Express 5's router (v8.4.2) dropped support for
+ * both bare * wildcards and the + modifier syntax. With app.use(), Express
+ * strips the mount prefix and the remaining path is in req.path.
+ * 
+ * This is placed BEFORE the rate limiter to skip 95+ unnecessary JWT
+ * verifications + DB lookups on every page load.
+ */
+app.use('/api/images/', (req, res) => {
+  // Only handle GET requests
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  // Extract the relative path after /api/images/ (strip leading /)
+  const relPath = req.path.replace(/^\//, '');
+  if (!relPath) {
+    return res.status(400).json({ error: 'Invalid image path' });
+  }
+
+  const image = readImage(relPath);
+  if (!image) {
+    return res.status(404).json({ error: 'Image not found' });
+  }
+
+  res.setHeader('Content-Type', image.contentType);
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.send(image.buffer);
+});
+
 // ─── Security Middleware ───────────────────────────────────────────────
 
 app.use(helmet({
@@ -75,7 +120,8 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      imgSrc: ["'self'", "data:", "block:", "https://images.unsplash.com", "https://*.unsplash.com"],
+      imgSrc: ["'self'", "data:", "block:", "https://images.unsplash.com", "https://*.unsplash.com", "/api/images/"],
+
       fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
       connectSrc: ["'self'", "https://api.deepseek.com"],
       frameSrc: ["'none'"],
@@ -141,9 +187,10 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Initialize database and seed default scenarios on startup
+// Initialize database, seed default scenarios, and create upload directories
 getDb();
 seedDefaultScenariosIfEmpty();
+ensureUploadsDirs();
 
 // ─── Authentication Middleware ────────────────────────────────────────
 
@@ -311,6 +358,7 @@ app.delete('/api/personas/:id', auth, (req, res) => {
  * GET /api/scenarios
  * Returns all accessible scenarios for the user.
  * Admins see all scenarios; regular users see public + own.
+ * Supports pagination via ?page and ?limit query params.
  */
 app.get('/api/scenarios', auth, (req, res) => {
   const user = getUserById(req.userId);
@@ -323,7 +371,24 @@ app.get('/api/scenarios', auth, (req, res) => {
     scenarios = getAccessibleScenarios(req.userId);
   }
 
-  res.json(scenarios);
+  // — Pagination support —
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+  const total = scenarios.length;
+  const totalPages = Math.ceil(total / limit);
+  const start = (page - 1) * limit;
+  const paginated = scenarios.slice(start, start + limit);
+
+  console.log(`[TIMING] GET /api/scenarios: ${total} total, returned ${paginated.length} (page ${page}/${totalPages})`);
+  res.json({
+    scenarios: paginated,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+    }
+  });
 });
 
 /**
@@ -1177,6 +1242,7 @@ app.get('/api/proxy-image', async (req, res) => {
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
+
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
