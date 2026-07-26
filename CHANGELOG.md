@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.0.9] - 2026-07-27
+
+### Fixed
+- **Chats List showing "No chats found" after pagination refactor** — The v1.0.8 commit changed `apiService.getScenarios()` to return a pagination envelope (`{ scenarios, pagination }`) instead of a plain array, but `ChatsList.tsx` was not updated. It called `.forEach()` on the envelope object, causing a silent `TypeError` that prevented all chats and scenarios from loading. Fixed by extracting `.scenarios` from the pagination response with a safe fallback.
+
 ## [v1.0.8] - 2026-07-20
 
 ### Added
