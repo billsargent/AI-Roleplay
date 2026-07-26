@@ -24,10 +24,11 @@ export const ChatsList: React.FC = () => {
       try {
         const [storedChats, storedScenarios] = await Promise.all([
           apiService.getChats(),
-          apiService.getScenarios(),
+          apiService.getScenarios(1, 100),
         ]);
         const scenarioMap: Record<string, Scenario> = {};
-        storedScenarios.forEach((s: Scenario) => { scenarioMap[s.id] = s; });
+        const scenariosArray = storedScenarios?.scenarios || storedScenarios || [];
+        scenariosArray.forEach((s: Scenario) => { scenarioMap[s.id] = s; });
         
         setChats(storedChats.sort((a: Chat, b: Chat) => b.createdAt - a.createdAt));
         setScenarios(scenarioMap);
