@@ -65,6 +65,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const MAX_JSON_BODY_SIZE = process.env.MAX_JSON_BODY_SIZE || '250mb';
 
 // Generate a random JWT secret if one isn't provided via environment variable
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
@@ -139,7 +140,24 @@ app.use(cors({
   credentials: true,
 }));
 
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: MAX_JSON_BODY_SIZE }));
+app.use(express.urlencoded({ extended: true, limit: MAX_JSON_BODY_SIZE }));
+
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.too.large' || err.code === 'ENTITY_TOO_LARGE' || err.status === 413)) {
+    console.warn(`[PAYLOAD] ${req.method} ${req.originalUrl} exceeded ${MAX_JSON_BODY_SIZE}`);
+    return res.status(413).json({
+      error: 'Request payload too large. Please reduce the number of images or split the import into smaller scenario payloads.'
+    });
+  }
+
+  if (err instanceof SyntaxError && 'body' in err) {
+    return res.status(400).json({ error: 'Invalid JSON payload.' });
+  }
+
+  next(err);
+});
+
 app.use(express.static(path.join(__dirname, 'dist')));
 
 // General rate limiter for all API routes to prevent abuse
