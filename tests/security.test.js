@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { startServer } from './helpers/server.js';
 
 // 1x1 transparent PNG
@@ -139,6 +139,32 @@ test('R3: invalid ids are rejected', async () => {
   const { token } = await srv.register();
   assert.equal((await srv.request('POST', '/api/personas', { token, body: { name: 'x' } })).status, 400);
   assert.equal((await srv.request('POST', '/api/scenarios', { token, body: scenarioBody({ id: '../x' }) })).status, 400);
+});
+
+test('R4: scenario introduction is sanitized on save', async () => {
+  const { token } = await srv.register();
+  const s = scenarioBody({ introduction: '<p>Hello</p><img src=x onerror="alert(1)"><script>alert(2)</script>' });
+  assert.equal((await srv.request('POST', '/api/scenarios', { token, body: s })).status, 200);
+  const got = (await srv.request('GET', `/api/scenarios/${s.id}`, { token })).json;
+  assert.ok(got.introduction.includes('<p>Hello</p>'));
+  assert.ok(!/onerror|<script|alert/.test(got.introduction), got.introduction);
+});
+
+test('R4: CSP does not allow inline or eval script', async () => {
+  const r = await fetch(srv.base + '/');
+  const csp = r.headers.get('content-security-policy') || '';
+  const scriptSrc = csp.split(';').find(d => d.trim().startsWith('script-src')) || '';
+  assert.ok(scriptSrc, csp);
+  assert.ok(!scriptSrc.includes("'unsafe-inline'") && !scriptSrc.includes("'unsafe-eval'"), scriptSrc);
+  assert.ok(csp.includes('blob:') && !csp.includes('block:'), csp);
+
+  // Every inline script the page ships must be allowed by hash, or the page breaks
+  const html = await r.text();
+  for (const m of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)) {
+    const hash = createHash('sha256').update(m[1]).digest('base64');
+    assert.ok(scriptSrc.includes(`'sha256-${hash}'`), `inline script not allowed by CSP: ${m[1]}`);
+  }
+  assert.ok(!/\son[a-z]+=/i.test(html), 'index.html has inline event handlers, which the CSP blocks');
 });
 
 test('R7: editing a scenario keeps its character avatars', async () => {

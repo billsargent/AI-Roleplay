@@ -32,6 +32,7 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "date-fns": "^4.1.0",
+    "dompurify": "^3.4.2",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.4.1",
@@ -45,6 +46,7 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-router-dom": "^7.14.2",
+    "sanitize-html": "^2.18.1",
     "tailwind-merge": "3.4.0",
     "uuid": "^14.0.0"
   },

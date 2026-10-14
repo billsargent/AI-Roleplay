@@ -8,6 +8,7 @@
  */
 
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
@@ -120,13 +121,30 @@ app.use('/api/images/', (req, res) => {
 
 // ─── Security Middleware ───────────────────────────────────────────────
 
+/**
+ * Hashes of the inline <script> blocks in the built index.html, so the CSP
+ * can allow exactly those scripts instead of 'unsafe-inline'. Computed at
+ * startup so editing index.html never silently breaks the page.
+ */
+function inlineScriptHashes() {
+  try {
+    const html = fs.readFileSync(path.join(__dirname, 'dist', 'index.html'), 'utf8');
+    return [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
+      .map(m => `'sha256-${crypto.createHash('sha256').update(m[1]).digest('base64')}'`);
+  } catch {
+    return [];
+  }
+}
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      // No 'unsafe-inline' / 'unsafe-eval': injected markup cannot run script
+      scriptSrc: ["'self'", ...inlineScriptHashes()],
+      // Inline styles are needed by React style props and animation libraries
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      imgSrc: ["'self'", "data:", "block:", "https://images.unsplash.com", "https://*.unsplash.com", "/api/images/"],
+      imgSrc: ["'self'", "data:", "blob:", "https://images.unsplash.com", "https://*.unsplash.com"],
 
       fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
       connectSrc: ["'self'", "https://api.deepseek.com"],

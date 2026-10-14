@@ -165,20 +165,27 @@ export const CreateScenario: React.FC = () => {
 
     showToast('📥 Importing scenario with images...', 'info');
 
+    // Imported files are untrusted: coerce every field to the expected type
+    const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+    const strArr = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+    const arr = (v: unknown): any[] => (Array.isArray(v) ? v.filter(x => x && typeof x === 'object') : []);
+
     const reader = new FileReader();
     reader.onload = async (ev) => {
       try {
         const data = JSON.parse(ev.target?.result as string);
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Not a scenario object');
         const imported: Scenario = {
           id: uuidv4(),
           userId: user?.id,
           creatorName: user?.username,
-          name: data.displayName || data.name || 'Imported Scenario',
-          description: data.description || '',
-          tags: data.genres || data.tags || [],
-          backstory: data.backStory || '',
-          greetingMessage: data.customGreeting || '',
-          customInstructions: data.customInstructions || '',
+          name: str(data.displayName) || str(data.name) || 'Imported Scenario',
+          description: str(data.description),
+          tags: strArr(data.genres).length ? strArr(data.genres) : strArr(data.tags),
+          backstory: str(data.backStory),
+          greetingMessage: str(data.customGreeting),
+          customInstructions: str(data.customInstructions),
           lorePieces: [],
           characters: [],
           settings: {
@@ -193,45 +200,48 @@ export const CreateScenario: React.FC = () => {
         };
 
         // ── 1. Download scenario cover image ──
-        if (data.mainImage) {
+        if (str(data.mainImage)) {
           imported.image = await urlToBase64(flImageUrl(data.mainImage));
         }
-        if (!imported.image && data.avatarURL) {
+        if (!imported.image && str(data.avatarURL)) {
           imported.image = await urlToBase64(flImageUrl(data.avatarURL));
         }
 
         // ── 2. Download and embed introduction images ──
-        if (data.customIntroduction) {
+        if (str(data.customIntroduction)) {
           imported.introduction = await embedImagesInHtml(data.customIntroduction);
         }
 
         // ── 3. Import lore pieces ──
-        imported.lorePieces = (data.lorePieces || []).map((lp: any) => ({
+        const loreTypes = ['character', 'location', 'object', 'event', 'other'];
+        const loreData = arr(data.lorePieces);
+        imported.lorePieces = loreData.map((lp: any) => ({
           id: uuidv4(),
-          type: lp.type === 'premise' ? 'other' : (lp.type || 'other'),
-          title: lp.title || '',
-          description: lp.description || '',
-          content: lp.content || '',
-          weight: lp.weight || 100,
+          type: loreTypes.includes(lp.type) ? lp.type : 'other',
+          title: str(lp.title),
+          description: str(lp.description),
+          content: str(lp.content),
+          weight: typeof lp.weight === 'number' && Number.isFinite(lp.weight) ? lp.weight : 100,
           pinned: !!lp.pinned,
           smartActivation: lp.smartActivation !== undefined ? !!lp.smartActivation : true,
-          triggers: lp.triggers || [],
-          linkedPieces: lp.linkedPieces || [],
+          triggers: strArr(lp.triggers),
+          linkedPieces: strArr(lp.linkedPieces),
         }));
 
         // ── 4. Import characters from "characters" array ──
-        if (data.characters && Array.isArray(data.characters) && data.characters.length > 0) {
+        const charData = arr(data.characters);
+        if (charData.length > 0) {
           imported.characters = await Promise.all(
-            data.characters.map(async (c: any) => {
+            charData.map(async (c: any) => {
               let avatar = '';
-              if (c.avatarURL) {
+              if (str(c.avatarURL)) {
                 avatar = await urlToBase64(flImageUrl(c.avatarURL));
               }
               return {
                 id: uuidv4(),
-                name: c.displayName || c.name || 'Unknown',
-                description: c.description || '',
-                personality: c.personality || c.traits?.join(', ') || '',
+                name: str(c.displayName) || str(c.name) || 'Unknown',
+                description: str(c.description),
+                personality: str(c.personality) || strArr(c.traits).join(', '),
                 avatar,
               };
             })
@@ -239,18 +249,18 @@ export const CreateScenario: React.FC = () => {
         }
 
         // ── 5. Create character entries from lore pieces of type 'character' ──
-        const charLorePieces = (data.lorePieces || []).filter((lp: any) => lp.type === 'character');
+        const charLorePieces = loreData.filter((lp: any) => lp.type === 'character');
         for (const lp of charLorePieces) {
           if (!imported.characters.find(c => c.name === lp.title)) {
             let avatar = '';
-            if (lp.avatarURL) {
+            if (str(lp.avatarURL)) {
               avatar = await urlToBase64(flImageUrl(lp.avatarURL));
             }
             imported.characters.push({
               id: uuidv4(),
-              name: lp.title || 'Unknown',
-              description: lp.content || '',
-              personality: (lp.traits || []).join(', '),
+              name: str(lp.title) || 'Unknown',
+              description: str(lp.content),
+              personality: strArr(lp.traits).join(', '),
               avatar,
             });
           }

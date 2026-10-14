@@ -10,6 +10,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import { sanitizeRichText } from '../lib/sanitizeHtml.js';
 import { saveImage, deleteImage, copyImage, resolveImageUrl, parseDataUrl, relativePath, adoptImage, imagePathFromUrl, isValidEntityId } from './images.js';
 
 /**
@@ -416,6 +417,9 @@ export function saveScenarioTransaction(scenario) {
   for (const item of [...(scenario.characters || []), ...(scenario.lorePieces || [])]) {
     if (!isValidEntityId(item?.id)) throw new DataError('Invalid character or lore id', 400);
   }
+
+  // Introduction is rendered as HTML, so strip anything that can run script
+  scenario.introduction = sanitizeRichText(scenario.introduction);
 
   const oldPaths = [];
   const transaction = db.transaction(() => {

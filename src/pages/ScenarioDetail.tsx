@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
+import { sanitizeRichText } from '../utils/sanitize';
 import { Scenario, Persona, Message } from '../types';
 
 import { v4 as uuidv4 } from 'uuid';
@@ -252,7 +253,7 @@ export const ScenarioDetail: React.FC = () => {
               </div>
               <div
                 className="prose prose-invert max-w-none [&_img]:rounded-xl [&_img]:max-h-96 [&_img]:w-auto"
-                dangerouslySetInnerHTML={{ __html: scenario.introduction }}
+                dangerouslySetInnerHTML={{ __html: sanitizeRichText(scenario.introduction) }}
               />
             </div>
           )}
