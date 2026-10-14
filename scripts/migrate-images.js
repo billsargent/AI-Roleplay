@@ -18,25 +18,41 @@
  * Usage:
  *   node scripts/migrate-images.js
  *
- * Optional: dry-run to preview without DB changes:
+ * Optional: dry-run to preview without changing the database or writing files:
  *   node scripts/migrate-images.js --dry-run
+ *
+ * A live run first writes a backup copy of the database next to it
+ * ("<database file>.backup-<timestamp>").
+ *
+ * Rows that already have a file path but still carry the old base64 copy
+ * (the app used to write both) have the base64 copy cleared.
  */
 
 import crypto from 'crypto';
 import { getDb } from '../database/index.js';
 import { saveImage, ensureUploadsDirs, parseDataUrl, relativePath } from '../database/images.js';
+import { sniffImageType } from '../lib/imageType.js';
 
-/** @returns {{ relPath: string|null, err?: string }} */
-function trySaveImage(dataUrl, entityType, entityId) {
+/**
+ * Saves (or, in a dry run, only checks) a base64 image.
+ * @returns {{ relPath: string|null, err?: string }}
+ */
+function trySaveImage(dataUrl, entityType, entityId, dryRun) {
   try {
+    if (dryRun) {
+      const parsed = parseDataUrl(dataUrl);
+      const type = parsed && sniffImageType(Buffer.from(parsed.base64, 'base64'));
+      if (!type) return { relPath: null, err: 'not a supported image' };
+      return { relPath: relativePath(entityType, entityId, type.ext) };
+    }
     const relPath = saveImage(dataUrl, entityType, entityId);
-    return { relPath };
+    return relPath ? { relPath } : { relPath: null, err: 'not a supported image (or too large)' };
   } catch (err) {
     return { relPath: null, err: err.message || String(err) };
   }
 }
 
-function runMigration(dryRun) {
+async function runMigration(dryRun) {
   console.log('');
   console.log('='.repeat(67));
   console.log('  Image Migration: Base64 -> File System');
@@ -47,6 +63,13 @@ function runMigration(dryRun) {
   ensureUploadsDirs();
   const db = getDb();
 
+  if (!dryRun) {
+    const backup = `${db.name}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    await db.backup(backup);
+    console.log('Backup written: ' + backup);
+    console.log('');
+  }
+
   const stats = {
     scenarios: 0,
     characters: 0,
@@ -56,6 +79,7 @@ function runMigration(dryRun) {
     embeddedImages: 0,
     skippedNoBase64: 0,
     alreadyMigrated: 0,
+    clearedLeftovers: 0,
     errors: [],
   };
 
@@ -64,8 +88,14 @@ function runMigration(dryRun) {
   const scenarios = db.prepare("SELECT id, image, image_path FROM scenarios WHERE image != ''").all();
   for (const s of scenarios) {
     if (s.image_path) {
-      stats.alreadyMigrated++;
-      console.log('  SKIP ' + s.id + ' - already has image_path (' + s.image_path + ')');
+      if (s.image.startsWith('data:image/')) {
+        // File already exists; drop the leftover base64 copy
+        if (!dryRun) db.prepare("UPDATE scenarios SET image = '' WHERE id = ?").run(s.id);
+        stats.clearedLeftovers++;
+        console.log('  CLEAR ' + s.id + ' - has image_path, removing leftover base64');
+      } else {
+        stats.alreadyMigrated++;
+      }
       continue;
     }
     if (!s.image.startsWith('data:image/')) {
@@ -73,7 +103,7 @@ function runMigration(dryRun) {
       console.log('  SKIP ' + s.id + ' - not base64 (URL or empty)');
       continue;
     }
-    const result = trySaveImage(s.image, 'scenarios', s.id);
+    const result = trySaveImage(s.image, 'scenarios', s.id, dryRun);
     if (result.err) {
       stats.errors.push('Scenario ' + s.id + ': ' + result.err);
       console.error('  FAIL ' + s.id + ' - ' + result.err);
@@ -94,8 +124,14 @@ function runMigration(dryRun) {
   const characters = db.prepare("SELECT id, avatar, avatar_path FROM characters WHERE avatar != ''").all();
   for (const c of characters) {
     if (c.avatar_path) {
-      stats.alreadyMigrated++;
-      console.log('  SKIP ' + c.id + ' - already has avatar_path (' + c.avatar_path + ')');
+      if (c.avatar.startsWith('data:image/')) {
+        // File already exists; drop the leftover base64 copy
+        if (!dryRun) db.prepare("UPDATE characters SET avatar = '' WHERE id = ?").run(c.id);
+        stats.clearedLeftovers++;
+        console.log('  CLEAR ' + c.id + ' - has avatar_path, removing leftover base64');
+      } else {
+        stats.alreadyMigrated++;
+      }
       continue;
     }
     if (!c.avatar.startsWith('data:image/')) {
@@ -103,7 +139,7 @@ function runMigration(dryRun) {
       console.log('  SKIP ' + c.id + ' - not base64');
       continue;
     }
-    const result = trySaveImage(c.avatar, 'characters', c.id);
+    const result = trySaveImage(c.avatar, 'characters', c.id, dryRun);
     if (result.err) {
       stats.errors.push('Character ' + c.id + ': ' + result.err);
       console.error('  FAIL ' + c.id + ' - ' + result.err);
@@ -124,8 +160,14 @@ function runMigration(dryRun) {
   const personas = db.prepare("SELECT id, avatar, avatar_path FROM personas WHERE avatar != ''").all();
   for (const p of personas) {
     if (p.avatar_path) {
-      stats.alreadyMigrated++;
-      console.log('  SKIP ' + p.id + ' - already has avatar_path (' + p.avatar_path + ')');
+      if (p.avatar.startsWith('data:image/')) {
+        // File already exists; drop the leftover base64 copy
+        if (!dryRun) db.prepare("UPDATE personas SET avatar = '' WHERE id = ?").run(p.id);
+        stats.clearedLeftovers++;
+        console.log('  CLEAR ' + p.id + ' - has avatar_path, removing leftover base64');
+      } else {
+        stats.alreadyMigrated++;
+      }
       continue;
     }
     if (!p.avatar.startsWith('data:image/')) {
@@ -133,7 +175,7 @@ function runMigration(dryRun) {
       console.log('  SKIP ' + p.id + ' - not base64');
       continue;
     }
-    const result = trySaveImage(p.avatar, 'personas', p.id);
+    const result = trySaveImage(p.avatar, 'personas', p.id, dryRun);
     if (result.err) {
       stats.errors.push('Persona ' + p.id + ': ' + result.err);
       console.error('  FAIL ' + p.id + ' - ' + result.err);
@@ -175,19 +217,17 @@ function runMigration(dryRun) {
       const hash = crypto.createHash('md5').update(dataUrl).digest('hex');
       const eid = s.id.substring(0, 14) + '_' + hash.substring(0, 12);
 
-      if (!dryRun) {
-        const r2 = trySaveImage(dataUrl, 'embedded', eid);
-        if (r2.err) {
-          stats.errors.push('Intro ' + s.id + '/' + eid + ': ' + r2.err);
-          console.error('  FAIL ' + s.id + '/' + eid + ' - ' + r2.err);
-          return match;
-        }
+      const r2 = trySaveImage(dataUrl, 'embedded', eid, dryRun);
+      if (r2.err) {
+        stats.errors.push('Intro ' + s.id + '/' + eid + ': ' + r2.err);
+        console.error('  FAIL ' + s.id + '/' + eid + ' - ' + r2.err);
+        return match;
       }
 
       stats.embeddedImages++;
       imgCount++;
       changed = true;
-      return match.replace(dataUrl, '/api/images/' + relativePath('embedded', eid, parsed.ext));
+      return match.replace(dataUrl, '/api/images/' + r2.relPath);
     });
 
     if (changed) {
@@ -217,6 +257,7 @@ function runMigration(dryRun) {
   console.log('  Intros processed:   ' + stats.embeddedIntros);
   console.log('  Embedded images:    ' + stats.embeddedImages + ' extracted');
   console.log('  Already had paths:  ' + stats.alreadyMigrated);
+  console.log('  Leftovers cleared:  ' + stats.clearedLeftovers);
   console.log('  Skipped (not b64):  ' + stats.skippedNoBase64);
   console.log('  Errors:             ' + stats.errors.length);
   if (stats.errors.length > 0) {
@@ -230,7 +271,7 @@ function runMigration(dryRun) {
   } else {
     console.log('');
     console.log('  Done. Base64 cleared from database.');
-    console.log('  You can now reduce JSON body limit from 50mb.');
+    console.log('  Run VACUUM (or let SQLite reuse the space) to shrink the file.');
   }
   console.log('');
 }
@@ -238,4 +279,7 @@ function runMigration(dryRun) {
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run') || args.includes('-n');
 
-runMigration(isDryRun);
+runMigration(isDryRun).catch((err) => {
+  console.error('Migration failed:', err);
+  process.exit(1);
+});

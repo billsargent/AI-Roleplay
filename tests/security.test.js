@@ -182,6 +182,20 @@ async function postSized(url, bytes, token) {
   }
 }
 
+test('images revalidate with an ETag instead of being cached forever', async () => {
+  const { token } = await srv.register();
+  const id = randomUUID();
+  await srv.request('POST', '/api/personas', { token, body: { id, name: 'P', description: '', avatar: PNG } });
+  const url = (await srv.request('GET', '/api/personas', { token })).json.find(p => p.id === id).avatar;
+  const first = await fetch(srv.base + url);
+  assert.equal(first.status, 200);
+  assert.ok(!/immutable/.test(first.headers.get('cache-control')));
+  const etag = first.headers.get('etag');
+  assert.ok(etag);
+  const again = await fetch(srv.base + url, { headers: { 'If-None-Match': etag } });
+  assert.equal(again.status, 304);
+});
+
 test('R5: unauthenticated requests cannot send large bodies', async () => {
   // Small-limit routes reject over 1 MB
   assert.equal(await postSized('/api/login', 2 * 1024 * 1024), 413);

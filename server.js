@@ -59,9 +59,11 @@ import {
   DataError,
   countAdmins,
   createUserFirstIsAdmin,
+  purgeExpiredScenarioTrash,
+  purgeExpiredChatTrash,
 } from './database/index.js';
 
-import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath } from './database/images.js';
+import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
 import { validateCompletionRequest, relayCompletion, LlmRequestError, DEEPSEEK_BASE_URL } from './lib/deepseek.js';
 
@@ -91,9 +93,11 @@ const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('he
  * Images are public by design — access control is enforced at the
  * entity level (scenarios, characters, etc.) through the API.
  * 
- * Sets a long cache duration (1 year, immutable) since uploaded images
- * never change (they get new paths on update via the delete+recreate pattern).
- * 
+ * Caching: an image keeps the same URL when it is replaced (the path comes
+ * from the entity id), so it must not be cached as immutable. Browsers
+ * revalidate with an ETag (size + modification time) and get a cheap 304
+ * when nothing changed, and the new picture as soon as it is replaced.
+ *
  * NOTE: Using app.use() with mount path to avoid path-to-regexp v8 issues.
  * The bundled version in Express 5's router (v8.4.2) dropped support for
  * both bare * wildcards and the + modifier syntax. With app.use(), Express
@@ -116,14 +120,26 @@ app.use('/api/images/', (req, res) => {
     return res.status(400).json({ error: 'Invalid image path' });
   }
 
+  let stat;
+  try {
+    stat = fs.statSync(absoluteImagePath(relPath));
+  } catch {
+    return res.status(404).json({ error: 'Image not found' });
+  }
+  const etag = `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'public, no-cache');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end();
+  }
+
   const image = readImage(relPath);
   if (!image) {
     return res.status(404).json({ error: 'Image not found' });
   }
 
   res.setHeader('Content-Type', image.contentType);
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   res.send(image.buffer);
 });
 
@@ -264,6 +280,25 @@ const authLimiter = rateLimit({
 getDb();
 seedDefaultScenariosIfEmpty();
 ensureUploadsDirs();
+
+/**
+ * Trash auto-purge: items in the trash longer than TRASH_RETENTION_DAYS
+ * (default 30, as documented) are permanently deleted, including their
+ * image files. Runs at startup and once a day. Set TRASH_RETENTION_DAYS=0
+ * to keep trashed items forever.
+ */
+const TRASH_RETENTION_DAYS = Number(process.env.TRASH_RETENTION_DAYS ?? 30);
+function purgeExpiredTrash() {
+  if (!(TRASH_RETENTION_DAYS > 0)) return;
+  try {
+    const removed = purgeExpiredScenarioTrash(TRASH_RETENTION_DAYS) + purgeExpiredChatTrash(TRASH_RETENTION_DAYS);
+    if (removed > 0) console.log(`Trash purge: permanently deleted ${removed} item(s) older than ${TRASH_RETENTION_DAYS} days`);
+  } catch (err) {
+    console.error('Trash purge failed:', err);
+  }
+}
+purgeExpiredTrash();
+setInterval(purgeExpiredTrash, 24 * 60 * 60 * 1000).unref();
 
 // ─── Authentication Middleware ────────────────────────────────────────
 

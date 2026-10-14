@@ -171,6 +171,16 @@ function initTables() {
   try { db.exec(`ALTER TABLE users ADD COLUMN password_changed_at INTEGER DEFAULT 0`); } catch {}
 }
 
+/**
+ * Value for the old image/avatar text columns. Once a file exists on disk
+ * (path column set) nothing more is stored there, so base64 images stop
+ * bloating the database on every save. Plain web URLs are kept.
+ */
+function legacyImageValue(value, filePath) {
+  if (filePath) return '';
+  return typeof value === 'string' && /^https?:\/\//i.test(value) ? value : '';
+}
+
 // ─── Users ────────────────────────────────────────────────────────────
 
 /**
@@ -258,7 +268,15 @@ export function createUserFirstIsAdmin(user) {
 
 /** Deletes a user and all cascade-related data (chats, scenarios, etc.) */
 export function deleteUserById(id) {
+  // Rows cascade in the database, but image files on disk do not: collect them first
+  const files = [
+    ...db.prepare(`SELECT avatar_path FROM personas WHERE user_id = ?`).all(id).map(r => r.avatar_path),
+    ...db.prepare(`SELECT id FROM scenarios WHERE user_id = ?`).all(id).flatMap(s => scenarioImagePaths(s.id)),
+  ];
+  // Other users' chats keep working (read-only) when the scenario is gone
+  db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id IN (SELECT id FROM scenarios WHERE user_id = ?)`).run(id);
   db.prepare(`DELETE FROM users WHERE id = ?`).run(id);
+  for (const f of files) if (f) deleteImage(f);
 }
 
 
@@ -299,10 +317,10 @@ export function upsertPersona(persona) {
 
   if (existing) {
     db.prepare(`UPDATE personas SET name = ?, description = ?, avatar = ?, avatar_path = ? WHERE id = ?`)
-      .run(persona.name, persona.description || '', persona.avatar || '', avatarPath, persona.id);
+      .run(persona.name, persona.description || '', legacyImageValue(persona.avatar, avatarPath), avatarPath, persona.id);
   } else {
     db.prepare(`INSERT INTO personas (id, user_id, name, description, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(persona.id, persona.userId, persona.name, persona.description || '', persona.avatar || '', avatarPath);
+      .run(persona.id, persona.userId, persona.name, persona.description || '', legacyImageValue(persona.avatar, avatarPath), avatarPath);
   }
   // Remove the previous avatar only after saving, and only if it was replaced
   // by a file with a different name (same name means it was overwritten in place)
@@ -446,6 +464,8 @@ export function saveScenarioTransaction(scenario) {
   scenario.introduction = sanitizeRichText(scenario.introduction);
 
   const oldPaths = [];
+  // Files in use before the save (cover, avatars, own embedded intro images)
+  const oldScenarioPaths = scenarioImagePaths(scenario.id);
   const transaction = db.transaction(() => {
     const existing = db.prepare(`SELECT id, image_path FROM scenarios WHERE id = ?`).get(scenario.id);
     const settingsJson = JSON.stringify(scenario.settings || {});
@@ -469,7 +489,7 @@ export function saveScenarioTransaction(scenario) {
     if (existing) {
       db.prepare(`UPDATE scenarios SET name=?, description=?, image=?, image_path=?, tags=?, backstory=?, introduction=?, greeting_message=?, custom_instructions=?, settings=?, creator_name=? WHERE id=?`)
         .run(
-          scenario.name, scenario.description || '', scenario.image || '', imagePath, tagsJson,
+          scenario.name, scenario.description || '', legacyImageValue(scenario.image, imagePath), imagePath, tagsJson,
           scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '', scenario.customInstructions || '',
           settingsJson, scenario.creatorName || '', scenario.id
         );
@@ -477,18 +497,14 @@ export function saveScenarioTransaction(scenario) {
       db.prepare(`INSERT INTO scenarios (id, user_id, creator_name, name, description, image, image_path, tags, backstory, introduction, greeting_message, custom_instructions, settings, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(
           scenario.id, scenario.userId, scenario.creatorName || '', scenario.name, scenario.description || '',
-          scenario.image || '', imagePath, tagsJson, scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '',
+          legacyImageValue(scenario.image, imagePath), imagePath, tagsJson, scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '',
           scenario.customInstructions || '', settingsJson, scenario.createdAt || Date.now()
         );
     }
 
     // Remember the files this scenario used before the save; any that are no
     // longer referenced afterwards are deleted once the transaction commits
-    if (existing) {
-      oldPaths.push(existing.image_path);
-      for (const r of db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenario.id)) oldPaths.push(r.avatar_path);
-      for (const r of db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenario.id)) oldPaths.push(r.avatar_path);
-    }
+    if (existing) oldPaths.push(...oldScenarioPaths);
 
     // Replace all characters for this scenario (delete old, insert new)
     db.prepare(`DELETE FROM characters WHERE scenario_id = ?`).run(scenario.id);
@@ -506,7 +522,7 @@ export function saveScenarioTransaction(scenario) {
         } else if (c.avatar && c.avatar.startsWith('/api/images/')) {
           charAvatarPath = adoptImage(c.avatar, 'characters', c.id) || '';
         }
-        insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', c.avatar || '', charAvatarPath);
+        insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', legacyImageValue(c.avatar, charAvatarPath), charAvatarPath);
       }
     }
 
@@ -538,11 +554,7 @@ export function saveScenarioTransaction(scenario) {
 
   // Delete files that were in use before the save and are not referenced now.
   // Done after commit so a failed save never loses images.
-  const stillUsed = new Set([
-    db.prepare(`SELECT image_path FROM scenarios WHERE id = ?`).get(scenario.id)?.image_path,
-    ...db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenario.id).map(r => r.avatar_path),
-    ...db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenario.id).map(r => r.avatar_path),
-  ]);
+  const stillUsed = new Set(scenarioImagePaths(scenario.id));
   for (const p of new Set(oldPaths)) {
     if (p && !stillUsed.has(p)) deleteImage(p);
   }
@@ -568,21 +580,8 @@ export function restoreScenarioById(id) {
 
 /** Permanently deletes a scenario and all its associated image files from disk (final deletion after trash) */
 export function permanentlyDeleteScenarioById(id) {
-  // Clean up scenario image file
-  const scenarioImage = db.prepare(`SELECT image_path FROM scenarios WHERE id = ?`).get(id);
-  if (scenarioImage?.image_path) deleteImage(scenarioImage.image_path);
-
-  // Clean up character avatar files
-  const charAvatars = db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(id);
-  for (const ca of charAvatars) {
-    if (ca.avatar_path) deleteImage(ca.avatar_path);
-  }
-
-  // Clean up lore piece avatar files
-  const loreAvatars = db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(id);
-  for (const la of loreAvatars) {
-    if (la.avatar_path) deleteImage(la.avatar_path);
-  }
+  // Clean up the cover, character/lore avatars and embedded introduction images
+  cleanupScenarioImages(id);
 
   // Orphan all chats referencing this scenario so they remain accessible in read-only mode
   db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id = ?`).run(id);
@@ -616,7 +615,7 @@ export function purgeExpiredScenarioTrash(daysOld = 30) {
 
   // Orphan all chats referencing expired scenarios first
   db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id IN (SELECT id FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?)`).run(cutoff);
-  db.prepare(`DELETE FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff);
+  return db.prepare(`DELETE FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff).changes;
 }
 
 /**
@@ -625,21 +624,33 @@ export function purgeExpiredScenarioTrash(daysOld = 30) {
  * @param {string} scenarioId
  */
 function cleanupScenarioImages(scenarioId) {
-  const scenarioImage = db.prepare(`SELECT image_path FROM scenarios WHERE id = ?`).get(scenarioId);
-  if (scenarioImage?.image_path) deleteImage(scenarioImage.image_path);
+  for (const p of scenarioImagePaths(scenarioId)) deleteImage(p);
+}
 
-  const charAvatars = db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenarioId);
-  for (const ca of charAvatars) {
-    if (ca.avatar_path) deleteImage(ca.avatar_path);
-  }
+/**
+ * Every image file a scenario owns: cover, character and lore avatars, and
+ * the embedded introduction images it created ("{id prefix}_{hash}").
+ * @param {string} scenarioId
+ * @returns {string[]} Relative image paths
+ */
+function scenarioImagePaths(scenarioId) {
+  const paths = [];
+  const s = db.prepare(`SELECT image_path, introduction FROM scenarios WHERE id = ?`).get(scenarioId);
+  if (!s) return paths;
+  paths.push(s.image_path);
+  for (const r of db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenarioId)) paths.push(r.avatar_path);
+  for (const r of db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenarioId)) paths.push(r.avatar_path);
+  paths.push(...ownIntroImagePaths(scenarioId, s.introduction));
+  return paths.filter(Boolean);
+}
 
-  // Clean up embedded introduction images
-  cleanupIntroImages(scenarioId);
-
-  const loreAvatars = db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenarioId);
-  for (const la of loreAvatars) {
-    if (la.avatar_path) deleteImage(la.avatar_path);
-  }
+/** Embedded introduction images created by this scenario (never another scenario's files) */
+function ownIntroImagePaths(scenarioId, introduction) {
+  if (!introduction) return [];
+  const ownPrefix = scenarioId.substring(0, 14) + "_";
+  return (introduction.match(/\/api\/images\/embedded\/[^"'?#\s)]+/g) || [])
+    .map(url => imagePathFromUrl(url))
+    .filter(rel => rel && path.basename(rel).startsWith(ownPrefix));
 }
 
 /**
@@ -657,25 +668,13 @@ function extractIntroImages(scenarioId, introduction) {
     var embeddedId = scenarioId.substring(0, 14) + "_" + hash.substring(0, 12);
     var saved = saveImage(dataUrl, "embedded", embeddedId);
     if (saved) {
-      return match.replace(dataUrl, "/api/images/" + relativePath("embedded", embeddedId, parsed.ext));
+      // Use the path saveImage wrote (its extension comes from the real bytes)
+      return match.replace(dataUrl, "/api/images/" + saved);
     }
     return match;
   });
 }
 
-function cleanupIntroImages(scenarioId) {
-  var scenario = db.prepare("SELECT introduction FROM scenarios WHERE id = ?").get(scenarioId);
-  if (!scenario || !scenario.introduction) return;
-  var urls = scenario.introduction.match(/\/api\/images\/embedded\/[^"']+/g);
-  if (!urls) return;
-  // Only delete images this scenario created (named "{id prefix}_{hash}"),
-  // never files that another scenario's HTML happens to reference
-  var ownPrefix = scenarioId.substring(0, 14) + "_";
-  for (var i = 0; i < urls.length; i++) {
-    var rel = imagePathFromUrl(urls[i]);
-    if (rel && path.basename(rel).startsWith(ownPrefix)) deleteImage(rel);
-  }
-}
 
 
 
@@ -799,7 +798,7 @@ export function emptyChatTrashByUserId(userId) {
 /** Permanently deletes chats that have been in the trash for more than the specified number of days */
 export function purgeExpiredChatTrash(daysOld = 30) {
   const cutoff = Date.now() - (daysOld * 24 * 60 * 60 * 1000);
-  db.prepare(`DELETE FROM chats WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff);
+  return db.prepare(`DELETE FROM chats WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff).changes;
 }
 
 /** Deletes all chats owned by a specific user (permanent — used by "Delete All My Chats") */

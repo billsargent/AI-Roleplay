@@ -17,6 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { sniffImageType } from '../lib/imageType.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,6 +27,9 @@ const UPLOADS_ROOT = path.resolve(process.env.UPLOADS_DIR || path.join(__dirname
 
 /** All supported entity types that can have images */
 export const ENTITY_TYPES = ['scenarios', 'characters', 'personas', 'lore-pieces', 'embedded'];
+
+/** Largest image accepted for storage (decoded bytes) */
+const MAX_IMAGE_BYTES = Number(process.env.MAX_IMAGE_BYTES) || 15 * 1024 * 1024;
 
 /** File extensions we store and serve. SVG is excluded because it can carry script. */
 const ALLOWED_EXTS = ['jpg', 'png', 'gif', 'webp', 'bmp'];
@@ -202,7 +206,13 @@ export function saveImage(dataUrl, entityType, entityId) {
   const parsed = parseDataUrl(dataUrl);
   if (!parsed) return null;
 
-  const relPath = relativePath(entityType, entityId, parsed.ext);
+  // Check the real bytes, not the declared type: it must be an image we support
+  const buffer = Buffer.from(parsed.base64, 'base64');
+  if (buffer.length === 0 || buffer.length > MAX_IMAGE_BYTES) return null;
+  const type = sniffImageType(buffer);
+  if (!type) return null;
+
+  const relPath = relativePath(entityType, entityId, type.ext);
   const absPath = absolutePath(relPath);
   if (!absPath) return null;
 
@@ -212,7 +222,7 @@ export function saveImage(dataUrl, entityType, entityId) {
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  fs.writeFileSync(absPath, Buffer.from(parsed.base64, 'base64'));
+  fs.writeFileSync(absPath, buffer);
   return relPath;
 }
 
