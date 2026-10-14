@@ -69,6 +69,28 @@ test('R1: unsafe entity ids cannot write outside uploads', async () => {
   assert.ok(!fs.existsSync(path.join(srv.uploads, '..', 'escaped.png')));
 });
 
+test('R2: image proxy requires login', async () => {
+  const r = await srv.request('GET', '/api/proxy-image?url=' + encodeURIComponent('https://example.com/x.png'));
+  assert.equal(r.status, 401);
+});
+
+test('R2: image proxy refuses internal addresses', async () => {
+  const { token } = await srv.register();
+  for (const url of [
+    srv.base + '/api/users/me',
+    'http://localhost:1/',
+    'http://127.0.0.1/',
+    'http://169.254.169.254/latest/meta-data/',
+    'http://[::1]/',
+    'http://10.0.0.1/',
+    'file:///etc/passwd',
+  ]) {
+    const r = await srv.request('GET', '/api/proxy-image?url=' + encodeURIComponent(url), { token });
+    assert.equal(r.status, 400, `${url} returned ${r.status}: ${r.text}`);
+    assert.equal(r.json?.dataUrl, undefined);
+  }
+});
+
 test('R1: referencing another user\'s image copies it instead of sharing it', async () => {
   const a = await srv.register();
   const b = await srv.register();

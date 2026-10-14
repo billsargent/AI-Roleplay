@@ -41,7 +41,7 @@ export const urlToBase64 = async (url: string): Promise<string> => {
       return await proxyFetch(url);
     }
     const blob = await response.blob();
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const reader = new FileReader();
       reader.readAsDataURL(blob);
       reader.onload = () => resolve(reader.result as string);
@@ -61,7 +61,10 @@ export const urlToBase64 = async (url: string): Promise<string> => {
  */
 const proxyFetch = async (url: string): Promise<string> => {
   try {
-    const res = await fetch(`/api/proxy-image?url=${encodeURIComponent(url)}`);
+    const token = localStorage.getItem('fl_token');
+    const res = await fetch(`/api/proxy-image?url=${encodeURIComponent(url)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
     if (!res.ok) {
       console.warn('proxyFetch: proxy returned', res.status);
       return url;

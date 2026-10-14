@@ -58,6 +58,7 @@ import {
 } from './database/index.js';
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath } from './database/images.js';
+import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1232,26 +1233,23 @@ app.delete('/api/admin/users/:id', adminAuth, (req, res) => {
  *   url - The full URL of the image to fetch (required)
  *
  * Returns: { dataUrl: "data:image/webp;base64,..." }
+ *
+ * Requires login. Only public http(s) addresses are fetched (see
+ * lib/safeImageFetch.js), with a timeout, a 10 MB cap and image-only types.
  */
-app.get('/api/proxy-image', async (req, res) => {
+app.get('/api/proxy-image', auth, async (req, res) => {
   try {
     const { url } = req.query;
-    if (!url || typeof url !== 'string') {
+    if (!url || typeof url !== 'string' || url.length > 2048) {
       return res.status(400).json({ error: 'Missing or invalid "url" query parameter' });
     }
 
-    const response = await fetch(url);
-    if (!response.ok) {
-      return res.status(response.status).json({ error: `Upstream HTTP ${response.status}` });
-    }
-
-    const contentType = response.headers.get('content-type') || 'image/webp';
-    const buffer = await response.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-    const dataUrl = `data:${contentType};base64,${base64}`;
-
-    res.json({ dataUrl });
+    const { contentType, buffer } = await fetchImage(url);
+    res.json({ dataUrl: `data:${contentType};base64,${buffer.toString('base64')}` });
   } catch (err) {
+    if (err instanceof ImageFetchError) {
+      return res.status(err.status).json({ error: err.message });
+    }
     console.error('Proxy-image error:', err);
     res.status(500).json({ error: 'Failed to proxy image' });
   }
