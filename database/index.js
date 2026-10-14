@@ -167,6 +167,8 @@ function initTables() {
   try { db.exec(`ALTER TABLE characters ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
   try { db.exec(`ALTER TABLE lore_pieces ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
   try { db.exec(`ALTER TABLE personas ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
+  // ── Session revocation: tokens issued before this time (ms) are rejected ──
+  try { db.exec(`ALTER TABLE users ADD COLUMN password_changed_at INTEGER DEFAULT 0`); } catch {}
 }
 
 // ─── Users ────────────────────────────────────────────────────────────
@@ -227,9 +229,31 @@ export function updateUser(id, updates) {
     db.prepare(`UPDATE users SET role = ? WHERE id = ?`).run(updates.role, id);
   }
   if (updates.password !== undefined) {
-    db.prepare(`UPDATE users SET password = ? WHERE id = ?`).run(updates.password, id);
+    // Changing the password signs the user out everywhere (see auth middleware)
+    db.prepare(`UPDATE users SET password = ?, password_changed_at = ? WHERE id = ?`)
+      .run(updates.password, Date.now(), id);
   }
   return getUserById(id);
+}
+
+/** Number of admin accounts (excluding the internal system user) */
+export function countAdmins() {
+  return db.prepare(`SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin' AND id != 'system'`).get().cnt;
+}
+
+/**
+ * Creates a user, making them admin if they are the first real account.
+ * The count and the insert run in one transaction, so two simultaneous
+ * first sign-ups cannot both become admin.
+ * @returns {object} The created user
+ */
+export function createUserFirstIsAdmin(user) {
+  return db.transaction(() => {
+    const { cnt } = db.prepare(`SELECT COUNT(*) AS cnt FROM users WHERE id != 'system'`).get();
+    const created = { ...user, role: cnt === 0 ? 'admin' : 'user' };
+    createUser(created);
+    return created;
+  }).immediate();
 }
 
 /** Deletes a user and all cascade-related data (chats, scenarios, etc.) */

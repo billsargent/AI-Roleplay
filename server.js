@@ -57,6 +57,8 @@ import {
   getAllUserSettings,
   seedDefaultScenariosIfEmpty,
   DataError,
+  countAdmins,
+  createUserFirstIsAdmin,
 } from './database/index.js';
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath } from './database/images.js';
@@ -269,19 +271,38 @@ ensureUploadsDirs();
  * Verifies JWT token from Authorization header.
  * Attaches userId to request on success.
  */
-const auth = async (req, res, next) => {
+/**
+ * Resolves the user for a request's bearer token, or null.
+ * Rejects tokens for deleted users and tokens issued before the user's
+ * last password change (so changing a password signs out other sessions).
+ */
+/** Signs a session token. iatMs gives millisecond issue time for revocation checks. */
+function signToken(userId) {
+  return jwt.sign({ userId, iatMs: Date.now() }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
+}
+
+function userFromRequest(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized: No token provided' });
-    }
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.userId = decoded.userId;
-    next();
-  } catch (err) {
-    res.status(401).json({ error: 'Unauthorized: Invalid token' });
+    const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+    const user = getUserById(decoded.userId);
+    if (!user) return null;
+    // iatMs is set by signToken; older tokens only have iat (seconds)
+    const issuedMs = decoded.iatMs ?? decoded.iat * 1000;
+    if (user.password_changed_at && issuedMs < user.password_changed_at) return null;
+    return user;
+  } catch {
+    return null;
   }
+}
+
+const auth = async (req, res, next) => {
+  const user = userFromRequest(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized: Invalid or expired session' });
+  req.userId = user.id;
+  req.user = user;
+  next();
 };
 
 /**
@@ -289,22 +310,12 @@ const auth = async (req, res, next) => {
  * Returns 403 if the user is not an admin.
  */
 const adminAuth = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized: No token provided' });
-    }
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const user = getUserById(decoded.userId);
-    if (user?.role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden: Admins only' });
-    }
-    req.userId = decoded.userId;
-    next();
-  } catch (err) {
-    res.status(401).json({ error: 'Unauthorized: Invalid token' });
-  }
+  const user = userFromRequest(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized: Invalid or expired session' });
+  if (user.role !== 'admin') return res.status(403).json({ error: 'Forbidden: Admins only' });
+  req.userId = user.id;
+  req.user = user;
+  next();
 };
 
 // ─── Auth Routes ──────────────────────────────────────────────────────
@@ -313,11 +324,29 @@ const TOKEN_EXPIRY = '7d';
 
 /** Validates password meets minimum length requirement */
 function validatePassword(password) {
-  if (!password || password.length < 6) {
+  if (typeof password !== 'string' || password.length < 6) {
     return 'Password must be at least 6 characters long';
+  }
+  // bcrypt only uses the first 72 bytes; longer passwords would be silently truncated
+  if (Buffer.byteLength(password, 'utf8') > 72) {
+    return 'Password must be at most 72 bytes long';
   }
   return null;
 }
+
+/** Usernames: 3-32 letters, digits, dot, dash or underscore */
+const USERNAME_RE = /^[A-Za-z0-9_.-]{3,32}$/;
+function validateUsername(username) {
+  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
+    return 'Username must be 3-32 characters: letters, numbers, dot, dash or underscore';
+  }
+  return null;
+}
+
+const VALID_ROLES = ['user', 'admin'];
+
+/** Hash used to keep login timing the same whether or not the username exists */
+const DUMMY_HASH = bcrypt.hashSync('timing-equalizer-not-a-password', 10);
 
 /**
  * POST /api/register
@@ -329,6 +358,11 @@ app.post('/api/register', authLimiter, async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password are required' });
+    }
+
+    const usernameError = validateUsername(username);
+    if (usernameError) {
+      return res.status(400).json({ error: usernameError });
     }
 
     const passwordError = validatePassword(password);
@@ -348,24 +382,21 @@ app.post('/api/register', authLimiter, async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    // First real user gets admin role (exclude internal system user)
-    const realUsers = getDb().prepare(`SELECT COUNT(*) as cnt FROM users WHERE id != 'system'`).get();
-    const role = realUsers.cnt === 0 ? 'admin' : 'user';
-
-    const user = {
+    // First real user gets admin role; decided atomically with the insert
+    const user = createUserFirstIsAdmin({
       id: uuidv4(),
       username,
       password: hashedPassword,
-      role,
       createdAt: Date.now(),
-    };
-
-    createUser(user);
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
+    });
+    const token = signToken(user.id);
     const { password: _, ...userWithoutPassword } = user;
-    console.log(`Registered user: ${username} with role: ${role}`);
+    console.log(`Registered user: ${username} with role: ${user.role}`);
     res.json({ user: userWithoutPassword, token });
   } catch (err) {
+    if (err?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
     console.error('Registration error:', err);
     res.status(500).json({ error: 'Internal server error during registration' });
   }
@@ -383,12 +414,17 @@ app.post('/api/login', authLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
+    if (typeof username !== 'string' || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
     const user = getUserByUsername(username);
-    if (!user || !(await bcrypt.compare(password, user.password))) {
+    // Compare against a dummy hash for unknown users so response time does not reveal which usernames exist
+    const ok = await bcrypt.compare(password, user ? user.password : DUMMY_HASH);
+    if (!user || !ok) {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
 
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
+    const token = signToken(user.id);
     const { password: _, ...userWithoutPassword } = user;
     console.log(`Logged in user: ${username}`);
     res.json({ user: userWithoutPassword, token });
@@ -694,8 +730,10 @@ app.get('/api/trash', auth, (req, res) => {
  */
 app.post('/api/trash/restore/chat/:id', auth, (req, res) => {
   try {
-    const chat = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(req.params.id);
+    const chat = getDb().prepare(`SELECT id, user_id, deleted_at FROM chats WHERE id = ?`).get(req.params.id);
     if (!chat) return res.status(404).json({ error: 'Chat not found' });
+    // Only items in the trash can be restored or permanently deleted
+    if (chat.deleted_at == null) return res.status(400).json({ error: 'Chat is not in the trash' });
 
     const user = getUserById(req.userId);
     const isAdmin = user?.role === 'admin';
@@ -719,8 +757,10 @@ app.post('/api/trash/restore/chat/:id', auth, (req, res) => {
  */
 app.post('/api/trash/restore/scenario/:id', auth, (req, res) => {
   try {
-    const scenario = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(req.params.id);
+    const scenario = getDb().prepare(`SELECT id, user_id, deleted_at FROM scenarios WHERE id = ?`).get(req.params.id);
     if (!scenario) return res.status(404).json({ error: 'Scenario not found' });
+    // Only items in the trash can be restored or permanently deleted
+    if (scenario.deleted_at == null) return res.status(400).json({ error: 'Scenario is not in the trash' });
 
     const user = getUserById(req.userId);
     const isAdmin = user?.role === 'admin';
@@ -744,8 +784,10 @@ app.post('/api/trash/restore/scenario/:id', auth, (req, res) => {
  */
 app.delete('/api/trash/chat/:id', auth, (req, res) => {
   try {
-    const chat = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(req.params.id);
+    const chat = getDb().prepare(`SELECT id, user_id, deleted_at FROM chats WHERE id = ?`).get(req.params.id);
     if (!chat) return res.status(404).json({ error: 'Chat not found' });
+    // Only items in the trash can be restored or permanently deleted
+    if (chat.deleted_at == null) return res.status(400).json({ error: 'Chat is not in the trash' });
 
     const user = getUserById(req.userId);
     const isAdmin = user?.role === 'admin';
@@ -769,8 +811,10 @@ app.delete('/api/trash/chat/:id', auth, (req, res) => {
  */
 app.delete('/api/trash/scenario/:id', auth, (req, res) => {
   try {
-    const scenario = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(req.params.id);
+    const scenario = getDb().prepare(`SELECT id, user_id, deleted_at FROM scenarios WHERE id = ?`).get(req.params.id);
     if (!scenario) return res.status(404).json({ error: 'Scenario not found' });
+    // Only items in the trash can be restored or permanently deleted
+    if (scenario.deleted_at == null) return res.status(400).json({ error: 'Scenario is not in the trash' });
 
     const user = getUserById(req.userId);
     const isAdmin = user?.role === 'admin';
@@ -1066,7 +1110,9 @@ app.post('/api/users/change-password', auth, async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     updateUser(req.userId, { password: hashedPassword });
-    res.json({ success: true });
+    // Other sessions are now signed out; give this one a fresh token
+    const token = signToken(req.userId);
+    res.json({ success: true, token });
   } catch (err) {
     console.error('Change password error:', err);
     res.status(500).json({ error: 'Server error changing password' });
@@ -1126,6 +1172,9 @@ app.post('/api/admin/users', adminAuth, async (req, res) => {
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password are required' });
     }
+    const inputError = validateUsername(username) || validatePassword(password)
+      || (role !== undefined && !VALID_ROLES.includes(role) ? 'Role must be "user" or "admin"' : null);
+    if (inputError) return res.status(400).json({ error: inputError });
     const existing = getUserByUsername(username);
     if (existing) {
       return res.status(400).json({ error: 'Username already exists' });
@@ -1156,9 +1205,24 @@ app.put('/api/admin/users/:id', adminAuth, async (req, res) => {
     if (targetUser.id === 'system') return res.status(400).json({ error: 'Cannot modify system user' });
 
     const updates = {};
-    if (username !== undefined) updates.username = username;
-    if (role !== undefined) updates.role = role;
-    if (password !== undefined && password.trim()) {
+    if (username !== undefined && username !== targetUser.username) {
+      const usernameError = validateUsername(username);
+      if (usernameError) return res.status(400).json({ error: usernameError });
+      const taken = getUserByUsername(username);
+      if (taken && taken.id !== targetUser.id) return res.status(400).json({ error: 'Username already exists' });
+      updates.username = username;
+    }
+    if (role !== undefined && role !== targetUser.role) {
+      if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Role must be "user" or "admin"' });
+      // Never remove the last admin, or nobody could manage the site
+      if (targetUser.role === 'admin' && countAdmins() <= 1) {
+        return res.status(400).json({ error: 'Cannot remove the last admin' });
+      }
+      updates.role = role;
+    }
+    if (password !== undefined && password !== '') {
+      const passwordError = validatePassword(password);
+      if (passwordError) return res.status(400).json({ error: passwordError });
       updates.password = await bcrypt.hash(password, 10);
     }
 

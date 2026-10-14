@@ -338,6 +338,8 @@ export const apiService = {
    */
   changePassword: async (currentPassword: string, newPassword: string) => {
     const response = await api.post('/users/change-password', { currentPassword, newPassword });
+    // Changing the password signs out all sessions; keep this one with the new token
+    if (response.data?.token) localStorage.setItem('fl_token', response.data.token);
     return response.data;
   },
 
