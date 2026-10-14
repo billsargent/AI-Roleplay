@@ -167,6 +167,51 @@ test('R4: CSP does not allow inline or eval script', async () => {
   assert.ok(!/\son[a-z]+=/i.test(html), 'index.html has inline event handlers, which the CSP blocks');
 });
 
+/** POSTs a JSON body of roughly `bytes` size; returns the status, or 'reset' if the server hung up early */
+async function postSized(url, bytes, token) {
+  const body = JSON.stringify({ ...scenarioBody(), padding: 'x'.repeat(bytes) });
+  try {
+    const r = await fetch(srv.base + url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body,
+    });
+    return r.status;
+  } catch {
+    return 'reset';
+  }
+}
+
+test('R5: unauthenticated requests cannot send large bodies', async () => {
+  // Small-limit routes reject over 1 MB
+  assert.equal(await postSized('/api/login', 2 * 1024 * 1024), 413);
+  assert.equal(await postSized('/api/register', 2 * 1024 * 1024), 413);
+  // Large-limit routes check login before reading the body
+  for (const url of ['/api/scenarios', '/api/chats', '/api/deepseek/chat']) {
+    const status = await postSized(url, 20 * 1024 * 1024);
+    assert.ok(status === 401 || status === 'reset', `${url}: ${status}`);
+  }
+});
+
+test('R5: logged-in users keep the larger limits where needed', async () => {
+  const { token } = await srv.register();
+  assert.equal(await postSized('/api/scenarios', 30 * 1024 * 1024, token), 200);
+  const tooBigChat = await postSized('/api/chats', 12 * 1024 * 1024, token);
+  assert.ok(tooBigChat === 413 || tooBigChat === 'reset', String(tooBigChat));
+});
+
+test('R5: errors come back as JSON, unknown API routes are 404', async () => {
+  const bad = await fetch(srv.base + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{not json' });
+  assert.equal(bad.status, 400);
+  assert.match(bad.headers.get('content-type'), /json/);
+  const missing = await srv.request('GET', '/api/does-not-exist');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.json?.error, 'Not found');
+  // No JSON body at all must not crash the route
+  const empty = await fetch(srv.base + '/api/login', { method: 'POST' });
+  assert.equal(empty.status, 400);
+});
+
 test('R7: editing a scenario keeps its character avatars', async () => {
   const { token } = await srv.register();
   const s = scenarioBody({ characters: [{ id: randomUUID(), name: 'Hero', description: '', personality: '', avatar: PNG }] });

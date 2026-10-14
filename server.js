@@ -68,7 +68,12 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+/** Body limit for scenario saves/imports, which can embed many base64 images */
 const MAX_JSON_BODY_SIZE = process.env.MAX_JSON_BODY_SIZE || '250mb';
+/** Body limit for chats, personas (avatar) and AI requests */
+const MEDIUM_JSON_BODY_SIZE = process.env.MEDIUM_JSON_BODY_SIZE || '10mb';
+/** Body limit for everything else, including unauthenticated routes */
+const DEFAULT_JSON_BODY_SIZE = '1mb';
 
 // Generate a random JWT secret if one isn't provided via environment variable
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
@@ -163,12 +168,35 @@ app.use(cors({
   credentials: true,
 }));
 
-app.use(express.json({ limit: MAX_JSON_BODY_SIZE }));
-app.use(express.urlencoded({ extended: true, limit: MAX_JSON_BODY_SIZE }));
+/**
+ * JSON body parsing.
+ * Large bodies are only parsed on the routes that need them, and only after
+ * `auth` has run, so unauthenticated clients cannot make the server buffer
+ * hundreds of megabytes. Those routes are listed here so the global parser
+ * skips them and the route parses with its own limit.
+ */
+const largeBody = express.json({ limit: MAX_JSON_BODY_SIZE });
+const mediumBody = express.json({ limit: MEDIUM_JSON_BODY_SIZE });
+const ROUTE_PARSED_BODIES = new Set([
+  'POST /api/scenarios',
+  'POST /api/chats',
+  'POST /api/personas',
+  'POST /api/deepseek/chat',
+  'POST /api/deepseek/chat/stream',
+  'POST /api/deepseek/generate',
+]);
+const defaultBody = express.json({ limit: DEFAULT_JSON_BODY_SIZE });
+app.use((req, res, next) => {
+  // Express 5 leaves req.body undefined without a JSON body; routes destructure it
+  if (req.body === undefined) req.body = {};
+  if (ROUTE_PARSED_BODIES.has(`${req.method} ${req.path}`)) return next();
+  defaultBody(req, res, next);
+});
 
-app.use((err, req, res, next) => {
+/** Turns body-parser errors into JSON responses (used before and after the routes) */
+function bodyErrorHandler(err, req, res, next) {
   if (err && (err.type === 'entity.too.large' || err.code === 'ENTITY_TOO_LARGE' || err.status === 413)) {
-    console.warn(`[PAYLOAD] ${req.method} ${req.originalUrl} exceeded ${MAX_JSON_BODY_SIZE}`);
+    console.warn(`[PAYLOAD] ${req.method} ${req.originalUrl} exceeded the body size limit`);
     return res.status(413).json({
       error: 'Request payload too large. Please reduce the number of images or split the import into smaller scenario payloads.'
     });
@@ -179,7 +207,8 @@ app.use((err, req, res, next) => {
   }
 
   next(err);
-});
+}
+app.use(bodyErrorHandler);
 
 app.use(express.static(path.join(__dirname, 'dist')));
 
@@ -380,7 +409,7 @@ app.get('/api/personas', auth, (req, res) => {
 });
 
 /** POST /api/personas — Creates or updates a persona */
-app.post('/api/personas', auth, (req, res) => {
+app.post('/api/personas', auth, mediumBody, (req, res) => {
   try {
     const persona = { ...req.body, userId: req.userId };
     const saved = upsertPersona(persona);
@@ -464,7 +493,7 @@ app.get('/api/scenarios/:id', auth, (req, res) => {
  * Creates a new scenario or saves edits to an existing one.
  * Handles ownership verification, copy flow, and creator name preservation.
  */
-app.post('/api/scenarios', auth, (req, res) => {
+app.post('/api/scenarios', auth, largeBody, (req, res) => {
   try {
     const scenario = req.body;
     const existing = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(scenario.id);
@@ -562,7 +591,7 @@ app.get('/api/chats', auth, (req, res) => {
  * Creates a new chat or saves updates to an existing one.
  * Handles ownership verification.
  */
-app.post('/api/chats', auth, (req, res) => {
+app.post('/api/chats', auth, mediumBody, (req, res) => {
   try {
     const chat = req.body;
     const existing = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(chat.id);
@@ -919,7 +948,7 @@ app.get('/api/deepseek/models', adminAuth, async (req, res) => {
  * POST /api/deepseek/chat — Proxies non-streaming chat to DeepSeek API
  * The API key stays server-side — never exposed to the client.
  */
-app.post('/api/deepseek/chat', auth, async (req, res) => {
+app.post('/api/deepseek/chat', auth, mediumBody, async (req, res) => {
   try {
     const deepseekKey = getSystemSetting('deepseekKey');
     if (!deepseekKey) {
@@ -961,7 +990,7 @@ app.post('/api/deepseek/chat', auth, async (req, res) => {
  * POST /api/deepseek/chat/stream — Proxies SSE streaming chat to DeepSeek API
  * Streams data chunks back to the client as they arrive from DeepSeek.
  */
-app.post('/api/deepseek/chat/stream', auth, async (req, res) => {
+app.post('/api/deepseek/chat/stream', auth, mediumBody, async (req, res) => {
   try {
     const deepseekKey = getSystemSetting('deepseekKey');
     if (!deepseekKey) {
@@ -1037,7 +1066,7 @@ app.post('/api/deepseek/chat/stream', auth, async (req, res) => {
 /**
  * POST /api/deepseek/generate — Proxies scenario generation to DeepSeek API
  */
-app.post('/api/deepseek/generate', auth, async (req, res) => {
+app.post('/api/deepseek/generate', auth, mediumBody, async (req, res) => {
   try {
     const deepseekKey = getSystemSetting('deepseekKey');
     if (!deepseekKey) {
@@ -1283,9 +1312,23 @@ app.get('/api/proxy-image', auth, async (req, res) => {
 
 // ─── Serve Frontend ───────────────────────────────────────────────────
 
+// Unknown API routes get a JSON 404 instead of the HTML app shell
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
 // Catch-all: serve index.html for all non-API routes (SPA support)
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
+// Final error handlers: body-parser errors from route-level parsers, then
+// anything unexpected. Never send stack traces to the client.
+app.use(bodyErrorHandler);
+app.use((err, req, res, next) => {
+  console.error(`Unhandled error on ${req.method} ${req.originalUrl}:`, err);
+  if (res.headersSent) return res.end();
+  res.status(err.status && err.status < 500 ? err.status : 500).json({ error: 'Internal server error' });
 });
 
 
