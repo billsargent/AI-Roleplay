@@ -61,6 +61,7 @@ import {
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
+import { validateCompletionRequest, relayCompletion, LlmRequestError, DEEPSEEK_BASE_URL } from './lib/deepseek.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -236,8 +237,8 @@ const generalLimiter = rateLimit({
     }
     return false;
   },
-  // Static limit — no async function to avoid any potential issues
-  max: 1000,
+  // Admin-configurable (Admin > Site Branding); synchronous lookup, default 1000
+  max: () => Number(getSystemSetting('rateLimitMax')) || 1000,
   message: { error: 'Too many requests. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -333,6 +334,12 @@ app.post('/api/register', authLimiter, async (req, res) => {
     const passwordError = validatePassword(password);
     if (passwordError) {
       return res.status(400).json({ error: passwordError });
+    }
+
+    // Admins can close sign-ups; the very first account (the admin) is always allowed
+    if (getSystemSetting('registrationOpen') === 'false') {
+      const { cnt } = getDb().prepare(`SELECT COUNT(*) as cnt FROM users WHERE id != 'system'`).get();
+      if (cnt > 0) return res.status(403).json({ error: 'Registration is currently closed.' });
     }
 
     const existing = getUserByUsername(username);
@@ -818,7 +825,9 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const memoryMaxCount = getSystemSetting('memoryMaxCount');
   const deepseekModel = getSystemSetting('deepseekModel');
   const debugLlmPrompt = getSystemSetting('debugLlmPrompt');
-  res.json({ deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt });
+  const registrationOpen = getSystemSetting('registrationOpen') !== 'false';
+  const rateLimitMax = getSystemSetting('rateLimitMax') || '1000';
+  res.json({ deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax });
 
 
 
@@ -826,7 +835,7 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
 
 /** POST /api/system/settings — Updates system settings (admin only) */
 app.post('/api/system/settings', adminAuth, (req, res) => {
-  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt } = req.body;
+  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax } = req.body;
   if (deepseekKey !== undefined) setSystemSetting('deepseekKey', deepseekKey);
   if (globalInstructions !== undefined) setSystemSetting('globalInstructions', globalInstructions);
   if (temperature !== undefined) setSystemSetting('temperature', String(temperature));
@@ -845,6 +854,11 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   if (memoryMaxCount !== undefined) setSystemSetting('memoryMaxCount', String(memoryMaxCount));
   if (deepseekModel !== undefined) setSystemSetting('deepseekModel', deepseekModel);
   if (debugLlmPrompt !== undefined) setSystemSetting('debugLlmPrompt', debugLlmPrompt ? 'true' : 'false');
+  if (registrationOpen !== undefined) setSystemSetting('registrationOpen', registrationOpen ? 'true' : 'false');
+  if (rateLimitMax !== undefined) {
+    const n = Math.round(Number(rateLimitMax));
+    if (Number.isFinite(n) && n >= 10 && n <= 100000) setSystemSetting('rateLimitMax', String(n));
+  }
 
   res.json({ success: true });
 
@@ -911,7 +925,6 @@ function debugLogLlmPrompt(userId, payload, endpoint) {
 
 // ─── DeepSeek Proxy Routes ───────────────────────────────────────────
 
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
 /**
  * GET /api/deepseek/models — Fetches available model IDs from DeepSeek API (admin only)
@@ -934,7 +947,7 @@ app.get('/api/deepseek/models', adminAuth, async (req, res) => {
 
     const data = await response.json();
     if (!response.ok) {
-      return res.status(response.status).json({ error: data.error?.message || 'DeepSeek API error' });
+      return res.status(502).json({ error: data.error?.message || `DeepSeek API error (HTTP ${response.status})` });
     }
     res.json(data);
   } catch (err) {
@@ -945,162 +958,60 @@ app.get('/api/deepseek/models', adminAuth, async (req, res) => {
 
 
 /**
- * POST /api/deepseek/chat — Proxies non-streaming chat to DeepSeek API
- * The API key stays server-side — never exposed to the client.
+ * Per-user limit on AI requests. The DeepSeek key belongs to the site, so one
+ * account must not be able to run up the bill. Admins are not limited.
+ * LLM_RATE_LIMIT requests per LLM_RATE_WINDOW_MIN minutes (default 120 per 15).
  */
-app.post('/api/deepseek/chat', auth, mediumBody, async (req, res) => {
-  try {
+const llmLimiter = rateLimit({
+  windowMs: (Number(process.env.LLM_RATE_WINDOW_MIN) || 15) * 60 * 1000,
+  max: Number(process.env.LLM_RATE_LIMIT) || 120,
+  keyGenerator: (req) => `user:${req.userId}`,
+  skip: (req) => getUserById(req.userId)?.role === 'admin',
+  message: { error: 'You are sending AI requests too quickly. Please wait a few minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
+ * Shared handler for the DeepSeek proxy routes. Validates the request
+ * (lib/deepseek.js), always uses the admin-configured model, and relays the
+ * answer. The API key stays server-side — never exposed to the client.
+ */
+function deepseekRoute({ stream = false, label, defaultMaxTokens, defaultTemperature }) {
+  return async (req, res) => {
     const deepseekKey = getSystemSetting('deepseekKey');
     if (!deepseekKey) {
       return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
     }
-    const { messages, model, temperature, max_tokens, frequency_penalty, presence_penalty } = req.body;
+    let params;
+    try {
+      params = validateCompletionRequest(req.body, {
+        model: getSystemSetting('deepseekModel') || 'deepseek-chat',
+        defaultMaxTokens,
+        defaultTemperature,
+      });
+    } catch (err) {
+      if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+      throw err;
+    }
 
     // Debug logging for admin users
-    debugLogLlmPrompt(req.userId, req.body, 'Chat');
+    debugLogLlmPrompt(req.userId, params, label);
+    await relayCompletion(req, res, params, { apiKey: deepseekKey, stream });
+  };
+}
 
-    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${deepseekKey}`,
-      },
-      body: JSON.stringify({
-        model: model || 'deepseek-chat',
-        messages,
-        temperature,
-        max_tokens,
-        frequency_penalty,
-        presence_penalty,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data.error?.message || 'DeepSeek API error' });
-    }
-    res.json(data);
-  } catch (err) {
-    console.error('DeepSeek proxy error:', err);
-    res.status(500).json({ error: 'Failed to communicate with DeepSeek API' });
-  }
-});
+/** POST /api/deepseek/chat — Proxies non-streaming chat to DeepSeek API */
+app.post('/api/deepseek/chat', auth, llmLimiter, mediumBody, deepseekRoute({ label: 'Chat' }));
 
 /**
  * POST /api/deepseek/chat/stream — Proxies SSE streaming chat to DeepSeek API
  * Streams data chunks back to the client as they arrive from DeepSeek.
  */
-app.post('/api/deepseek/chat/stream', auth, mediumBody, async (req, res) => {
-  try {
-    const deepseekKey = getSystemSetting('deepseekKey');
-    if (!deepseekKey) {
-      return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
-    }
-    const { messages, model, temperature, max_tokens, frequency_penalty, presence_penalty } = req.body;
+app.post('/api/deepseek/chat/stream', auth, llmLimiter, mediumBody, deepseekRoute({ stream: true, label: 'Chat Stream' }));
 
-    // Debug logging for admin users
-    debugLogLlmPrompt(req.userId, req.body, 'Chat Stream');
-
-    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${deepseekKey}`,
-      },
-      body: JSON.stringify({
-        model: model || 'deepseek-chat',
-        messages,
-        temperature,
-        max_tokens,
-        frequency_penalty,
-        presence_penalty,
-        stream: true,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      return res.status(response.status).json({ error: errorData.error?.message || 'DeepSeek API error' });
-    }
-
-    // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    // Pipe the DeepSeek stream to the client
-    const reader = response.body?.getReader();
-    if (!reader) {
-      return res.status(500).json({ error: 'No response body' });
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        res.write('data: [DONE]\n\n');
-        res.end();
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (line.trim()) {
-          res.write(line + '\n');
-        }
-      }
-    }
-  } catch (err) {
-    console.error('DeepSeek streaming proxy error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to communicate with DeepSeek API' });
-    }
-  }
-});
-
-/**
- * POST /api/deepseek/generate — Proxies scenario generation to DeepSeek API
- */
-app.post('/api/deepseek/generate', auth, mediumBody, async (req, res) => {
-  try {
-    const deepseekKey = getSystemSetting('deepseekKey');
-    if (!deepseekKey) {
-      return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
-    }
-    const { messages, model, temperature, max_tokens } = req.body;
-
-    // Debug logging for admin users
-    debugLogLlmPrompt(req.userId, req.body, 'Generate');
-
-    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${deepseekKey}`,
-      },
-      body: JSON.stringify({
-        model: model || 'deepseek-chat',
-        messages,
-        temperature: temperature || 0.8,
-        max_tokens: max_tokens || 4000,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data.error?.message || 'DeepSeek API error' });
-    }
-    res.json(data);
-  } catch (err) {
-    console.error('DeepSeek generate proxy error:', err);
-    res.status(500).json({ error: 'Failed to communicate with DeepSeek API' });
-  }
-});
+/** POST /api/deepseek/generate — Proxies scenario generation to DeepSeek API */
+app.post('/api/deepseek/generate', auth, llmLimiter, mediumBody, deepseekRoute({ label: 'Generate', defaultMaxTokens: 4000, defaultTemperature: 0.8 }));
 
 /** GET /api/system/llm-settings — Returns LLM configuration (any authenticated user) */
 app.get('/api/system/llm-settings', auth, (req, res) => {

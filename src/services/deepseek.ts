@@ -438,15 +438,20 @@ export const deepseek = {
           const data = trimmed.slice(6);
           if (data === '[DONE]') continue; // Stream termination signal
 
+          let parsed: any;
           try {
-            const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta?.content;
-            if (delta) {
-              fullContent += delta;
-              onChunk(delta); // Deliver chunk to the UI callback
-            }
+            parsed = JSON.parse(data);
           } catch {
-            // Skip malformed SSE chunks
+            continue; // Skip malformed SSE chunks
+          }
+          // The server sends an error event if the stream breaks part-way
+          if (parsed.error) {
+            throw new Error(parsed.error.message || 'The AI response was interrupted');
+          }
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            fullContent += delta;
+            onChunk(delta); // Deliver chunk to the UI callback
           }
         }
       }

@@ -44,7 +44,8 @@ export const AdminPage: React.FC = () => {
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [siteName, setSiteName] = useState('');
-  const [rateLimitMax, setRateLimitMax] = useState('200');
+  const [rateLimitMax, setRateLimitMax] = useState('1000');
+  const [registrationOpen, setRegistrationOpen] = useState(true);
   const [debugLlmPrompt, setDebugLlmPrompt] = useState(false);
 
   // ─── LLM settings ───
@@ -94,7 +95,8 @@ export const AdminPage: React.FC = () => {
         setMemoryGenerateInterval(settings.memoryGenerateInterval || '25');
         setMemoryWordCount(settings.memoryWordCount || '100');
         setMemoryMaxCount(settings.memoryMaxCount || '50');
-        setRateLimitMax(settings.rateLimitMax || '200');
+        setRateLimitMax(settings.rateLimitMax || '1000');
+        setRegistrationOpen(settings.registrationOpen !== false);
         setDeepseekModel(settings.deepseekModel || 'deepseek-chat');
         setDebugLlmPrompt(settings.debugLlmPrompt === 'true');
       } catch (e) {
@@ -145,7 +147,7 @@ export const AdminPage: React.FC = () => {
   /** Save site name + rate limit + update localStorage + document.title immediately */
   const handleSaveSiteName = async () => {
     try {
-      await apiService.updateSystemSettings({ siteName, rateLimitMax });
+      await apiService.updateSystemSettings({ siteName, rateLimitMax, registrationOpen });
       localStorage.setItem('fl_siteName', siteName);
       document.title = siteName || 'AI Roleplay';
       setSiteNameSaved(true);
@@ -310,13 +312,38 @@ export const AdminPage: React.FC = () => {
                 min="10"
                 max="10000"
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                placeholder="200"
+                placeholder="1000"
                 value={rateLimitMax}
                 onChange={(e) => setRateLimitMax(e.target.value)}
               />
               <p className="mt-2 text-xs text-zinc-500 italic">
                 Maximum API requests per 15-minute window for non-admin users. Admins are not rate-limited.
               </p>
+            </div>
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <p className="text-sm font-bold text-zinc-300" id="registration-open-label">Allow New Sign-ups</p>
+                <p className="text-xs text-zinc-500 mt-1">
+                  When off, the registration page refuses new accounts. Existing users can still log in, and
+                  admins can still create accounts in User Management.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={registrationOpen}
+                aria-labelledby="registration-open-label"
+                onClick={() => setRegistrationOpen(!registrationOpen)}
+                className={`relative w-14 h-7 rounded-full transition-colors flex-shrink-0 ml-4 ${
+                  registrationOpen ? 'bg-indigo-600' : 'bg-zinc-700'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-transform ${
+                    registrationOpen ? 'translate-x-7' : 'translate-x-0'
+                  }`}
+                />
+              </button>
             </div>
             <button
               onClick={handleSaveSiteName}

@@ -22,7 +22,7 @@ function freePort() {
   });
 }
 
-export async function startServer() {
+export async function startServer({ env = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rpchat-test-'));
   const uploads = path.join(dir, 'uploads');
   const port = await freePort();
@@ -34,6 +34,9 @@ export async function startServer() {
       DB_PATH: path.join(dir, 'test.sqlite'),
       UPLOADS_DIR: uploads,
       JWT_SECRET: 'test-secret',
+      // Never let tests reach the real DeepSeek API; tests that need it pass a fake server
+      DEEPSEEK_BASE_URL: 'http://127.0.0.1:9',
+      ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
