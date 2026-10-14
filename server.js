@@ -57,7 +57,7 @@ import {
   seedDefaultScenariosIfEmpty,
 } from './database/index.js';
 
-import { ensureUploadsDirs, saveImage, deleteImage, readImage } from './database/images.js';
+import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath } from './database/images.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -97,9 +97,11 @@ app.use('/api/images/', (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Extract the relative path after /api/images/ (strip leading /)
+  // Extract the relative path after /api/images/ (strip leading /).
+  // isValidImagePath only accepts "{entityType}/{prefix}/{id}.{ext}", so
+  // traversal attempts like "../../database.sqlite" never reach the disk.
   const relPath = req.path.replace(/^\//, '');
-  if (!relPath) {
+  if (!isValidImagePath(relPath)) {
     return res.status(400).json({ error: 'Invalid image path' });
   }
 
@@ -109,6 +111,7 @@ app.use('/api/images/', (req, res) => {
   }
 
   res.setHeader('Content-Type', image.contentType);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   res.send(image.buffer);
 });

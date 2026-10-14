@@ -10,13 +10,13 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import { saveImage, deleteImage, copyImage, resolveImageUrl, parseDataUrl, relativePath } from './images.js';
+import { saveImage, deleteImage, copyImage, resolveImageUrl, parseDataUrl, relativePath, adoptImage, imagePathFromUrl } from './images.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/** Path to the SQLite database file (stored in project root) */
-const DB_PATH = path.join(__dirname, '..', 'database.sqlite');
+/** Path to the SQLite database file (project root by default; DB_PATH overrides, e.g. for tests) */
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'database.sqlite');
 
 let db;
 
@@ -255,7 +255,7 @@ export function upsertPersona(persona) {
     const saved = saveImage(persona.avatar, 'personas', persona.id);
     if (saved) avatarPath = saved;
   } else if (persona.avatar && persona.avatar.startsWith('/api/images/')) {
-    avatarPath = persona.avatar.replace('/api/images/', '');
+    avatarPath = adoptImage(persona.avatar, 'personas', persona.id) || avatarPath;
   }
 
   if (existing) {
@@ -410,8 +410,8 @@ export function saveScenarioTransaction(scenario) {
         // keep image field as base64 for now (migration will clear it later)
       }
     } else if (scenario.image && scenario.image.startsWith('/api/images/')) {
-      // Already a URL — extract path from it
-      imagePath = scenario.image.replace('/api/images/', '');
+      // Already a URL — validate it and make sure the file belongs to this scenario
+      imagePath = adoptImage(scenario.image, 'scenarios', scenario.id) || imagePath;
     }
     // If image is a plain URL (e.g., Unsplash), keep it in image field — no file to save
 
@@ -449,7 +449,7 @@ export function saveScenarioTransaction(scenario) {
           const saved = saveImage(c.avatar, 'characters', c.id);
           if (saved) charAvatarPath = saved;
         } else if (c.avatar && c.avatar.startsWith('/api/images/')) {
-          charAvatarPath = c.avatar.replace('/api/images/', '');
+          charAvatarPath = adoptImage(c.avatar, 'characters', c.id) || '';
         }
         insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', c.avatar || '', charAvatarPath);
       }
@@ -473,7 +473,7 @@ export function saveScenarioTransaction(scenario) {
           const saved = saveImage(p.avatar, 'lore-pieces', p.id);
           if (saved) loreAvatarPath = saved;
         } else if (p.avatar && p.avatar.startsWith('/api/images/')) {
-          loreAvatarPath = p.avatar.replace('/api/images/', '');
+          loreAvatarPath = adoptImage(p.avatar, 'lore-pieces', p.id) || '';
         }
         insertLore.run(
           p.id, scenario.id, p.type || 'other', p.title || '', p.content || '', p.weight || 100,
@@ -608,8 +608,12 @@ function cleanupIntroImages(scenarioId) {
   if (!scenario || !scenario.introduction) return;
   var urls = scenario.introduction.match(/\/api\/images\/embedded\/[^"']+/g);
   if (!urls) return;
+  // Only delete images this scenario created (named "{id prefix}_{hash}"),
+  // never files that another scenario's HTML happens to reference
+  var ownPrefix = scenarioId.substring(0, 14) + "_";
   for (var i = 0; i < urls.length; i++) {
-    deleteImage(urls[i].replace("/api/images/", ""));
+    var rel = imagePathFromUrl(urls[i]);
+    if (rel && path.basename(rel).startsWith(ownPrefix)) deleteImage(rel);
   }
 }
 
