@@ -10,7 +10,18 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import { saveImage, deleteImage, copyImage, resolveImageUrl, parseDataUrl, relativePath, adoptImage, imagePathFromUrl } from './images.js';
+import { saveImage, deleteImage, copyImage, resolveImageUrl, parseDataUrl, relativePath, adoptImage, imagePathFromUrl, isValidEntityId } from './images.js';
+
+/**
+ * An error caused by the request data (not a server fault).
+ * Routes return `status` and `message` to the client.
+ */
+export class DataError extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.status = status;
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -245,13 +256,16 @@ export function getPersonasByUserId(userId) {
  * @param {Object} persona - Persona object with id, userId, name, description, avatar
  */
 export function upsertPersona(persona) {
-  const existing = db.prepare(`SELECT id, avatar_path FROM personas WHERE id = ?`).get(persona.id);
+  if (!isValidEntityId(persona.id)) throw new DataError('Invalid persona id', 400);
+  const existing = db.prepare(`SELECT id, user_id, avatar_path FROM personas WHERE id = ?`).get(persona.id);
+  // Never let one user update (or delete the avatar of) another user's persona
+  if (existing && existing.user_id !== persona.userId) {
+    throw new DataError('Persona not found or unauthorized', 403);
+  }
 
   // ── Extract avatar to file system ──
   let avatarPath = existing?.avatar_path || '';
   if (persona.avatar && persona.avatar.startsWith('data:image/')) {
-    // Delete old avatar file if exists
-    if (existing?.avatar_path) deleteImage(existing.avatar_path);
     const saved = saveImage(persona.avatar, 'personas', persona.id);
     if (saved) avatarPath = saved;
   } else if (persona.avatar && persona.avatar.startsWith('/api/images/')) {
@@ -265,6 +279,9 @@ export function upsertPersona(persona) {
     db.prepare(`INSERT INTO personas (id, user_id, name, description, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?)`)
       .run(persona.id, persona.userId, persona.name, persona.description || '', persona.avatar || '', avatarPath);
   }
+  // Remove the previous avatar only after saving, and only if it was replaced
+  // by a file with a different name (same name means it was overwritten in place)
+  if (existing?.avatar_path && existing.avatar_path !== avatarPath) deleteImage(existing.avatar_path);
   return persona;
 }
 
@@ -395,6 +412,12 @@ export function getScenarioById(id) {
  * legacy data until the migration script clears them).
  */
 export function saveScenarioTransaction(scenario) {
+  if (!isValidEntityId(scenario.id)) throw new DataError('Invalid scenario id', 400);
+  for (const item of [...(scenario.characters || []), ...(scenario.lorePieces || [])]) {
+    if (!isValidEntityId(item?.id)) throw new DataError('Invalid character or lore id', 400);
+  }
+
+  const oldPaths = [];
   const transaction = db.transaction(() => {
     const existing = db.prepare(`SELECT id, image_path FROM scenarios WHERE id = ?`).get(scenario.id);
     const settingsJson = JSON.stringify(scenario.settings || {});
@@ -431,19 +454,23 @@ export function saveScenarioTransaction(scenario) {
         );
     }
 
-    // ── Delete old character avatar files (if scenario already existed) ──
+    // Remember the files this scenario used before the save; any that are no
+    // longer referenced afterwards are deleted once the transaction commits
     if (existing) {
-      const oldChars = db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenario.id);
-      for (const oc of oldChars) {
-        if (oc.avatar_path) deleteImage(oc.avatar_path);
-      }
+      oldPaths.push(existing.image_path);
+      for (const r of db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenario.id)) oldPaths.push(r.avatar_path);
+      for (const r of db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenario.id)) oldPaths.push(r.avatar_path);
     }
 
     // Replace all characters for this scenario (delete old, insert new)
     db.prepare(`DELETE FROM characters WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.characters && scenario.characters.length > 0) {
-      const insertChar = db.prepare(`INSERT OR REPLACE INTO characters (id, scenario_id, name, description, personality, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      // Plain INSERT: this scenario's rows were just deleted, so an id that still
+      // exists belongs to another scenario (or is duplicated) and must not be replaced
+      const insertChar = db.prepare(`INSERT INTO characters (id, scenario_id, name, description, personality, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      const charTaken = db.prepare(`SELECT 1 FROM characters WHERE id = ?`);
       for (const c of scenario.characters) {
+        if (charTaken.get(c.id)) throw new DataError('Character id conflicts with an existing character', 409);
         let charAvatarPath = '';
         if (c.avatar && c.avatar.startsWith('data:image/')) {
           const saved = saveImage(c.avatar, 'characters', c.id);
@@ -455,19 +482,13 @@ export function saveScenarioTransaction(scenario) {
       }
     }
 
-    // ── Delete old lore piece avatar files ──
-    if (existing) {
-      const oldLore = db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenario.id);
-      for (const ol of oldLore) {
-        if (ol.avatar_path) deleteImage(ol.avatar_path);
-      }
-    }
-
     // Replace all lore pieces for this scenario
     db.prepare(`DELETE FROM lore_pieces WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.lorePieces && scenario.lorePieces.length > 0) {
-      const insertLore = db.prepare(`INSERT OR REPLACE INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insertLore = db.prepare(`INSERT INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const loreTaken = db.prepare(`SELECT 1 FROM lore_pieces WHERE id = ?`);
       for (const p of scenario.lorePieces) {
+        if (loreTaken.get(p.id)) throw new DataError('Lore id conflicts with an existing lore piece', 409);
         let loreAvatarPath = '';
         if (p.avatar && p.avatar.startsWith('data:image/')) {
           const saved = saveImage(p.avatar, 'lore-pieces', p.id);
@@ -486,6 +507,17 @@ export function saveScenarioTransaction(scenario) {
   });
 
   transaction();
+
+  // Delete files that were in use before the save and are not referenced now.
+  // Done after commit so a failed save never loses images.
+  const stillUsed = new Set([
+    db.prepare(`SELECT image_path FROM scenarios WHERE id = ?`).get(scenario.id)?.image_path,
+    ...db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenario.id).map(r => r.avatar_path),
+    ...db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenario.id).map(r => r.avatar_path),
+  ]);
+  for (const p of new Set(oldPaths)) {
+    if (p && !stillUsed.has(p)) deleteImage(p);
+  }
   return scenario;
 }
 

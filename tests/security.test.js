@@ -91,6 +91,74 @@ test('R2: image proxy refuses internal addresses', async () => {
   }
 });
 
+/** Minimal valid scenario body */
+const scenarioBody = (over = {}) => ({
+  id: randomUUID(), name: 'S', description: 'd', tags: [], backstory: 'b',
+  characters: [], lorePieces: [], settings: { isPublic: false }, ...over,
+});
+
+test('R3: a user cannot overwrite another user\'s persona', async () => {
+  const a = await srv.register();
+  const b = await srv.register();
+  const id = randomUUID();
+  await srv.request('POST', '/api/personas', { token: a.token, body: { id, name: 'Alice', description: 'mine', avatar: PNG } });
+  const before = (await srv.request('GET', '/api/personas', { token: a.token })).json.find(p => p.id === id);
+  const avatarFile = path.join(srv.uploads, before.avatar.replace('/api/images/', ''));
+
+  const r = await srv.request('POST', '/api/personas', { token: b.token, body: { id, name: 'Hacked', description: 'x', avatar: PNG } });
+  assert.equal(r.status, 403);
+
+  const after = (await srv.request('GET', '/api/personas', { token: a.token })).json.find(p => p.id === id);
+  assert.equal(after.name, 'Alice');
+  assert.equal(after.description, 'mine');
+  assert.ok(fs.existsSync(avatarFile), "A's avatar file was deleted");
+});
+
+test('R3: a scenario cannot take over another scenario\'s character or lore', async () => {
+  const a = await srv.register();
+  const b = await srv.register();
+  const charId = randomUUID();
+  const loreId = randomUUID();
+  const sa = scenarioBody({
+    characters: [{ id: charId, name: 'Hero', description: 'A', personality: 'brave' }],
+    lorePieces: [{ id: loreId, type: 'other', title: 'Lore', content: 'secret', triggers: [] }],
+  });
+  assert.equal((await srv.request('POST', '/api/scenarios', { token: a.token, body: sa })).status, 200);
+
+  const sb1 = scenarioBody({ characters: [{ id: charId, name: 'Stolen', description: 'B', personality: '' }] });
+  assert.equal((await srv.request('POST', '/api/scenarios', { token: b.token, body: sb1 })).status, 409);
+  const sb2 = scenarioBody({ lorePieces: [{ id: loreId, type: 'other', title: 'Stolen', content: 'x', triggers: [] }] });
+  assert.equal((await srv.request('POST', '/api/scenarios', { token: b.token, body: sb2 })).status, 409);
+
+  const got = (await srv.request('GET', `/api/scenarios/${sa.id}`, { token: a.token })).json;
+  assert.equal(got.characters[0].name, 'Hero');
+  assert.equal(got.lorePieces[0].title, 'Lore');
+});
+
+test('R3: invalid ids are rejected', async () => {
+  const { token } = await srv.register();
+  assert.equal((await srv.request('POST', '/api/personas', { token, body: { name: 'x' } })).status, 400);
+  assert.equal((await srv.request('POST', '/api/scenarios', { token, body: scenarioBody({ id: '../x' }) })).status, 400);
+});
+
+test('R7: editing a scenario keeps its character avatars', async () => {
+  const { token } = await srv.register();
+  const s = scenarioBody({ characters: [{ id: randomUUID(), name: 'Hero', description: '', personality: '', avatar: PNG }] });
+  assert.equal((await srv.request('POST', '/api/scenarios', { token, body: s })).status, 200);
+  const saved = (await srv.request('GET', `/api/scenarios/${s.id}`, { token })).json;
+  const url = saved.characters[0].avatar;
+  assert.match(url, /^\/api\/images\/characters\//);
+
+  // The editor sends the scenario back with the existing avatar URL
+  const r = await srv.request('POST', '/api/scenarios', { token, body: { ...saved, name: 'Renamed' } });
+  assert.equal(r.status, 200);
+  assert.equal(await rawGet(url), 200, 'avatar file was deleted by the edit-save');
+
+  // Removing the character afterwards does delete its file
+  await srv.request('POST', '/api/scenarios', { token, body: { ...saved, characters: [] } });
+  assert.equal(await rawGet(url), 404);
+});
+
 test('R1: referencing another user\'s image copies it instead of sharing it', async () => {
   const a = await srv.register();
   const b = await srv.register();

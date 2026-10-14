@@ -55,6 +55,7 @@ import {
   setUserSetting,
   getAllUserSettings,
   seedDefaultScenariosIfEmpty,
+  DataError,
 } from './database/index.js';
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath } from './database/images.js';
@@ -362,9 +363,15 @@ app.get('/api/personas', auth, (req, res) => {
 
 /** POST /api/personas — Creates or updates a persona */
 app.post('/api/personas', auth, (req, res) => {
-  const persona = { ...req.body, userId: req.userId };
-  const saved = upsertPersona(persona);
-  res.json(saved);
+  try {
+    const persona = { ...req.body, userId: req.userId };
+    const saved = upsertPersona(persona);
+    res.json(saved);
+  } catch (err) {
+    if (err instanceof DataError) return res.status(err.status).json({ error: err.message });
+    console.error('Save persona error:', err);
+    res.status(500).json({ error: 'Server error saving persona' });
+  }
 });
 
 /** DELETE /api/personas/:id — Deletes a persona (owner-only) */
@@ -469,6 +476,7 @@ app.post('/api/scenarios', auth, (req, res) => {
     saveScenarioTransaction(scenario);
     res.json(scenario);
   } catch (err) {
+    if (err instanceof DataError) return res.status(err.status).json({ error: err.message });
     console.error('Save scenario error:', err);
     res.status(500).json({ error: 'Server error saving scenario' });
   }
