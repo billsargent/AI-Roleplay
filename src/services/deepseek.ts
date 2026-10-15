@@ -40,6 +40,27 @@ export interface AiGeneratedScenarioData {
   }>;
 }
 
+/**
+ * What to ask the reply endpoint for:
+ * - reply: answer the user's last message
+ * - regenerate: a new version of the last AI message
+ * - continue: more of the last AI message
+ * - opening: the first message of a chat with no conversation yet
+ */
+export type ReplyMode = 'reply' | 'regenerate' | 'continue' | 'opening';
+
+/** Result of a reply request */
+export interface ReplyResult {
+  content: string;
+  /** "length" when the reply hit the token limit (it was cut off) */
+  finishReason?: string;
+  /**
+   * For continue: "prefix" means the text follows on exactly; "instruct"
+   * means it is a new piece of text that may need a space before it
+   */
+  continueMode?: 'prefix' | 'instruct';
+}
+
 /** Turns an axios error into a readable message */
 function errorMessage(error: any, fallback: string): string {
   return error?.response?.data?.error || error?.message || fallback;
@@ -92,18 +113,23 @@ export const deepseek = {
   },
 
   /**
-   * Gets the AI's reply to the last user message of a saved chat.
+   * Gets AI text for a saved chat (see ReplyMode).
    * The chat must be saved first: the server builds the prompt from it.
    *
    * @param chatId - The chat to answer
    * @param signal - Optional AbortSignal to cancel the request
-   * @returns The AI's response text
+   * @param mode - What to generate (default: answer the user's last message)
    * @throws If the API call fails
    */
-  async chat(chatId: string, signal?: AbortSignal): Promise<string> {
+  async chat(chatId: string, signal?: AbortSignal, mode: ReplyMode = 'reply'): Promise<ReplyResult> {
     try {
-      const response = await api.post(`/chats/${chatId}/reply`, { stream: false }, { signal });
-      return response.data.choices[0].message.content;
+      const response = await api.post(`/chats/${chatId}/reply`, { stream: false, mode }, { signal });
+      const choice = response.data.choices?.[0];
+      return {
+        content: choice?.message?.content || '',
+        finishReason: choice?.finish_reason,
+        continueMode: response.headers?.['x-continue-mode'],
+      };
     } catch (error: any) {
       console.error('DeepSeek API error:', error.response?.data || error.message);
       throw new Error(errorMessage(error, 'Failed to connect to DeepSeek API'));
@@ -117,12 +143,19 @@ export const deepseek = {
    * Uses fetch (not axios) for stream handling, with the JWT from localStorage.
    *
    * @param chatId - The chat to answer
-   * @param onChunk - Callback fired with each text chunk as it streams in
+   * @param onChunk - Callback fired with each text chunk as it streams in,
+   *   with the continue mode (for continue requests) known from the headers
    * @param signal - Optional AbortSignal to stop the stream (Stop button, leaving the page)
-   * @returns The complete assembled response text
+   * @param mode - What to generate (default: answer the user's last message)
+   * @returns The complete assembled text and why it ended
    * @throws If the API call fails or the stream breaks
    */
-  async chatStream(chatId: string, onChunk: (chunk: string) => void, signal?: AbortSignal): Promise<string> {
+  async chatStream(
+    chatId: string,
+    onChunk: (chunk: string, continueMode?: ReplyResult['continueMode']) => void,
+    signal?: AbortSignal,
+    mode: ReplyMode = 'reply',
+  ): Promise<ReplyResult> {
     const token = localStorage.getItem('fl_token');
 
     try {
@@ -132,7 +165,7 @@ export const deepseek = {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ stream: true }),
+        body: JSON.stringify({ stream: true, mode }),
         signal,
       });
 
@@ -140,6 +173,8 @@ export const deepseek = {
         const errorData = await response.json().catch(() => ({}));
         throw new Error(errorData.error || `HTTP ${response.status}: Failed to connect to DeepSeek API`);
       }
+      const continueMode = (response.headers.get('X-Continue-Mode') || undefined) as ReplyResult['continueMode'];
+      let finishReason: string | undefined;
 
       // Read the stream using the ReadableStream API
       const reader = response.body?.getReader();
@@ -177,12 +212,14 @@ export const deepseek = {
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) {
             fullContent += delta;
-            onChunk(delta); // Deliver chunk to the UI callback
+            onChunk(delta, continueMode); // Deliver chunk to the UI callback
           }
+          // The last chunk says why the reply ended ("length" = cut off)
+          if (parsed.choices?.[0]?.finish_reason) finishReason = parsed.choices[0].finish_reason;
         }
       }
 
-      return fullContent;
+      return { content: fullContent, finishReason, continueMode };
     } catch (error: any) {
       console.error('DeepSeek streaming error:', error.message);
       throw new Error(error.message || 'Failed to connect to DeepSeek API');

@@ -13,7 +13,7 @@
  * When starting a chat:
  *   1. User selects a persona in the modal
  *   2. If the scenario has a greetingMessage, it becomes the first AI message
- *   3. If no greeting, the chat is saved with a "*continue*" message and the server writes the opening
+ *   3. If no greeting, the chat starts empty and the chat page streams an AI-written opening
  *   4. The new chat is saved server-side, then the user is navigated to /chat/:id
  *
  * Import/Export uses a custom JSON format (Risuprompt-compatible) triggered manually.
@@ -27,7 +27,6 @@ import {
   FileText
 } from 'lucide-react';
 import { apiService } from '../services/api';
-import { deepseek } from '../services/deepseek';
 import { sanitizeRichText } from '../utils/sanitize';
 import { useDialog } from '../utils/useDialog';
 import { Scenario, Persona, Message } from '../types';
@@ -150,26 +149,8 @@ export const ScenarioDetail: React.FC = () => {
     };
 
     try {
-      if (greeting) {
-        await apiService.saveChat(newChat);
-      } else {
-        // No greeting: save the chat with a "*continue*" prompt and let the
-        // server (which builds the prompt from the saved chat) write the opening
-        showToast('Generating story opening...', 'info');
-        newChat.messages = [{ id: uuidv4(), role: 'user' as const, content: '*continue*', timestamp: Date.now() }];
-        await apiService.saveChat(newChat);
-        try {
-          const response = await deepseek.chat(newChatId);
-          newChat.messages = [
-            ...newChat.messages,
-            { id: uuidv4(), role: 'assistant' as const, content: response, timestamp: Date.now() },
-          ];
-          await apiService.saveChat(newChat);
-        } catch (err: any) {
-          // The chat exists; it opens with a Retry button
-          showToast(err?.message || 'Could not generate the opening; use Retry in the chat', 'error');
-        }
-      }
+      // Without a greeting the chat starts empty; the chat page streams the opening
+      await apiService.saveChat(newChat);
       navigate(`/chat/${newChatId}`);
     } catch (err) {
       showToast('Failed to start chat', 'error');
