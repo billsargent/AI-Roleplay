@@ -20,7 +20,7 @@
  * only ever visible in the "My Private" tab to the scenario owner (and admins).
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, Play, Plus, BookOpen, Trash2, LogOut, ChevronLeft, ChevronRight } from 'lucide-react';
 
@@ -41,32 +41,43 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
   const [page, setPage] = useState(1);
   const [totalScenarios, setTotalScenarios] = useState(0);
   const [search, setSearch] = useState('');
+  /** Search text sent to the server, updated shortly after typing stops */
+  const [query, setQuery] = useState('');
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'explore' | 'mine-public' | 'mine-private'>('explore');
+  /** Ignores responses that arrive after a newer request was made */
+  const requestSeq = useRef(0);
   const navigate = useNavigate();
   const user = apiService.getCurrentUser();
 
   const totalPages = Math.ceil(totalScenarios / PAGE_SIZE);
 
-  /** Fetch scenarios from the API */
-  const loadScenarios = useCallback(async (pageNum: number = 1) => {
-    try {
-      const data = await apiService.getScenarios(pageNum, PAGE_SIZE);
-      if (data && Array.isArray(data.scenarios)) {
-        setAllScenarios(data.scenarios);
-        setTotalScenarios(data.pagination?.total || 0);
-      } else if (Array.isArray(data)) {
-        // Fallback: if server doesn't support pagination yet, handle plain array
-        setAllScenarios(data);
-        setTotalScenarios(data.length);
-      }
-    } catch (e) {
-      console.error('Failed to load scenarios', e);
-    }
-  }, []);
-
+  // Debounce the search box, and start again from page 1 for a new search
   useEffect(() => {
-    loadScenarios(page);
-  }, [page, loadScenarios]);
+    const t = setTimeout(() => {
+      setQuery(search.trim());
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  /** Fetch one page of scenarios; the server applies the tab and search */
+  useEffect(() => {
+    const seq = ++requestSeq.current;
+    (async () => {
+      try {
+        const data = await apiService.getScenarios(page, PAGE_SIZE, { tab: activeTab, q: query });
+        if (seq !== requestSeq.current) return;
+        setAllScenarios(Array.isArray(data?.scenarios) ? data.scenarios : []);
+        setTotalScenarios(data?.pagination?.total || 0);
+        setLoadError(null);
+      } catch (e) {
+        if (seq !== requestSeq.current) return;
+        console.error('Failed to load scenarios', e);
+        setLoadError('Could not load scenarios. Check your connection and try again.');
+      }
+    })();
+  }, [page, activeTab, query]);
 
   /** Delete a scenario after confirmation. Requires ownership or admin role. */
   const handleDelete = async (e: React.MouseEvent, id: string) => {
@@ -82,26 +93,10 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
     }
   };
 
-  /** Filter scenarios by search text + active tab.
-   *  - 'explore' tab: show all public scenarios from everyone (including own)
-   *  - 'mine-public' tab: show only the current user's public scenarios
-   *  - 'mine-private' tab: show only the current user's private (non-public) scenarios */
-  const filteredScenarios = allScenarios.filter(s => {
-    const matchesSearch = s.name.toLowerCase().includes(search.toLowerCase()) ||
-      s.description.toLowerCase().includes(search.toLowerCase()) ||
-      s.creatorName?.toLowerCase().includes(search.toLowerCase()) ||
-      s.tags.some(t => t.toLowerCase().includes(search.toLowerCase()));
-    
-    if (activeTab === 'explore') {
-      // Show all public scenarios (everyone's, including the current user's)
-      return matchesSearch && s.settings?.isPublic === true;
-    }
-    if (activeTab === 'mine-public') {
-      return matchesSearch && s.userId === user?.id && s.settings?.isPublic === true;
-    }
-    // mine-private: only the user's non-public scenarios
-    return matchesSearch && s.userId === user?.id && s.settings?.isPublic !== true;
-  });
+  /** Tabs (filtered by the server):
+   *  - 'explore': all public scenarios from everyone (including own)
+   *  - 'mine-public': the current user's public scenarios
+   *  - 'mine-private': the current user's private (non-public) scenarios */
 
   /** Navigate to the scenario detail page */
   const startScenario = (scenario: Scenario) => {
@@ -183,6 +178,11 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
           onChange={(e) => setSearch(e.target.value)}
         />
       </div>
+      {loadError && (
+        <div className="mb-6 px-4 py-3 rounded-xl border border-red-800/50 bg-red-950/30 text-red-300 text-sm" role="alert">
+          {loadError}
+        </div>
+      )}
       {/* --- Pagination Controls (top) --- */}
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-4 mb-6">
@@ -212,7 +212,7 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
 
       {/* ─── Scenario Grid ─── */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {filteredScenarios.map(scenario => (
+        {allScenarios.map(scenario => (
           <div 
             key={scenario.id}
             className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden group hover:border-zinc-700 transition-all cursor-pointer"

@@ -32,8 +32,6 @@ import {
   getPersonasByUserId,
   upsertPersona,
   deletePersonaById,
-  getAllScenarios,
-  getAccessibleScenarios,
 
   getScenarioById,
   saveScenarioTransaction,
@@ -61,6 +59,8 @@ import {
   DataError,
   countAdmins,
   createUserFirstIsAdmin,
+  listScenarios,
+  getScenarioLabels,
   purgeExpiredScenarioTrash,
   purgeExpiredChatTrash,
 } from './database/index.js';
@@ -534,32 +534,26 @@ app.delete('/api/personas/:id', auth, (req, res) => {
  * Supports pagination via ?page and ?limit query params.
  */
 app.get('/api/scenarios', auth, (req, res) => {
-  const user = getUserById(req.userId);
-  const isAdmin = user?.role === 'admin';
+  const isAdmin = req.user?.role === 'admin';
 
-  let scenarios;
-  if (isAdmin) {
-    scenarios = getAllScenarios();
-  } else {
-    scenarios = getAccessibleScenarios(req.userId);
-  }
-
-  // — Pagination support —
+  // Pagination, tab and search are applied in SQL so totals and search
+  // results cover every scenario, not just the current page.
+  // ?tab=explore|mine-public|mine-private  ?q=search text
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
-  const total = scenarios.length;
-  const totalPages = Math.ceil(total / limit);
-  const start = (page - 1) * limit;
-  const paginated = scenarios.slice(start, start + limit);
+  const tab = ['explore', 'mine-public', 'mine-private'].includes(req.query.tab) ? req.query.tab : undefined;
+  const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 200) : '';
 
-  console.log(`[TIMING] GET /api/scenarios: ${total} total, returned ${paginated.length} (page ${page}/${totalPages})`);
+  const { scenarios, total } = listScenarios({
+    userId: req.userId, isAdmin, tab, q, limit, offset: (page - 1) * limit,
+  });
   res.json({
-    scenarios: paginated,
+    scenarios,
     pagination: {
       page,
       limit,
       total,
-      totalPages,
+      totalPages: Math.ceil(total / limit),
     }
   });
 });
@@ -677,6 +671,16 @@ app.get('/api/chats', auth, (req, res) => {
   } else {
     // Regular user sees only their own chats
     chats = getChatsByUserId(req.userId);
+  }
+
+  // Label each chat with its scenario's name and cover, so the chat list
+  // does not have to load (a capped page of) every scenario to show them
+  const labels = getScenarioLabels(chats.map(c => c.scenarioId));
+  for (const c of chats) {
+    const label = labels[c.scenarioId];
+    c.scenarioName = label?.name || '';
+    c.scenarioImage = label?.image || '';
+    c.scenarioDeleted = !label || label.deleted;
   }
 
   res.json(chats);

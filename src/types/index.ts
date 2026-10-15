@@ -117,6 +117,11 @@ export interface Chat {
   createdAt: number;
   /** Username of the chat owner (included when admin views other users' chats) */
   ownerUsername?: string;
+  /** Scenario name and cover, added by the chat list endpoint */
+  scenarioName?: string;
+  scenarioImage?: string;
+  /** True when the scenario is in the trash or permanently deleted */
+  scenarioDeleted?: boolean;
 }
 
 /** A single message exchanged in a chat */

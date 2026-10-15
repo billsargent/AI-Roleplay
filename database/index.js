@@ -436,6 +436,72 @@ export function getAccessibleScenarios(userId) {
 }
 
 /**
+ * Lists scenarios with filtering, search and pagination done in SQL, so
+ * search finds matches on every page and totals are correct.
+ *
+ * @param {object} opts
+ * @param {string} opts.userId - Requesting user
+ * @param {boolean} opts.isAdmin - Admins can see every scenario
+ * @param {'explore'|'mine-public'|'mine-private'} [opts.tab] - Home page tab; omitted = everything the user can see
+ * @param {string} [opts.q] - Search text (name, description, creator, tags)
+ * @param {number} opts.limit
+ * @param {number} opts.offset
+ * @returns {{ scenarios: object[], total: number }}
+ */
+export function listScenarios({ userId, isAdmin, tab, q, limit, offset }) {
+  const where = ['deleted_at IS NULL'];
+  const params = [];
+  const isPublic = `json_extract(settings, '$.isPublic') = 1`;
+
+  if (tab === 'explore') {
+    where.push(isPublic);
+  } else if (tab === 'mine-public') {
+    where.push('user_id = ?', isPublic);
+    params.push(userId);
+  } else if (tab === 'mine-private') {
+    where.push('user_id = ?', `COALESCE(json_extract(settings, '$.isPublic'), 0) != 1`);
+    params.push(userId);
+  } else if (!isAdmin) {
+    where.push(`(${isPublic} OR user_id = ?)`);
+    params.push(userId);
+  }
+
+  const search = typeof q === 'string' ? q.trim().toLowerCase() : '';
+  if (search) {
+    const like = `%${search.replace(/[\\%_]/g, m => '\\' + m)}%`;
+    where.push(`(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(description) LIKE ? ESCAPE '\\' OR LOWER(creator_name) LIKE ? ESCAPE '\\' OR LOWER(tags) LIKE ? ESCAPE '\\')`);
+    params.push(like, like, like, like);
+  }
+
+  const whereSql = where.join(' AND ');
+  const total = db.prepare(`SELECT COUNT(*) AS cnt FROM scenarios WHERE ${whereSql}`).get(...params).cnt;
+  const rows = db.prepare(`SELECT ${SCENARIO_LIST_COLUMNS} FROM scenarios WHERE ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+    .all(...params, limit, offset);
+  return { scenarios: rows.map(scenarioToListCamelCase), total };
+}
+
+/**
+ * Name and cover image for each scenario id (including trashed ones), so
+ * chat lists can label chats without loading every scenario.
+ * @param {string[]} ids
+ * @returns {Record<string, { name: string, image: string, deleted: boolean }>}
+ */
+export function getScenarioLabels(ids) {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (unique.length === 0) return {};
+  const rows = db.prepare(`SELECT id, name, image, image_path, deleted_at FROM scenarios WHERE id IN (${unique.map(() => '?').join(',')})`).all(...unique);
+  const labels = {};
+  for (const r of rows) {
+    labels[r.id] = {
+      name: r.name,
+      image: resolveImageUrl(r.image, r.image_path),
+      deleted: r.deleted_at != null,
+    };
+  }
+  return labels;
+}
+
+/**
  * Gets a full scenario by ID including characters and lore pieces — excludes soft-deleted items.
  * Lore pieces are enriched with parsed JSON and boolean conversions.
  */

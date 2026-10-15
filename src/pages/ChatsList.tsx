@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MessageSquare, Trash2, Calendar, Book, ChevronRight, Search, User, Shield } from 'lucide-react';
 import { apiService } from '../services/api';
-import { Chat, Scenario } from '../types';
+import { Chat } from '../types';
 import { format } from 'date-fns';
 import { useNotifications } from '../utils/notifications';
 
@@ -10,7 +10,7 @@ export const ChatsList: React.FC = () => {
   const { showToast, showConfirm } = useNotifications();
 
   const [chats, setChats] = useState<Chat[]>([]);
-  const [scenarios, setScenarios] = useState<Record<string, Scenario>>({});
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
@@ -22,18 +22,13 @@ export const ChatsList: React.FC = () => {
     const loadData = async () => {
       setLoading(true);
       try {
-        const [storedChats, storedScenarios] = await Promise.all([
-          apiService.getChats(),
-          apiService.getScenarios(1, 100),
-        ]);
-        const scenarioMap: Record<string, Scenario> = {};
-        const scenariosArray = storedScenarios?.scenarios || storedScenarios || [];
-        scenariosArray.forEach((s: Scenario) => { scenarioMap[s.id] = s; });
-        
+        // Each chat comes with its scenario's name and cover from the server
+        const storedChats: Chat[] = await apiService.getChats();
         setChats(storedChats.sort((a: Chat, b: Chat) => b.createdAt - a.createdAt));
-        setScenarios(scenarioMap);
+        setLoadError(null);
       } catch (e) {
         console.error('Failed to load chats', e);
+        setLoadError('Could not load your chats. Check your connection and try again.');
       } finally {
         setLoading(false);
       }
@@ -55,8 +50,7 @@ export const ChatsList: React.FC = () => {
   };
 
   const filterChats = (search: string) => (c: Chat) => {
-    const scenario = scenarios[c.scenarioId];
-    const scenarioName = scenario?.name || 'Unknown Scenario';
+    const scenarioName = c.scenarioName || 'Deleted Scenario';
     return scenarioName.toLowerCase().includes(search.toLowerCase()) || 
            c.messages[c.messages.length - 1]?.content.toLowerCase().includes(search.toLowerCase());
   };
@@ -65,7 +59,6 @@ export const ChatsList: React.FC = () => {
   const otherChats = isAdmin ? chats.filter(c => c.userId !== currentUser?.id).filter(filterChats(search)) : [];
 
   const renderChatCard = (chat: Chat, showOwner = false) => {
-    const scenario = scenarios[chat.scenarioId];
     const lastMessage = chat.messages[chat.messages.length - 1];
     const isOwnedByAdmin = chat.userId === currentUser?.id;
 
@@ -76,8 +69,8 @@ export const ChatsList: React.FC = () => {
         className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 flex items-center gap-4 cursor-pointer hover:border-zinc-700 transition-all group"
       >
         <div className="w-16 h-16 rounded-xl overflow-hidden flex-shrink-0 border border-zinc-800 bg-zinc-800">
-          {scenario?.image ? (
-            <img src={scenario.image} alt="" className="w-full h-full object-cover" />
+          {chat.scenarioImage ? (
+            <img src={chat.scenarioImage} alt="" className="w-full h-full object-cover" />
           ) : (
             <div className="w-full h-full flex items-center justify-center text-zinc-600">
               <MessageSquare size={24} />
@@ -87,7 +80,7 @@ export const ChatsList: React.FC = () => {
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-2 min-w-0">
-              <h3 className="text-white font-bold truncate">{scenario?.name || 'Deleted Scenario'}</h3>
+              <h3 className="text-white font-bold truncate">{chat.scenarioName || 'Deleted Scenario'}</h3>
               {showOwner && !isOwnedByAdmin && (
                 <span className="text-[10px] font-bold text-zinc-500 flex items-center gap-1 whitespace-nowrap bg-zinc-800 px-2 py-0.5 rounded-full">
                   <User size={10} />
@@ -203,7 +196,13 @@ export const ChatsList: React.FC = () => {
         </div>
       )}
 
-      {!loading && chats.length === 0 && (
+      {!loading && loadError && (
+        <div className="mb-6 px-4 py-3 rounded-xl border border-red-800/50 bg-red-950/30 text-red-300 text-sm" role="alert">
+          {loadError}
+        </div>
+      )}
+
+      {!loading && !loadError && chats.length === 0 && (
         <div className="text-center py-20 bg-zinc-900/50 border-2 border-dashed border-zinc-800 rounded-3xl">
           <MessageSquare size={48} className="mx-auto text-zinc-800 mb-4" />
           <p className="text-zinc-500 font-medium">No chats found. Go to home and start a scenario!</p>

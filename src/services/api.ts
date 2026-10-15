@@ -248,14 +248,17 @@ export const apiService = {
    * @param limit - Items per page (defaults to 50, max 100)
    * @returns Object with `scenarios` array and `pagination` metadata
    */
-  getScenarios: async (page: number = 1, limit: number = 50) => {
-    try {
-      const response = await api.get(`/scenarios?page=${page}&limit=${limit}`);
-      return response.data;
-    } catch (e) {
-      console.error('Failed to fetch scenarios', e);
-      return { scenarios: [], pagination: { page: 1, limit, total: 0, totalPages: 0 } };
-    }
+  getScenarios: async (
+    page: number = 1,
+    limit: number = 50,
+    filters: { tab?: 'explore' | 'mine-public' | 'mine-private'; q?: string } = {}
+  ) => {
+    // Errors are thrown so the page can show them instead of "no results"
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (filters.tab) params.set('tab', filters.tab);
+    if (filters.q) params.set('q', filters.q);
+    const response = await api.get(`/scenarios?${params}`);
+    return response.data;
   },
 
   /**
@@ -293,13 +296,9 @@ export const apiService = {
    * @returns Array of chat objects (empty on failure)
    */
   getChats: async () => {
-    try {
-      const response = await api.get('/chats');
-      return response.data;
-    } catch (e) {
-      console.error('Failed to fetch chats', e);
-      return [];
-    }
+    // Errors are thrown so the page can show them instead of "no chats"
+    const response = await api.get('/chats');
+    return response.data;
   },
 
   /**
