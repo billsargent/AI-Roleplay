@@ -937,8 +937,6 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const tokenShort = getSystemSetting('tokenShort');
   const tokenMedium = getSystemSetting('tokenMedium');
   const tokenLong = getSystemSetting('tokenLong');
-  const chatPaddingLeft = getSystemSetting('chatPaddingLeft');
-  const chatPaddingRight = getSystemSetting('chatPaddingRight');
   const frequencyPenalty = getSystemSetting('frequencyPenalty');
   const presencePenalty = getSystemSetting('presencePenalty');
   const siteName = getSystemSetting('siteName');
@@ -955,7 +953,7 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const loreScanDepth = getSystemSetting('loreScanDepth');
   const loreActiveMax = getSystemSetting('loreActiveMax');
   const lorePinnedMax = getSystemSetting('lorePinnedMax');
-  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax });
+  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax });
 
 
 
@@ -963,7 +961,7 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
 
 /** POST /api/system/settings — Updates system settings (admin only) */
 app.post('/api/system/settings', adminAuth, (req, res) => {
-  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking } = req.body;
+  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking } = req.body;
   // Engine limits: whole numbers within sensible ranges
   for (const [key, min, max] of [['contextTokenBudget', 4000, 1000000], ['loreScanDepth', 1, 200], ['loreActiveMax', 0, 50], ['lorePinnedMax', 0, 100]]) {
     if (req.body[key] === undefined) continue;
@@ -980,8 +978,6 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   if (tokenShort !== undefined) setSystemSetting('tokenShort', String(tokenShort));
   if (tokenMedium !== undefined) setSystemSetting('tokenMedium', String(tokenMedium));
   if (tokenLong !== undefined) setSystemSetting('tokenLong', String(tokenLong));
-  if (chatPaddingLeft !== undefined) setSystemSetting('chatPaddingLeft', String(chatPaddingLeft));
-  if (chatPaddingRight !== undefined) setSystemSetting('chatPaddingRight', String(chatPaddingRight));
   if (frequencyPenalty !== undefined) setSystemSetting('frequencyPenalty', String(frequencyPenalty));
   if (presencePenalty !== undefined) setSystemSetting('presencePenalty', String(presencePenalty));
   if (siteName !== undefined) setSystemSetting('siteName', siteName);
@@ -1245,8 +1241,6 @@ app.get('/api/system/llm-settings', auth, (req, res) => {
   const tokenShort = getSystemSetting('tokenShort');
   const tokenMedium = getSystemSetting('tokenMedium');
   const tokenLong = getSystemSetting('tokenLong');
-  const chatPaddingLeft = getSystemSetting('chatPaddingLeft');
-  const chatPaddingRight = getSystemSetting('chatPaddingRight');
   const frequencyPenalty = getSystemSetting('frequencyPenalty');
   const presencePenalty = getSystemSetting('presencePenalty');
   const siteName = getSystemSetting('siteName');
@@ -1255,7 +1249,7 @@ app.get('/api/system/llm-settings', auth, (req, res) => {
   const memoryWordCount = getSystemSetting('memoryWordCount');
   const memoryMaxCount = getSystemSetting('memoryMaxCount');
   const deepseekModel = getSystemSetting('deepseekModel');
-  res.json({ globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel });
+  res.json({ globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel });
 
 
 

@@ -7,7 +7,7 @@
  * Tabs:
  *   1. System   — DeepSeek API Key management + Site Branding (site name)
  *   2. LLM Config — Global LLM instructions, temperature, max tokens, response length
- *                   tokens, frequency/presence penalties, chat padding, and memory
+ *                   tokens, frequency/presence penalties, and memory
  *                   management (send interval, generate interval, word count, max count)
  *   3. Users    — Renders the <UserEditor> component for user CRUD operations
  *
@@ -56,8 +56,6 @@ export const AdminPage: React.FC = () => {
   const [tokenShort, setTokenShort] = useState('300');
   const [tokenMedium, setTokenMedium] = useState('800');
   const [tokenLong, setTokenLong] = useState('2000');
-  const [chatPaddingLeft, setChatPaddingLeft] = useState('16');
-  const [chatPaddingRight, setChatPaddingRight] = useState('16');
   // Context and lore engine (server-side prompt builder)
   const [contextTokenBudget, setContextTokenBudget] = useState('32000');
   const [loreScanDepth, setLoreScanDepth] = useState('10');
@@ -94,8 +92,6 @@ export const AdminPage: React.FC = () => {
         setTokenShort(settings.tokenShort || '300');
         setTokenMedium(settings.tokenMedium || '800');
         setTokenLong(settings.tokenLong || '2000');
-        setChatPaddingLeft(settings.chatPaddingLeft || '16');
-        setChatPaddingRight(settings.chatPaddingRight || '16');
         setFrequencyPenalty(settings.frequencyPenalty || '0');
         setPresencePenalty(settings.presencePenalty || '0');
         setSiteName(settings.siteName || '');
@@ -195,7 +191,7 @@ export const AdminPage: React.FC = () => {
     try {
       await apiService.updateSystemSettings({
         globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong,
-        chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName,
+        frequencyPenalty, presencePenalty, siteName,
         memoryGenerateInterval, memoryWordCount, memoryMaxCount,
         contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax,
         deepseekModel,
@@ -586,27 +582,6 @@ export const AdminPage: React.FC = () => {
                   <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
                     <span>More focused (-2)</span><span>Default (0)</span><span>New topics (+2)</span>
                   </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Chat Padding — left/right token padding for API requests */}
-            <div className="border-t border-zinc-800 pt-4 mb-6">
-              <label className="block text-sm font-bold text-zinc-400 mb-3 flex items-center gap-2">
-                <AlignLeft size={16} /> Chat Padding (px)
-              </label>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider">Left Padding</label>
-                  <input type="number" min="0" max="200" value={chatPaddingLeft}
-                    onChange={(e) => setChatPaddingLeft(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider">Right Padding</label>
-                  <input type="number" min="0" max="200" value={chatPaddingRight}
-                    onChange={(e) => setChatPaddingRight(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                 </div>
               </div>
             </div>

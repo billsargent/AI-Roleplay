@@ -15,12 +15,12 @@
  * @module ChatPage
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { 
-  Send, Settings as SettingsIcon, Brain, Info, 
+import {
+  Send, Settings as SettingsIcon, Brain, Info,
   ChevronLeft, MessageSquare, RefreshCw, Trash2,
-  X, Pin, User, Edit2, FileDown, Play, Square, RotateCcw
+  X, Pin, User, Edit2, FileDown, Play, Square, RotateCcw, ArrowDown
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
@@ -103,17 +103,21 @@ export const ChatPage: React.FC = () => {
     setChat(next);
   };
 
-  // ── Reference to messages container for PDF capture ──
+  // ── Scrolling: the message list follows new text only while the reader is at the bottom ──
+  /** The scrollable message area */
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  /** The message list inside it; its size changes as replies stream in */
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** True while the reader is at (or near) the bottom of the conversation */
+  const atBottomRef = useRef(true);
+  /** Shown when new text arrives while the reader has scrolled up */
+  const [hasUnseen, setHasUnseen] = useState(false);
 
   // ── User-facing color preferences ──
   const [dialogColor, setDialogColor] = useState('#4f46e5');
   const [narrationColor, setNarrationColor] = useState('');
   const [chatBubbleColor, setChatBubbleColor] = useState('#4f46e5');
-  const [chatPaddingLeft, setChatPaddingLeft] = useState(16);
-  const [chatPaddingRight, setChatPaddingRight] = useState(16);
-
-  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load chat data on mount or when chatId changes. A slower response for a
   // previous chat is ignored, and a running AI request is stopped on leave.
@@ -139,11 +143,9 @@ export const ChatPage: React.FC = () => {
       } catch {
         // Use defaults
       }
-      // Load global LLM settings (memory intervals, padding, etc.)
+      // Load global LLM settings (memory limits)
       try {
         const llmSettings = await apiService.getLlmSettings();
-        if (llmSettings.chatPaddingLeft) setChatPaddingLeft(parseInt(llmSettings.chatPaddingLeft));
-        if (llmSettings.chatPaddingRight) setChatPaddingRight(parseInt(llmSettings.chatPaddingRight));
         window.__memoryMaxCount = llmSettings.memoryMaxCount ? parseInt(llmSettings.memoryMaxCount) : 50;
       } catch {
         // Use defaults
@@ -222,19 +224,59 @@ export const ChatPage: React.FC = () => {
     }
   };
 
-  // Auto-scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  /** Jumps to the newest message and resumes following new text */
+  const scrollToBottom = () => {
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    atBottomRef.current = true;
+    setHasUnseen(false);
+  };
+
+  /** Tracks whether the reader is near the bottom (they may scroll up to reread) */
+  const handleScroll = () => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (atBottomRef.current) setHasUnseen(false);
+  };
+
+  // New or streamed text: follow it if the reader is at the bottom, otherwise
+  // leave them where they are and show the "new messages" button
+  useLayoutEffect(() => {
+    if (atBottomRef.current) {
+      const el = messagesContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    } else if (chat?.messages.length) {
+      setHasUnseen(true);
+    }
   }, [chat?.messages]);
 
-  // Initial scroll to bottom after loading completes
+  // The list or the visible area changes size (images load, the input grows,
+  // the window resizes): keep the bottom in view while following
   useEffect(() => {
-    if (!loading && chat && chat.messages.length > 0) {
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
-      }, 100);
-    }
-  }, [loading]);
+    const container = messagesContainerRef.current;
+    const list = messageListRef.current;
+    if (!container || !list || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (atBottomRef.current) container.scrollTop = container.scrollHeight;
+    });
+    observer.observe(container);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [loading, chat?.id]);
+
+  // Opening a chat starts at the newest message
+  useLayoutEffect(() => {
+    if (!loading) scrollToBottom();
+  }, [loading, chat?.id]);
+
+  // The input grows with its text, up to 40% of the screen, then scrolls inside
+  useLayoutEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight, Math.round(window.innerHeight * 0.4))}px`;
+  }, [input]);
 
   /**
    * Sends a user message, then asks the AI for a reply.
@@ -363,6 +405,7 @@ export const ChatPage: React.FC = () => {
     const text = input.trim();
     if (!text || isTyping || isReadOnly) return;
     setInput('');
+    scrollToBottom(); // Sending always brings the conversation back into view
     await sendMessage(text);
   };
 
@@ -406,203 +449,240 @@ export const ChatPage: React.FC = () => {
   if (!chat) return <div className="p-8 text-white">Chat not found.</div>;
   if (!scenario && !scenarioDeleted) return <div className="p-8 text-white">Chat not found.</div>;
 
+  // Message actions (edit, rewind, delete), shown on hover and always on touch screens
+  const messageActions = (m: Message) => (
+    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity">
+      <button
+        onClick={async () => {
+          const newContent = prompt('Edit message:', m.content);
+          if (newContent !== null) {
+            const newMessages = chat.messages.map(msg => msg.id === m.id ? { ...msg, content: newContent } : msg);
+            const updatedChat = { ...chat, messages: newMessages };
+            setChat(updatedChat);
+            await apiService.saveChat(updatedChat);
+          }
+        }}
+        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors" title="Edit" aria-label="Edit message"
+      >
+        <Edit2 size={13} />
+      </button>
+      <button
+        onClick={async () => {
+          if (await showConfirm('Delete this and all messages after it? (Rewind)')) {
+            const index = chat.messages.findIndex(msg => msg.id === m.id);
+            const newMessages = chat.messages.slice(0, index + 1);
+            const updatedChat = { ...chat, messages: newMessages };
+            setChat(updatedChat);
+            await apiService.saveChat(updatedChat);
+          }
+        }}
+        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors" title="Rewind to here" aria-label="Rewind to this message"
+      >
+        <RefreshCw size={13} />
+      </button>
+      <button
+        onClick={async () => {
+          if (await showConfirm('Delete this message?')) {
+            const newMessages = chat.messages.filter(msg => msg.id !== m.id);
+            const updatedChat = { ...chat, messages: newMessages };
+            setChat(updatedChat);
+            await apiService.saveChat(updatedChat);
+          }
+        }}
+        className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-900/30 transition-colors" title="Delete" aria-label="Delete message"
+      >
+        <Trash2 size={13} />
+      </button>
+    </div>
+  );
+
+  /** Opens the side panel on one of its tabs */
+  const openPanel = (tab: 'info' | 'matrix' | 'settings') => {
+    setOverlayTab(tab);
+    setOverlay(tab);
+  };
+
   return (
-    <div className="flex flex-1 min-h-0 h-screen bg-zinc-950 text-zinc-200">
+    // Fills the screen below the navbar (top bar on desktop, bottom bar on phones, both 4rem)
+    <div className="flex flex-col h-[calc(100dvh-4rem)] min-h-0 bg-zinc-950 text-zinc-200">
 
-      {/* ── Main Chat Area ── */}
-      <div className="flex-1 flex flex-col min-w-0 h-full">
-
-        {/* Read-Only Banner (shown when admin views another user's chat) */}
-        {isReadOnly && !scenarioDeleted && (
-          <div className="flex-shrink-0 bg-amber-600/10 border-b border-amber-600/20 px-4 py-2 text-center">
-            <span className="text-xs font-bold text-amber-500 uppercase tracking-wider flex items-center justify-center gap-2">
-              <User size={14} />
-              Viewing {chat.ownerUsername ? <>{chat.ownerUsername}'s</> : 'another user\'s'} chat — read-only
-            </span>
+      {/* ── Chat header: back, scenario, panels ── */}
+      <header className="flex-shrink-0 border-b border-zinc-800/80 bg-zinc-950/95">
+        <div className="mx-auto w-full max-w-3xl px-2 sm:px-4 h-12 flex items-center gap-2">
+          <button onClick={() => navigate('/chats')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Back to Chats" aria-label="Back to Chats">
+            <ChevronLeft size={18} />
+          </button>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-white truncate">{scenario?.name || chat.scenarioName || 'Chat'}</p>
+            {chat.userCharacter?.name && (
+              <p className="text-[11px] text-zinc-500 truncate">as {chat.userCharacter.name}</p>
+            )}
           </div>
-        )}
-
-        {/* Scenario Deleted Banner (shown when the scenario has been soft-deleted by its creator) */}
-        {scenarioDeleted && (
-          <div className="flex-shrink-0 bg-red-600/10 border-b border-red-600/20 px-4 py-2 text-center">
-            <span className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center justify-center gap-2">
-              <Info size={14} />
-              This scenario has been deleted by its creator — chat is now read-only
-            </span>
-          </div>
-        )}
-
-        {/* ── Messages Area ── */}
-        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6 pb-40"
-          style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px' }}>
-
-          {/* Empty state */}
-          {chat.messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full text-zinc-500 text-center px-8">
-              <MessageSquare size={48} className="mb-4 opacity-20" />
-              <p>No messages yet. Send a message to start the story!</p>
-            </div>
+          {scenario && (
+            <button onClick={() => openPanel('info')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Scenario Info" aria-label="Scenario Info">
+              <Info size={18} />
+            </button>
           )}
+          {scenario && (
+            <button onClick={() => openPanel('matrix')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Memories & Lore" aria-label="Memories and Lore">
+              <Brain size={18} />
+            </button>
+          )}
+          <button onClick={() => openPanel('settings')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Chat Settings" aria-label="Chat Settings">
+            <SettingsIcon size={18} />
+          </button>
+        </div>
+      </header>
 
-          {/* Message list */}
-          {chat.messages.map((m) => (
-            <div key={m.id} className={`group relative flex flex-col ${m.role === 'user' ? 'items-end mr-4' : 'items-start'} ${m.role === 'system' ? 'items-center !my-2' : ''}`}>
-              {m.role !== 'system' ? (
-                <>
-                  {/* Message header: avatar, name, timestamp */}
-                  <div className="flex items-center gap-2 mb-1 px-1">
-                    {m.role === 'assistant' && (
-                      <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold">
-                        AI
-                      </div>
-                    )}
-                    <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">
-                      {m.role === 'assistant' ? (m.characterName || scenario?.name || 'AI') : (chat.userCharacter?.name || 'YOU')}
-                    </span>
-                    <span className="text-[10px] text-zinc-600">
-                      {format(m.timestamp, 'HH:mm')}
-                    </span>
-                  </div>
+      {/* Read-Only Banner (shown when admin views another user's chat) */}
+      {isReadOnly && !scenarioDeleted && (
+        <div className="flex-shrink-0 bg-amber-600/10 border-b border-amber-600/20 px-4 py-2 text-center">
+          <span className="text-xs font-bold text-amber-500 uppercase tracking-wider flex items-center justify-center gap-2">
+            <User size={14} />
+            Viewing {chat.ownerUsername ? <>{chat.ownerUsername}'s</> : 'another user\'s'} chat — read-only
+          </span>
+        </div>
+      )}
 
-                  {/* Message bubble with dialog/narration color highlighting */}
-                  <div 
-                    className={`max-w-[85%] rounded-2xl p-4 shadow-sm relative ${
-                      m.role === 'user' 
-                        ? 'text-white rounded-tr-none' 
-                        : 'bg-zinc-900 border border-zinc-800 rounded-tl-none'
-                    }`}
-                    style={m.role === 'user' ? { backgroundColor: chatBubbleColor } : narrationColor ? { color: narrationColor } : {}}
-                  >
-                    {/* Parse *italic* and "dialogue" markers for color styling */}
-                    <div className="whitespace-pre-wrap leading-relaxed message-content">
-                      {m.content.split(/(\*[^*]+\*|"[^"]*")/g).map((part, i) => {
-                        if (part.startsWith('*') && part.endsWith('*')) {
-                          return <em key={i} style={{ color: narrationColor || undefined }}>{part.slice(1, -1)}</em>;
-                        }
-                        if (part.startsWith('"') && part.endsWith('"')) {
-                          return <span key={i} style={{ color: dialogColor }}>{part}</span>;
-                        }
-                        return part;
-                      })}
-                    </div>
+      {/* Scenario Deleted Banner (shown when the scenario has been soft-deleted by its creator) */}
+      {scenarioDeleted && (
+        <div className="flex-shrink-0 bg-red-600/10 border-b border-red-600/20 px-4 py-2 text-center">
+          <span className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center justify-center gap-2">
+            <Info size={14} />
+            This scenario has been deleted by its creator — chat is now read-only
+          </span>
+        </div>
+      )}
 
-                    {/* Message action buttons: Edit, Rewind, Delete (hidden in read-only) */}
-                    {!isReadOnly && (
-                      <div className={`absolute top-0 ${m.role === 'user' ? 'right-full mr-2' : 'left-full ml-2'} opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-lg shadow-xl z-10`}>
-                        <button
-                          onClick={async () => {
-                            const newContent = prompt('Edit message:', m.content);
-                            if (newContent !== null) {
-                              const newMessages = chat.messages.map(msg => msg.id === m.id ? { ...msg, content: newContent } : msg);
-                              const updatedChat = { ...chat, messages: newMessages };
-                              setChat(updatedChat);
-                              await apiService.saveChat(updatedChat);
-                            }
-                          }}
-                          className="p-1.5 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors" title="Edit"
-                        >
-                          <Edit2 size={14} />
-                        </button>
-                        <button
-                          onClick={async () => {
-                            if (await showConfirm('Delete this and all messages after it? (Rewind)')) {
-                              const index = chat.messages.findIndex(msg => msg.id === m.id);
-                              const newMessages = chat.messages.slice(0, index + 1);
-                              const updatedChat = { ...chat, messages: newMessages };
-                              setChat(updatedChat);
-                              await apiService.saveChat(updatedChat);
-                            }
-                          }}
-                          className="p-1.5 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors" title="Rewind"
-                        >
-                          <RefreshCw size={14} />
-                        </button>
-                        <button
-                          onClick={async () => {
-                            if (await showConfirm('Delete this message?')) {
-                              const newMessages = chat.messages.filter(msg => msg.id !== m.id);
-                              const updatedChat = { ...chat, messages: newMessages };
-                              setChat(updatedChat);
-                              await apiService.saveChat(updatedChat);
-                            }
-                          }}
-                          className="p-1.5 hover:bg-red-900/40 rounded text-zinc-400 hover:text-red-500 transition-colors" title="Delete"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </>
-              ) : (
-                // System messages (e.g., persona change notifications) rendered as pill badges
+      {/* ── Messages: scrolls on its own; the input below never covers it ── */}
+      <div className="relative flex-1 min-h-0">
+        <div ref={messagesContainerRef} onScroll={handleScroll} className="h-full overflow-y-auto overscroll-contain">
+          <div ref={messageListRef} className="mx-auto w-full max-w-3xl px-4 sm:px-6 py-6 space-y-6">
+
+            {/* Empty state */}
+            {chat.messages.length === 0 && (
+              <div className="flex flex-col items-center justify-center py-24 text-zinc-500 text-center px-8">
+                <MessageSquare size={48} className="mb-4 opacity-20" />
+                <p>No messages yet. Send a message to start the story!</p>
+              </div>
+            )}
+
+            {/* Message list */}
+            {chat.messages.map((m) => m.role === 'system' ? (
+              // System messages (e.g., persona change notifications) rendered as pill badges
+              <div key={m.id} className="flex justify-center !my-2">
                 <div className="px-4 py-1.5 bg-zinc-900/50 border border-zinc-800/50 rounded-full text-[10px] font-black text-zinc-600 uppercase tracking-widest italic">
                   {m.content}
                 </div>
-              )}
-            </div>
-          ))}
-
-          {/* Retry button — after a failed AI request */}
-          {!isReadOnly && !isTyping && (lastError || chat.messages[chat.messages.length - 1]?.role === 'user') && (
-            <div className="flex justify-center">
-              <button
-                onClick={retryLastReply}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:border-red-500/50 transition-all text-xs font-bold"
-              >
-                <RotateCcw size={12} />
-                Retry
-              </button>
-            </div>
-          )}
-
-          {/* Continue button — appears when last message is from the AI and not read-only/typing */}
-          {!isReadOnly && !isTyping && chat.messages.length > 0 && chat.messages[chat.messages.length - 1].role === 'assistant' && (
-            <div className="flex justify-center">
-              <button
-                onClick={() => sendMessage('*continue*')}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-purple-500/30 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:border-purple-500/50 hover:text-purple-300 transition-all text-xs font-bold"
-              >
-                <Play size={12} fill="currentColor" />
-                Continue
-              </button>
-            </div>
-          )}
-
-          {/* Typing indicator for non-streaming mode */}
-          {isTyping && !chat.settings.streamResponse && (
-            <div className="flex flex-col items-start">
-              <div className="flex items-center gap-2 mb-1 px-1">
-                <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center">
-                  <RefreshCw size={12} className="animate-spin" />
-                </div>
-                <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">AI is thinking...</span>
               </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-2xl rounded-tl-none p-4 w-16 flex justify-center">
-                <div className="flex gap-1">
-                  <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                  <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                  <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce"></div>
+            ) : (
+              <div key={m.id} className={`group flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+                {/* Message header: avatar, name, timestamp, actions */}
+                <div className={`flex items-center gap-2 mb-1 px-1 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                  {m.role === 'assistant' && (
+                    <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold">
+                      AI
+                    </div>
+                  )}
+                  <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">
+                    {m.role === 'assistant' ? (m.characterName || scenario?.name || 'AI') : (chat.userCharacter?.name || 'YOU')}
+                  </span>
+                  <span className="text-[10px] text-zinc-600">
+                    {format(m.timestamp, 'HH:mm')}
+                  </span>
+                  {!isReadOnly && messageActions(m)}
+                </div>
+
+                {/* Message bubble with dialog/narration color highlighting */}
+                <div
+                  className={`rounded-2xl p-4 shadow-sm ${
+                    m.role === 'user'
+                      ? 'max-w-[85%] text-white rounded-tr-none'
+                      : 'w-full bg-zinc-900 border border-zinc-800 rounded-tl-none'
+                  }`}
+                  style={m.role === 'user' ? { backgroundColor: chatBubbleColor } : narrationColor ? { color: narrationColor } : {}}
+                >
+                  {/* Parse *italic* and "dialogue" markers for color styling */}
+                  <div className="whitespace-pre-wrap break-words leading-relaxed message-content">
+                    {m.content.split(/(\*[^*]+\*|"[^"]*")/g).map((part, i) => {
+                      if (part.startsWith('*') && part.endsWith('*')) {
+                        return <em key={i} style={{ color: narrationColor || undefined }}>{part.slice(1, -1)}</em>;
+                      }
+                      if (part.startsWith('"') && part.endsWith('"')) {
+                        return <span key={i} style={{ color: dialogColor }}>{part}</span>;
+                      }
+                      return part;
+                    })}
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
-          <div ref={messagesEndRef} />
+            ))}
+
+            {/* Retry button — after a failed AI request */}
+            {!isReadOnly && !isTyping && (lastError || chat.messages[chat.messages.length - 1]?.role === 'user') && (
+              <div className="flex justify-center">
+                <button
+                  onClick={retryLastReply}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:border-red-500/50 transition-all text-xs font-bold"
+                >
+                  <RotateCcw size={12} />
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {/* Continue button — appears when last message is from the AI and not read-only/typing */}
+            {!isReadOnly && !isTyping && chat.messages.length > 0 && chat.messages[chat.messages.length - 1].role === 'assistant' && (
+              <div className="flex justify-center">
+                <button
+                  onClick={() => sendMessage('*continue*')}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-purple-500/30 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:border-purple-500/50 hover:text-purple-300 transition-all text-xs font-bold"
+                >
+                  <Play size={12} fill="currentColor" />
+                  Continue
+                </button>
+              </div>
+            )}
+
+            {/* Typing indicator for non-streaming mode */}
+            {isTyping && !chat.settings.streamResponse && (
+              <div className="flex flex-col items-start">
+                <div className="flex items-center gap-2 mb-1 px-1">
+                  <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center">
+                    <RefreshCw size={12} className="animate-spin" />
+                  </div>
+                  <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">AI is thinking...</span>
+                </div>
+                <div className="bg-zinc-900 border border-zinc-800 rounded-2xl rounded-tl-none p-4 w-16 flex justify-center">
+                  <div className="flex gap-1">
+                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce"></div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* New text arrived while the reader was scrolled up */}
+        {hasUnseen && (
+          <button
+            onClick={scrollToBottom}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-600 text-white text-xs font-bold shadow-lg hover:bg-indigo-500 transition-colors"
+          >
+            <ArrowDown size={14} />
+            New messages
+          </button>
+        )}
       </div>
 
-      {/* ── Floating Input Area (fixed at bottom) ── */}
-      <div className="fixed bottom-0 left-0 right-0 z-40">
-        {/* Footer bar with back button and scenario name */}
-        <div className="px-4 pb-2 flex items-center justify-center gap-2">
-          <button onClick={() => navigate('/chats')} className="text-zinc-500 hover:text-white transition-colors" title="Back to Chats">
-            <ChevronLeft size={16} />
-          </button>
-          <span className="text-xs text-zinc-500 font-bold truncate max-w-[200px]">{scenario?.name || 'Chat'}</span>
-        </div>
-        <div className="px-4 pb-4 bg-gradient-to-t from-zinc-950 via-zinc-950 to-transparent">
-          <div className="max-w-4xl mx-auto relative group">
+      {/* ── Input bar: part of the layout, grows with its text ── */}
+      <div className="flex-shrink-0 border-t border-zinc-800/80 bg-zinc-950">
+        <div className="mx-auto w-full max-w-3xl px-4 sm:px-6 py-3">
+          <div className="relative">
             <textarea
+              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -613,17 +693,11 @@ export const ChatPage: React.FC = () => {
               }}
               placeholder={scenarioDeleted ? "⚠ This scenario has been deleted by its creator — chat is read-only" : (isReadOnly ? "This chat is read-only" : "Write your response...")}
               disabled={isReadOnly}
-              className={`w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-4 pr-28 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[60px] max-h-[200px] resize-none transition-all ${scenarioDeleted ? 'placeholder:text-red-400/60 text-red-300/50 border-red-800/50' : ''} ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
+              aria-label="Your message"
+              className={`block w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-3.5 pl-4 pr-14 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none overflow-y-auto ${scenarioDeleted ? 'placeholder:text-red-400/60 text-red-300/50 border-red-800/50' : ''} ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
               rows={1}
             />
-            {/* Input action buttons */}
-            <div className="absolute right-2 bottom-2 flex items-center gap-1">
-              <button
-                onClick={() => { setOverlay('settings'); setOverlayTab('settings'); }}
-                className="p-2 rounded-xl transition-colors text-purple-400 hover:text-white hover:bg-zinc-800" title="Chat Settings"
-              >
-                <SettingsIcon size={22} />
-              </button>
+            <div className="absolute right-2 bottom-2">
               {isTyping ? (
                 <button
                   onClick={stopGenerating}
@@ -631,23 +705,24 @@ export const ChatPage: React.FC = () => {
                   title="Stop generating"
                   aria-label="Stop generating"
                 >
-                  <Square size={20} fill="currentColor" />
+                  <Square size={18} fill="currentColor" />
                 </button>
               ) : (
                 <button
                   onClick={handleSend}
                   disabled={!input.trim() || isReadOnly}
                   className={`p-2 rounded-xl transition-all ${
-                    input.trim() && !isReadOnly ? 'bg-indigo-600 text-white shadow-lg' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                    input.trim() && !isReadOnly ? 'bg-indigo-600 text-white shadow-lg hover:bg-indigo-500' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
                   }`}
                   title="Send"
                   aria-label="Send"
                 >
-                  <Send size={20} />
+                  <Send size={18} />
                 </button>
               )}
             </div>
           </div>
+          <p className="hidden sm:block mt-1.5 text-[10px] text-zinc-600 text-center">Enter to send · Shift+Enter for a new line</p>
         </div>
       </div>
 
