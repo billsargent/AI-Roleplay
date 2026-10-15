@@ -20,7 +20,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { 
   Send, Settings as SettingsIcon, Brain, Info, 
   ChevronLeft, MessageSquare, RefreshCw, Trash2,
-  X, Pin, User, Edit2, FileDown, Play
+  X, Pin, User, Edit2, FileDown, Play, Square, RotateCcw
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
@@ -41,6 +41,27 @@ declare global {
     __memoryWordCount: number;          // Target word count for generated memories
     __memoryMaxCount: number;           // Maximum number of stored memories before trimming
   }
+}
+
+/** Messages the app sends on the user's behalf; not counted as user turns */
+const SYNTHETIC_USER_MESSAGES = new Set(['*continue*']);
+
+/**
+ * Keeps all pinned memories plus the newest unpinned ones, up to maxCount.
+ * Returns a new array (never mutates chat state).
+ */
+function trimMemories(memories: Chat['memories'], maxCount: number): Chat['memories'] {
+  if (memories.length <= maxCount) return memories;
+  const pinned = memories.filter(m => m.pinned);
+  const keep = new Set(
+    memories
+      .filter(m => !m.pinned)
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, Math.max(0, maxCount - pinned.length))
+      .map(m => m.id)
+  );
+  // Preserve the original order
+  return memories.filter(m => m.pinned || keep.has(m.id));
 }
 
 /**
@@ -65,6 +86,23 @@ export const ChatPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isReadOnly, setIsReadOnly] = useState(false);
   const [scenarioDeleted, setScenarioDeleted] = useState(false);
+  /** Error from the last AI request, shown with a Retry button */
+  const [lastError, setLastError] = useState<string | null>(null);
+
+  /** Cancels the in-flight AI request (Stop button, switching chats, leaving the page) */
+  const abortRef = useRef<AbortController | null>(null);
+  /** Latest chat state, for async work that finishes after later edits */
+  const chatRef = useRef<Chat | null>(null);
+  /** The chat currently on screen; async results for another chat are not applied */
+  const activeChatIdRef = useRef<string | undefined>(chatId);
+
+  useEffect(() => { chatRef.current = chat; }, [chat]);
+
+  /** Sets chat state and the ref together, so async code sees it immediately */
+  const commitChat = (next: Chat) => {
+    chatRef.current = next;
+    setChat(next);
+  };
 
   // ── Reference to messages container for PDF capture ──
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -78,12 +116,18 @@ export const ChatPage: React.FC = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Load chat data on mount or when chatId changes
+  // Load chat data on mount or when chatId changes. A slower response for a
+  // previous chat is ignored, and a running AI request is stopped on leave.
   useEffect(() => {
-    if (chatId) {
-      loadChat(chatId);
-    }
-  }, [chatId, navigate]);
+    activeChatIdRef.current = chatId;
+    if (!chatId) return;
+    let cancelled = false;
+    loadChat(chatId, () => cancelled);
+    return () => {
+      cancelled = true;
+      abortRef.current?.abort();
+    };
+  }, [chatId]);
 
   // Load user color preferences and global LLM/memory settings on mount
   useEffect(() => {
@@ -121,11 +165,21 @@ export const ChatPage: React.FC = () => {
    * Enforces access control: users can only access their own chats,
    * while admins can view any chat (in read-only mode).
    */
-  const loadChat = async (id: string) => {
+  const loadChat = async (id: string, isCancelled: () => boolean) => {
+    // Reset everything that belongs to the previous chat
     setLoading(true);
     setError(null);
+    setChat(null);
+    chatRef.current = null;
+    setScenario(null);
+    setIsReadOnly(false);
+    setScenarioDeleted(false);
+    setLastError(null);
+    setOverlay('none');
+    setIsTyping(false);
     try {
       const storedChat = await apiService.getChat(id);
+      if (isCancelled()) return;
       if (storedChat) {
         const user = apiService.getCurrentUser();
         // Determine if this chat belongs to another user
@@ -137,13 +191,21 @@ export const ChatPage: React.FC = () => {
         if (isOwnedByOther && user?.role === 'admin') {
           setIsReadOnly(true); // Admins view other users' chats read-only
         }
-        setChat(storedChat);
+        commitChat(storedChat);
+        if (!storedChat.scenarioId) {
+          // The scenario was permanently deleted; the chat stays readable
+          setScenarioDeleted(true);
+          setIsReadOnly(true);
+          return;
+        }
         try {
           const storedScenario = await apiService.getScenario(storedChat.scenarioId);
+          if (isCancelled()) return;
           if (storedScenario) {
             setScenario(storedScenario);
           }
         } catch (err: any) {
+          if (isCancelled()) return;
           // Scenario was soft-deleted by the creator — enter read-only mode
           if (err.response?.status === 404) {
             setScenarioDeleted(true);
@@ -156,13 +218,14 @@ export const ChatPage: React.FC = () => {
         setError('Chat not found.');
       }
     } catch (e: any) {
+      if (isCancelled()) return;
       if (e.response?.status === 403 || e.response?.status === 404) {
         setError('Chat not found or access denied.');
       } else {
         setError('Failed to load chat.');
       }
     } finally {
-      setLoading(false);
+      if (!isCancelled()) setLoading(false);
     }
   };
 
@@ -181,17 +244,7 @@ export const ChatPage: React.FC = () => {
   }, [loading]);
 
   /**
-   * Core send logic — creates a user message with the given text and sends it to the AI.
-   * Handles streaming/non-streaming responses, memory generation, and saving.
-   * 
-   * Flow:
-   * 1. Creates a user message and adds it to the chat
-   * 2. Saves the user message to the server
-   * 3. If streaming is enabled: uses SSE to display the AI response in real-time
-   * 4. If streaming is disabled: waits for the complete response
-   * 5. Auto-generates a memory at the configured interval
-   * 6. Trims oldest non-pinned memories if the max count is exceeded
-   * 7. Saves the final chat state to the server
+   * Sends a user message, then asks the AI for a reply.
    */
   const sendMessage = async (text: string) => {
     if (!text || !chat || !scenario || isTyping || isReadOnly) return;
@@ -202,128 +255,144 @@ export const ChatPage: React.FC = () => {
       content: text,
       timestamp: Date.now(),
     };
+    const base = { ...chat, messages: [...chat.messages, userMessage] };
+    commitChat(base);
+    try {
+      await apiService.saveChat(base);
+    } catch {
+      showToast('Could not save your message to the server', 'error');
+    }
+    await generateReply(base);
+  };
 
-    const updatedMessages = [...chat.messages, userMessage];
-    const updatedChat = { ...chat, messages: updatedMessages };
-    setChat(updatedChat);
+  /**
+   * Gets an AI reply for a chat whose last message is the user's.
+   *
+   * - Streaming or not, depending on the chat setting.
+   * - Stop (or leaving the page) aborts the request. Text that already
+   *   arrived is kept and saved; an empty placeholder is removed.
+   * - On failure the error is shown with a Retry button.
+   * - The final save merges into the latest chat state, so a memory or
+   *   edit made while the reply was generating is not overwritten.
+   */
+  const generateReply = async (base: Chat) => {
+    if (!scenario) return;
+    const forChat = base.id;
+    const isCurrent = () => activeChatIdRef.current === forChat;
+
     setIsTyping(true);
+    setLastError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const replyId = uuidv4();
+    let partial = '';
+    const withReply = (content: string): Chat => ({
+      ...(isCurrent() && chatRef.current ? chatRef.current : base),
+      messages: [...base.messages, { id: replyId, role: 'assistant', content, timestamp: Date.now() }],
+    });
 
     try {
-      // Save user message to server
-      await apiService.saveChat(updatedChat);
-
-      if (chat.settings.streamResponse) {
-        // ── Streaming path ──
-        const assistantMessageId = uuidv4();
-        const assistantMessage: Message = {
-          id: assistantMessageId,
-          role: 'assistant',
-          content: '',
-          timestamp: Date.now(),
-        };
-
-        // Add placeholder message that will be updated in real-time
-        const messagesWithPlaceholder = [...updatedMessages, assistantMessage];
-        const chatWithPlaceholder = { ...updatedChat, messages: messagesWithPlaceholder };
-        setChat(chatWithPlaceholder);
-
-        // Stream the response, updating the placeholder message content via callback
-        const fullContent = await deepseek.chatStream(
-          updatedMessages,
-          chat.settings,
-          scenario,
-          updatedChat,
-          (chunk) => {
-            setChat(prevChat => {
-              if (!prevChat) return prevChat;
-              const newMessages = prevChat.messages.map(m =>
-                m.id === assistantMessageId
-                  ? { ...m, content: m.content + chunk }
-                  : m
-              );
-              return { ...prevChat, messages: newMessages };
-            });
-          }
-        );
-
-        const finalMessages = [...updatedMessages, {
-          ...assistantMessage,
-          content: fullContent,
-        }];
-        const finalChat = { ...updatedChat, messages: finalMessages };
-
-        // Auto-generate memory at configured interval
-        handleMemoryGeneration(finalChat, finalMessages);
-
-        setChat(finalChat);
-        await apiService.saveChat(finalChat);
+      let content: string;
+      if (base.settings.streamResponse) {
+        commitChat(withReply(''));
+        content = await deepseek.chatStream(base.messages, base.settings, scenario, base, (chunk) => {
+          partial += chunk;
+          if (!isCurrent()) return;
+          setChat(prev => prev && {
+            ...prev,
+            messages: prev.messages.map(m => (m.id === replyId ? { ...m, content: m.content + chunk } : m)),
+          });
+        }, controller.signal);
       } else {
-        // ── Non-streaming path ──
-        const response = await deepseek.chat(updatedMessages, chat.settings, scenario, updatedChat);
-        
-        const assistantMessage: Message = {
-          id: uuidv4(),
-          role: 'assistant',
-          content: response,
-          timestamp: Date.now(),
-        };
-
-        const finalMessages = [...updatedMessages, assistantMessage];
-        const finalChat = { ...updatedChat, messages: finalMessages };
-        
-        handleMemoryGeneration(finalChat, finalMessages);
-
-        setChat(finalChat);
-        await apiService.saveChat(finalChat);
+        content = await deepseek.chat(base.messages, base.settings, scenario, base, controller.signal);
       }
+
+      const final = withReply(content);
+      if (isCurrent()) commitChat(final);
+      await apiService.saveChat(final);
+      // Memory generation is a separate AI call; do not make the user wait for it
+      void maybeGenerateMemory(final);
     } catch (error: any) {
-      showToast(error.message || 'Error communicating with DeepSeek', 'error');
+      const aborted = controller.signal.aborted;
+      // Keep whatever text already arrived; drop an empty placeholder
+      const kept = partial.trim() ? withReply(partial) : { ...(isCurrent() && chatRef.current ? chatRef.current : base), messages: base.messages };
+      if (isCurrent()) commitChat(kept);
+      if (partial.trim()) {
+        apiService.saveChat(kept).catch(() => showToast('Could not save the partial reply', 'error'));
+      }
+      if (!aborted && isCurrent()) {
+        const message = error?.message || 'Error communicating with DeepSeek';
+        setLastError(message);
+        showToast(message, 'error');
+      }
     } finally {
-      setIsTyping(false);
+      if (abortRef.current === controller) abortRef.current = null;
+      if (isCurrent()) setIsTyping(false);
     }
+  };
+
+  /** Stops the AI reply that is being generated */
+  const stopGenerating = () => {
+    abortRef.current?.abort();
+  };
+
+  /**
+   * Asks for a new reply to the last user message, replacing any partial
+   * reply left by the failed attempt.
+   */
+  const retryLastReply = async () => {
+    const current = chatRef.current;
+    if (!current || isTyping || isReadOnly) return;
+    let end = current.messages.length;
+    while (end > 0 && current.messages[end - 1].role !== 'user') end--;
+    if (end === 0) return;
+    const base = { ...current, messages: current.messages.slice(0, end) };
+    commitChat(base);
+    await generateReply(base);
   };
 
   /**
    * Public send handler — reads from the input state and sends.
+   * While the AI is replying, Enter does nothing (the text stays in the box).
    */
   const handleSend = async () => {
-    const text = input;
+    const text = input.trim();
+    if (!text || isTyping || isReadOnly) return;
     setInput('');
-    await sendMessage(text.trim());
+    await sendMessage(text);
   };
 
   /**
-   * Generates a new AI memory if the user message count aligns with the
-   * configured generate interval, then trims old memories if the max is exceeded.
-   * 
-   * @param chatObj - The chat object to potentially add a memory to
-   * @param messages - The current message list (used to count user messages)
+   * Adds an AI-written memory when the number of real user messages reaches
+   * the configured interval, then trims old unpinned memories. Runs in the
+   * background after a reply and merges into the latest chat state.
    */
-  const handleMemoryGeneration = async (chatObj: Chat, messages: Message[]) => {
-    const userMsgCount = messages.filter(m => m.role === 'user').length;
+  const maybeGenerateMemory = async (snapshot: Chat) => {
+    const userMsgCount = snapshot.messages.filter(
+      m => m.role === 'user' && !SYNTHETIC_USER_MESSAGES.has(m.content.trim())
+    ).length;
     const genInterval = window.__memoryGenerateInterval || 25;
-    const wordCount = window.__memoryWordCount || 100;
-    if (userMsgCount > 0 && userMsgCount % genInterval === 0) {
-      const memoryContent = await deepseek.generateMemory(messages, wordCount);
-      if (memoryContent) {
-        chatObj.memories.push({
-          id: uuidv4(),
-          content: memoryContent,
-          pinned: false,
-          timestamp: Date.now()
-        });
-      }
-    }
+    if (userMsgCount === 0 || userMsgCount % genInterval !== 0) return;
 
-    // Trim oldest non-pinned memories when exceeding max count
-    const maxMem = window.__memoryMaxCount || 50;
-    if (chatObj.memories.length > maxMem) {
-      const pinned = chatObj.memories.filter(m => m.pinned);
-      const nonPinned = chatObj.memories
-        .filter(m => !m.pinned)
-        .sort((a, b) => b.timestamp - a.timestamp)
-        .slice(0, maxMem - pinned.length);
-      chatObj.memories = [...pinned, ...nonPinned];
+    const memoryContent = await deepseek.generateMemory(snapshot.messages, window.__memoryWordCount || 100);
+    if (!memoryContent) return;
+
+    const isCurrent = activeChatIdRef.current === snapshot.id;
+    const latest = isCurrent && chatRef.current ? chatRef.current : snapshot;
+    const next: Chat = {
+      ...latest,
+      memories: trimMemories(
+        [...latest.memories, { id: uuidv4(), content: memoryContent, pinned: false, timestamp: Date.now() }],
+        window.__memoryMaxCount || 50
+      ),
+    };
+    if (isCurrent) commitChat(next);
+    try {
+      await apiService.saveChat(next);
+      if (isCurrent) showToast('Memory updated', 'info');
+    } catch {
+      showToast('Could not save the new memory', 'error');
     }
   };
 
@@ -332,7 +401,7 @@ export const ChatPage: React.FC = () => {
   if (error) return (
     <div className="p-8 flex flex-col items-center justify-center min-h-screen">
       <p className="text-zinc-400 mb-4">{error}</p>
-      <button 
+      <button
         onClick={() => navigate('/chats')}
         className="text-indigo-400 font-bold hover:underline"
       >
@@ -426,7 +495,7 @@ export const ChatPage: React.FC = () => {
                     {/* Message action buttons: Edit, Rewind, Delete (hidden in read-only) */}
                     {!isReadOnly && (
                       <div className={`absolute top-0 ${m.role === 'user' ? 'right-full mr-2' : 'left-full ml-2'} opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-lg shadow-xl z-10`}>
-                        <button 
+                        <button
                           onClick={async () => {
                             const newContent = prompt('Edit message:', m.content);
                             if (newContent !== null) {
@@ -440,7 +509,7 @@ export const ChatPage: React.FC = () => {
                         >
                           <Edit2 size={14} />
                         </button>
-                        <button 
+                        <button
                           onClick={async () => {
                             if (await showConfirm('Delete this and all messages after it? (Rewind)')) {
                               const index = chat.messages.findIndex(msg => msg.id === m.id);
@@ -454,7 +523,7 @@ export const ChatPage: React.FC = () => {
                         >
                           <RefreshCw size={14} />
                         </button>
-                        <button 
+                        <button
                           onClick={async () => {
                             if (await showConfirm('Delete this message?')) {
                               const newMessages = chat.messages.filter(msg => msg.id !== m.id);
@@ -479,6 +548,19 @@ export const ChatPage: React.FC = () => {
               )}
             </div>
           ))}
+
+          {/* Retry button — after a failed AI request */}
+          {!isReadOnly && !isTyping && lastError && (
+            <div className="flex justify-center">
+              <button
+                onClick={retryLastReply}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:border-red-500/50 transition-all text-xs font-bold"
+              >
+                <RotateCcw size={12} />
+                Retry
+              </button>
+            </div>
+          )}
 
           {/* Continue button — appears when last message is from the AI and not read-only/typing */}
           {!isReadOnly && !isTyping && chat.messages.length > 0 && chat.messages[chat.messages.length - 1].role === 'assistant' && (
@@ -542,21 +624,34 @@ export const ChatPage: React.FC = () => {
             />
             {/* Input action buttons */}
             <div className="absolute right-2 bottom-2 flex items-center gap-1">
-              <button 
+              <button
                 onClick={() => { setOverlay('settings'); setOverlayTab('settings'); }}
                 className="p-2 rounded-xl transition-colors text-purple-400 hover:text-white hover:bg-zinc-800" title="Chat Settings"
               >
                 <SettingsIcon size={22} />
               </button>
-              <button 
-                onClick={handleSend}
-                disabled={!input.trim() || isTyping || isReadOnly}
-                className={`p-2 rounded-xl transition-all ${
-                  input.trim() && !isTyping && !isReadOnly ? 'bg-indigo-600 text-white shadow-lg' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
-                }`}
-              >
-                <Send size={20} />
-              </button>
+              {isTyping ? (
+                <button
+                  onClick={stopGenerating}
+                  className="p-2 rounded-xl transition-all bg-red-600/80 text-white shadow-lg hover:bg-red-600"
+                  title="Stop generating"
+                  aria-label="Stop generating"
+                >
+                  <Square size={20} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  onClick={handleSend}
+                  disabled={!input.trim() || isReadOnly}
+                  className={`p-2 rounded-xl transition-all ${
+                    input.trim() && !isReadOnly ? 'bg-indigo-600 text-white shadow-lg' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                  }`}
+                  title="Send"
+                  aria-label="Send"
+                >
+                  <Send size={20} />
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -631,13 +726,13 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
     <div className="space-y-6">
       {/* Tab toggle */}
       <div className="flex p-1 bg-zinc-900/50 rounded-xl border border-zinc-800/50 max-w-xs mx-auto">
-        <button 
+        <button
           onClick={() => setActiveTab('lore')}
           className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'lore' ? 'bg-zinc-800 text-white shadow' : 'text-zinc-500 hover:text-zinc-300'}`}
         >
           Lore Database
         </button>
-        <button 
+        <button
           onClick={() => setActiveTab('memories')}
           className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'memories' ? 'bg-zinc-800 text-white shadow' : 'text-zinc-500 hover:text-zinc-300'}`}
         >
@@ -717,7 +812,7 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
                   >
                     <Trash2 size={14} />
                   </button>
-                  <button 
+                  <button
                     onClick={async () => {
                       const newMemories = chat.memories.map(m => m.id === memory.id ? { ...m, pinned: !m.pinned } : m);
                       const newChat = { ...chat, memories: newMemories };
@@ -758,6 +853,11 @@ const ChatSettingsView: React.FC<{
 }> = ({ chat, setChat }) => {
   const { showToast, showConfirm } = useNotifications();
   const [personas, setPersonas] = React.useState<Persona[]>([]);
+  // Edited locally and saved once when the field loses focus
+  const [instructionsDraft, setInstructionsDraft] = React.useState(chat.settings.customInstructions || '');
+  React.useEffect(() => {
+    setInstructionsDraft(chat.settings.customInstructions || '');
+  }, [chat.id]);
 
   // Load available personas on mount
   React.useEffect(() => {
@@ -1065,11 +1165,13 @@ const ChatSettingsView: React.FC<{
       <section>
         <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-3 px-1">Custom Instructions</label>
         <textarea
-          value={chat.settings.customInstructions || ''}
-          onChange={(e) => updateSettings('customInstructions', e.target.value)}
-          onBlur={(e) => {
-            if (e.target.value !== chat.settings.customInstructions) {
-              updateSettings('customInstructions', e.target.value, `[System: AI Instructions have been updated: ${e.target.value}]`);
+          value={instructionsDraft}
+          onChange={(e) => setInstructionsDraft(e.target.value)}
+          onBlur={() => {
+            if (instructionsDraft !== (chat.settings.customInstructions || '')) {
+              updateSettings('customInstructions', instructionsDraft)
+                .then(() => showToast('Instructions saved', 'success'))
+                .catch(() => showToast('Could not save instructions', 'error'));
             }
           }}
           placeholder="e.g. Always respond in third person, focus on dialogue..."
@@ -1082,7 +1184,7 @@ const ChatSettingsView: React.FC<{
       <section className="bg-zinc-800/20 border border-zinc-800/40 rounded-xl divide-y divide-zinc-800/50 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3">
           <span className="text-sm text-zinc-300 font-medium">Stream Text Response</span>
-          <button 
+          <button
             onClick={() => updateSettings('streamResponse', !chat.settings.streamResponse)}
             className={`w-10 h-5 rounded-full transition-colors relative flex-shrink-0 ${chat.settings.streamResponse ? 'bg-indigo-600' : 'bg-zinc-700'}`}
           >
@@ -1091,7 +1193,7 @@ const ChatSettingsView: React.FC<{
         </div>
         <div className="flex items-center justify-between px-4 py-3">
           <span className="text-sm text-zinc-300 font-medium">Show Suggestions</span>
-          <button 
+          <button
             onClick={() => updateSettings('showSuggestions', !chat.settings.showSuggestions)}
             className={`w-10 h-5 rounded-full transition-colors relative flex-shrink-0 ${chat.settings.showSuggestions ? 'bg-indigo-600' : 'bg-zinc-700'}`}
           >
@@ -1104,14 +1206,14 @@ const ChatSettingsView: React.FC<{
       <section>
         <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-3 px-1">Export Chat</label>
         <div className="flex gap-3">
-          <button 
+          <button
             onClick={exportAsJSON}
             className="flex-1 flex items-center justify-center gap-2 py-3 bg-emerald-600/10 text-emerald-400 border border-emerald-600/20 rounded-xl hover:bg-emerald-600/20 transition-colors text-sm font-bold"
           >
             <FileDown size={16} />
             Export JSON
           </button>
-          <button 
+          <button
             onClick={exportAsPDF}
             className="flex-1 flex items-center justify-center gap-2 py-3 bg-indigo-600/10 text-indigo-400 border border-indigo-600/20 rounded-xl hover:bg-indigo-600/20 transition-colors text-sm font-bold"
           >
@@ -1123,7 +1225,7 @@ const ChatSettingsView: React.FC<{
 
       {/* Danger zone: clear chat */}
       <div className="pt-2">
-        <button 
+        <button
           onClick={async () => {
             if (await showConfirm('Are you sure you want to clear all messages?')) {
               const newChat = { ...chat, messages: [] };

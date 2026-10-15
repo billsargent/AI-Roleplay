@@ -336,10 +336,11 @@ export const deepseek = {
    * @param settings - Chat settings (response length, etc.)
    * @param scenario - The scenario/world being played
    * @param chat - The chat object with memories and user character
+   * @param signal - Optional AbortSignal to cancel the request
    * @returns The AI's response text
    * @throws If the API call fails
    */
-  async chat(messages: Message[], settings: ChatSettings, scenario: Scenario, chat: Chat): Promise<string> {
+  async chat(messages: Message[], settings: ChatSettings, scenario: Scenario, chat: Chat, signal?: AbortSignal): Promise<string> {
     const llmSettings = await fetchLlmSettings();
     const { apiMessages, responseTokens, temperature, frequencyPenalty, presencePenalty, model } = preparePrompt(
       messages, settings, scenario, chat, llmSettings
@@ -353,7 +354,7 @@ export const deepseek = {
         max_tokens: responseTokens,
         frequency_penalty: frequencyPenalty,
         presence_penalty: presencePenalty,
-      });
+      }, { signal });
 
       return response.data.choices[0].message.content;
     } catch (error: any) {
@@ -375,6 +376,7 @@ export const deepseek = {
    * @param scenario - The scenario/world being played
    * @param chat - The chat object with memories and user character
    * @param onChunk - Callback fired with each text chunk as it streams in
+   * @param signal - Optional AbortSignal to stop the stream (Stop button, leaving the page)
    * @returns The complete assembled response text
    * @throws If the API call fails
    */
@@ -383,7 +385,8 @@ export const deepseek = {
     settings: ChatSettings,
     scenario: Scenario,
     chat: Chat,
-    onChunk: (chunk: string) => void
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal
   ): Promise<string> {
     const llmSettings = await fetchLlmSettings();
     const { apiMessages, responseTokens, temperature, frequencyPenalty, presencePenalty, model } = preparePrompt(
@@ -408,6 +411,7 @@ export const deepseek = {
           frequency_penalty: frequencyPenalty,
           presence_penalty: presencePenalty,
         }),
+        signal,
       });
 
       if (!response.ok) {
