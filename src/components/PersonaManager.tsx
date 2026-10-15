@@ -109,7 +109,7 @@ export const PersonaManager: React.FC = () => {
                    {/* Avatar with upload overlay */}
                    <div className="w-16 h-16 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center relative overflow-hidden group/avatar">
                       {editPersona.avatar ? <img src={editPersona.avatar} className="w-full h-full object-cover" /> : <Camera className="text-zinc-700" />}
-                      <label className="absolute inset-0 bg-black/60 opacity-0 group-hover/avatar:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
+                      <label className="absolute inset-0 bg-black/60 opacity-0 group-hover/avatar:opacity-100 group-focus-within/avatar:opacity-100 pointer-coarse:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
                          <Upload size={16} className="text-white" />
                          <input 
                            type="file" 
@@ -159,7 +159,7 @@ export const PersonaManager: React.FC = () => {
                   <p className="text-sm text-zinc-500 line-clamp-2">{p.description}</p>
                 </div>
                 {/* Action buttons (visible on hover) */}
-                <div className="flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex flex-col gap-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity">
                   <button onClick={() => { setEditingId(p.id); setEditPersona(p); }} className="p-2 text-zinc-500 hover:text-white"><Edit2 size={16}/></button>
                   <button onClick={() => handleDelete(p.id)} className="p-2 text-zinc-500 hover:text-red-500"><Trash2 size={16}/></button>
                 </div>

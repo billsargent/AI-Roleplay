@@ -65,8 +65,17 @@ export const ChatsList: React.FC = () => {
     return (
       <div 
         key={chat.id}
+        role="link"
+        tabIndex={0}
+        aria-label={`Open chat: ${chat.scenarioName || 'Deleted Scenario'}`}
         onClick={() => navigate(`/chat/${chat.id}`)}
-        className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 flex items-center gap-4 cursor-pointer hover:border-zinc-700 transition-all group"
+        onKeyDown={(e) => {
+          if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            navigate(`/chat/${chat.id}`);
+          }
+        }}
+        className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 flex items-center gap-4 cursor-pointer hover:border-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 transition-all group"
       >
         <div className="w-16 h-16 rounded-xl overflow-hidden flex-shrink-0 border border-zinc-800 bg-zinc-800">
           {chat.scenarioImage ? (
@@ -117,7 +126,7 @@ export const ChatsList: React.FC = () => {
           {isOwnedByAdmin && (
             <button 
               onClick={(e) => deleteChat(e, chat.id)}
-              className="p-2 text-zinc-600 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+              className="p-2 text-zinc-600 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
             >
               <Trash2 size={18} />
             </button>

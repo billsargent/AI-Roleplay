@@ -215,8 +215,17 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
         {allScenarios.map(scenario => (
           <div 
             key={scenario.id}
-            className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden group hover:border-zinc-700 transition-all cursor-pointer"
+            role="link"
+            tabIndex={0}
+            aria-label={`Open scenario: ${scenario.name}`}
+            className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden group hover:border-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 transition-all cursor-pointer"
             onClick={() => navigate(`/scenario/${scenario.id}`)}
+            onKeyDown={(e) => {
+              if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                e.preventDefault();
+                navigate(`/scenario/${scenario.id}`);
+              }
+            }}
           >
             {/* Image + Play/Delete overlays */}
             <div className="aspect-video relative overflow-hidden">
@@ -243,7 +252,7 @@ export const Home: React.FC<{ siteName?: string }> = ({ siteName = getCachedSite
               {user && (scenario.userId === user.id || user.role === 'admin') && (
                 <button 
                   onClick={(e) => handleDelete(e, scenario.id)}
-                  className="absolute top-4 right-4 bg-red-900/80 p-2 rounded-lg text-white shadow-xl hover:bg-red-800 transition-colors z-10 opacity-0 group-hover:opacity-100"
+                  className="absolute top-4 right-4 bg-red-900/80 p-2 rounded-lg text-white shadow-xl hover:bg-red-800 transition-colors z-10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
                   title="Delete Scenario"
                 >
                   <Trash2 size={16} />

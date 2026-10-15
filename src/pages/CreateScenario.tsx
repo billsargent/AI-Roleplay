@@ -468,7 +468,7 @@ export const CreateScenario: React.FC = () => {
                 {/* Cover image upload area */}
                 <div className="w-full md:w-48 aspect-square bg-zinc-950 border border-zinc-800 rounded-2xl flex flex-col items-center justify-center relative group overflow-hidden cursor-pointer">
                   {scenario.image ? <img src={scenario.image} className="w-full h-full object-cover" /> : <ImageIcon size={40} className="text-zinc-800" />}
-                  <label className="absolute inset-0 bg-black/80 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center p-4 transition-opacity cursor-pointer text-center">
+                  <label className="absolute inset-0 bg-black/80 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 flex flex-col items-center justify-center p-4 transition-opacity cursor-pointer text-center">
                     <Upload size={24} className="text-white mb-2" />
                     <span className="text-xs font-bold text-white uppercase">Upload Image</span>
                     <span className="text-[10px] text-zinc-500 mt-1">Best fit: 1920×1080px (16:9 ratio)</span>
@@ -558,7 +558,7 @@ export const CreateScenario: React.FC = () => {
                       {/* Character avatar */}
                       <div className="w-12 h-12 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center relative overflow-hidden group/npc">
                         {char.avatar ? <img src={char.avatar} className="w-full h-full object-cover" /> : <UserPlus size={20} className="text-zinc-700" />}
-                        <label className="absolute inset-0 bg-black/60 opacity-0 group-hover/npc:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
+                        <label className="absolute inset-0 bg-black/60 opacity-0 group-hover/npc:opacity-100 group-focus-within/npc:opacity-100 pointer-coarse:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
                           <Upload size={14} className="text-white" />
                           <input type="file" accept="image/*" className="hidden" onChange={async (e) => { const file = e.target.files?.[0]; if (file) { const base64 = await fileToBase64(file); updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, avatar: base64 } : c) }); } }} />
                         </label>

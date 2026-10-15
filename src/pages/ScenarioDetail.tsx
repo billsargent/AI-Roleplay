@@ -29,6 +29,7 @@ import {
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
 import { sanitizeRichText } from '../utils/sanitize';
+import { useDialog } from '../utils/useDialog';
 import { Scenario, Persona, Message } from '../types';
 
 import { v4 as uuidv4 } from 'uuid';
@@ -50,6 +51,7 @@ export const ScenarioDetail: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [expandedLoreIds, setExpandedLoreIds] = useState<Set<string>>(new Set());
+  const personaDialogRef = useDialog(showPersonaSelect, () => setShowPersonaSelect(false));
 
   const toggleLoreExpand = (id: string) => {
     setExpandedLoreIds(prev => {
@@ -85,7 +87,7 @@ export const ScenarioDetail: React.FC = () => {
       }
     };
     loadScenario();
-    
+
     const loadPersonas = async () => {
       const data = await apiService.getPersonas();
       setPersonas(data);
@@ -220,7 +222,7 @@ export const ScenarioDetail: React.FC = () => {
                 </span>
               ))}
             </div>
-            
+
             <div className="flex items-center gap-6 text-sm text-zinc-500 font-bold">
                <div className="flex items-center gap-2">
                   <Calendar size={16} />
@@ -317,11 +319,17 @@ export const ScenarioDetail: React.FC = () => {
              {/* ─── Persona Selection Modal ─── */}
              {showPersonaSelect && (
                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-                 <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl">
+                 <div
+                   ref={personaDialogRef}
+                   role="dialog"
+                   aria-modal="true"
+                   aria-labelledby="persona-dialog-title"
+                   className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl"
+                 >
                    {/* Modal header */}
                    <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
-                     <h3 className="text-xl font-bold text-white">Select Your Persona</h3>
-                     <button onClick={() => setShowPersonaSelect(false)} className="text-zinc-500 hover:text-white transition-colors">
+                     <h3 id="persona-dialog-title" className="text-xl font-bold text-white">Select Your Persona</h3>
+                     <button onClick={() => setShowPersonaSelect(false)} aria-label="Close" className="text-zinc-500 hover:text-white transition-colors">
                        <X size={24} />
                      </button>
                    </div>
@@ -396,7 +404,7 @@ export const ScenarioDetail: React.FC = () => {
                    </button>
                  )}
                </div>
-               
+
                {/* Owner/Admin actions: Export + Delete */}
                {(isOwner || isAdmin) && (
                  <>

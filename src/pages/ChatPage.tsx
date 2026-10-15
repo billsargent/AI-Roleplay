@@ -28,6 +28,7 @@ import { Chat, Message, Scenario, Persona } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
 import { useNotifications } from '../utils/notifications';
+import { useDialog } from '../utils/useDialog';
 import { jsPDF } from 'jspdf';
 
 /**
@@ -97,6 +98,9 @@ export const ChatPage: React.FC = () => {
   const activeChatIdRef = useRef<string | undefined>(chatId);
 
   useEffect(() => { chatRef.current = chat; }, [chat]);
+
+  // Full-screen overlay: Esc closes it, focus stays inside while open
+  const overlayRef = useDialog(overlay !== 'none', () => setOverlay('none'));
 
   /** Sets chat state and the ref together, so async code sees it immediately */
   const commitChat = (next: Chat) => {
@@ -441,7 +445,7 @@ export const ChatPage: React.FC = () => {
         {/* ── Messages Area ── */}
         <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6 pb-40"
           style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px' }}>
-          
+
           {/* Empty state */}
           {chat.messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-zinc-500 text-center px-8">
@@ -494,7 +498,7 @@ export const ChatPage: React.FC = () => {
 
                     {/* Message action buttons: Edit, Rewind, Delete (hidden in read-only) */}
                     {!isReadOnly && (
-                      <div className={`absolute top-0 ${m.role === 'user' ? 'right-full mr-2' : 'left-full ml-2'} opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-lg shadow-xl z-10`}>
+                      <div className={`absolute top-0 ${m.role === 'user' ? 'right-full mr-2' : 'left-full ml-2'} opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-lg shadow-xl z-10`}>
                         <button
                           onClick={async () => {
                             const newContent = prompt('Edit message:', m.content);
@@ -659,7 +663,13 @@ export const ChatPage: React.FC = () => {
 
       {/* ── Full-Screen Overlay (Memory Matrix, Settings, Info) ── */}
       {overlay !== 'none' && (
-        <div className="fixed inset-0 z-50 bg-zinc-950 flex flex-col">
+        <div
+          ref={overlayRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={overlayTab === 'matrix' ? 'Memory Matrix' : overlayTab === 'settings' ? 'Chat Settings' : 'Scenario Info'}
+          className="fixed inset-0 z-50 bg-zinc-950 flex flex-col"
+        >
           {/* Overlay header with tab navigation */}
           <div className="flex items-center justify-between p-4 border-b border-zinc-800">
             <div className="flex items-center gap-2">
