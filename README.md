@@ -23,6 +23,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Context-Aware Responses** — The server builds each prompt from the world setting, characters, lore, memories and as much recent conversation as fits a token budget, so long chats keep working
 - **Smart Lore Activation** — Triggered lore is included when a trigger word appears as a whole word in the last few messages (5 at a time by default, highest priority first)
 - **Rolling Memories** — Every few user messages the AI writes a memory card summarising everything since the previous one; all memories are sent with every reply and pinned ones are never trimmed
+- **Memory Panel** — See where each memory was made, edit, pin (up to 10 "key facts") or write your own, and see what the AI was given for each reply
 - **Response Length Control** — Choose short, medium, or long AI responses
 - **Stop & Retry** — Stop a reply while it is being written (the text so far is kept), and retry a reply that failed
 - **Regenerate & Continue** — Regenerate the last reply and flip between versions; Continue extends a reply, picking up exactly where it stopped
@@ -205,6 +206,7 @@ AI-Roleplay/
 │   ├── components/
 │   │   ├── AIGeneratorModal.tsx  # AI scenario generation dialog
 │   │   ├── LoreSuggestModal.tsx  # AI lore card suggestions for the editor
+│   │   ├── MemoryPanel.tsx       # Chat memories: key facts, chapters, edit/pin/write
 │   │   ├── Navbar.tsx            # Responsive bottom/top navigation
 │   │   ├── PersonaManager.tsx    # User persona CRUD
 │   │   ├── RichtextEditor.tsx    # Tiptap editor for scenario introductions
@@ -228,6 +230,7 @@ AI-Roleplay/
 │   ├── utils/
 │   │   ├── cn.ts                # Tailwind classname utility
 │   │   ├── image.ts             # Image handling (camera/file, resize, import download)
+│   │   ├── memories.ts          # Memory chapters, covered messages, progress
 │   │   ├── notifications.tsx    # Toast & confirm dialog system
 │   │   └── sanitize.ts          # Browser-side rich text sanitizing
 │   ├── vite-env.d.ts            # Build-time constants (app version)
@@ -283,7 +286,7 @@ AI-Roleplay/
 |--------|------|--------|-------------|
 | GET | `/api/system/settings` | Admin | Get all system settings (API key masked) |
 | POST | `/api/system/settings` | Admin | Update system settings |
-| GET | `/api/system/llm-settings` | Auth | Get LLM configuration |
+| GET | `/api/system/llm-settings` | Auth | Site name and memory limits for the browser |
 | GET | `/api/deepseek/models` | Admin | List models available to the configured key |
 
 ### User Settings

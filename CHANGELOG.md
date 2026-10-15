@@ -8,9 +8,17 @@
   - **Background model and temperature** for memory summaries and the scenario generator (default: the chat model, 0.5).
 - **Suggest Lore** in the scenario editor (#35): the AI reads the draft (saved or not) and proposes up to 8 lore cards with trigger words; you tick, adjust and add the ones you want. Uses JSON output mode and the background model.
 - The AI scenario generator asks DeepSeek for JSON output, so its replies parse reliably.
+- **Memories you can see and shape** (#36):
+  - A divider appears in the chat where each memory was saved; click it to read the memory.
+  - A ring in the chat header fills up toward the next memory.
+  - The Memories panel shows the story so far: pinned "key facts" (up to 10 by default, admin setting "Max Pinned Memories") and every memory as a chapter with the messages it covers. Memories can be edited, pinned and deleted, you can write your own or make one now, and "Jump to" scrolls to that part of the chat.
+  - Under each AI reply, a small line shows what the AI was given: how many memories and which lore (hidden lore only as a count), and how many older messages were summarised.
 
 ### Changed
 - The default temperature is 1.0 (was 1.3); the help text recommends 0.8–1.2 for roleplay.
+
+### Security
+- `GET /api/system/llm-settings` sent the global instructions, sampling settings and model to every logged-in user. It now returns only the site name and memory limits.
 
 ### Fixed
 - The penalty slider labels were reversed for negative values (they called -2 "less repetitive"; negative values make the AI repeat itself more).

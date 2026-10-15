@@ -64,6 +64,7 @@ export const AdminPage: React.FC = () => {
   const [memoryGenerateInterval, setMemoryGenerateInterval] = useState('25');
   const [memoryWordCount, setMemoryWordCount] = useState('100');
   const [memoryMaxCount, setMemoryMaxCount] = useState('50');
+  const [memoryPinnedMax, setMemoryPinnedMax] = useState('10');
   const [frequencyPenalty, setFrequencyPenalty] = useState('0');
   const [presencePenalty, setPresencePenalty] = useState('0');
   const [deepseekModel, setDeepseekModel] = useState('deepseek-flash');
@@ -109,6 +110,7 @@ export const AdminPage: React.FC = () => {
         setMemoryGenerateInterval(settings.memoryGenerateInterval || '25');
         setMemoryWordCount(settings.memoryWordCount || '100');
         setMemoryMaxCount(settings.memoryMaxCount || '50');
+        setMemoryPinnedMax(settings.memoryPinnedMax || '10');
         setRateLimitMax(settings.rateLimitMax || '1000');
         setRegistrationOpen(settings.registrationOpen !== false);
         setDeepseekModel(settings.deepseekModel || 'deepseek-flash');
@@ -203,7 +205,7 @@ export const AdminPage: React.FC = () => {
       await apiService.updateSystemSettings({
         globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong,
         frequencyPenalty, presencePenalty, siteName,
-        memoryGenerateInterval, memoryWordCount, memoryMaxCount,
+        memoryGenerateInterval, memoryWordCount, memoryMaxCount, memoryPinnedMax,
         contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax,
         deepseekModel,
         deepseekThinking,
@@ -705,7 +707,17 @@ export const AdminPage: React.FC = () => {
                     onChange={(e) => setMemoryMaxCount(e.target.value)}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                 </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="memory-pinned-max">Max Pinned Memories</label>
+                  <input id="memory-pinned-max" type="number" min="0" max="100" value={memoryPinnedMax}
+                    onChange={(e) => setMemoryPinnedMax(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
               </div>
+              <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+                Target Word Count is the length of each memory. Max Memories is how many unpinned memories a chat keeps (the
+                oldest are dropped). Players can pin up to Max Pinned Memories as "key facts"; pinned ones are never dropped.
+              </p>
             </div>
 
             {/* Context & lore engine */}

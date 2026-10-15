@@ -15,7 +15,7 @@
  */
 
 import { api } from './api';
-import { Memory } from '../types';
+import { Memory, ReplyContext } from '../types';
 
 /**
  * Interface for the JSON structure returned by the LLM during scenario generation.
@@ -59,6 +59,24 @@ export interface ReplyResult {
    * means it is a new piece of text that may need a space before it
    */
   continueMode?: 'prefix' | 'instruct';
+  /** What the AI was given for this reply */
+  context?: ReplyContext;
+}
+
+/** Reads the X-Reply-Context header (URI-encoded JSON) */
+function parseReplyContext(header: string | null | undefined): ReplyContext | undefined {
+  if (!header) return undefined;
+  try {
+    const v = JSON.parse(decodeURIComponent(header));
+    return {
+      memoryIds: Array.isArray(v.memoryIds) ? v.memoryIds.filter((x: unknown) => typeof x === 'string') : [],
+      lore: Array.isArray(v.lore) ? v.lore.filter((x: unknown) => typeof x === 'string') : [],
+      hiddenLore: Number(v.hiddenLore) || 0,
+      omitted: Number(v.omitted) || 0,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /** What the lore suggester reads from the editor */
@@ -162,6 +180,7 @@ export const deepseek = {
         content: choice?.message?.content || '',
         finishReason: choice?.finish_reason,
         continueMode: response.headers?.['x-continue-mode'],
+        context: parseReplyContext(response.headers?.['x-reply-context']),
       };
     } catch (error: any) {
       console.error('DeepSeek API error:', error.response?.data || error.message);
@@ -252,7 +271,7 @@ export const deepseek = {
         }
       }
 
-      return { content: fullContent, finishReason, continueMode };
+      return { content: fullContent, finishReason, continueMode, context: parseReplyContext(response.headers.get('X-Reply-Context')) };
     } catch (error: any) {
       console.error('DeepSeek streaming error:', error.message);
       throw new Error(error.message || 'Failed to connect to DeepSeek API');

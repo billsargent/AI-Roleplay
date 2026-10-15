@@ -151,6 +151,17 @@ export interface Message {
   versions?: string[];
   /** Index of the currently active version (stored by the server) */
   currentVersionIndex?: number;
+  /** For AI replies: what the AI was given when it wrote this */
+  contextInfo?: ReplyContext;
+}
+
+/** What an AI reply was given (lore the player may not read is only counted) */
+export interface ReplyContext {
+  memoryIds: string[];
+  lore: string[];
+  hiddenLore: number;
+  /** Older messages left out of the prompt (covered by memories) */
+  omitted: number;
 }
 
 /** An AI-generated memory about the conversation */
@@ -162,6 +173,12 @@ export interface Memory {
   timestamp: number;
   /** Time of the last message this memory summarises; the next memory starts after it */
   coveredUntil?: number;
+  /** Time of the first message this memory summarises */
+  coveredFrom?: number;
+  /** auto: written after a reply; manual: requested; user: written by the player */
+  source?: 'auto' | 'manual' | 'user';
+  /** When the player last edited it */
+  editedAt?: number;
 }
 
 /** The persona the user chose to play as in a chat session */

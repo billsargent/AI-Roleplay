@@ -154,6 +154,8 @@ test('a memory covers everything since the previous one', () => {
   assert.deepEqual(messagesSinceLastMemory(c).map(m => m.content), ['c', 'd']);
   // Older memories without coveredUntil count from when they were made
   assert.deepEqual(messagesSinceLastMemory(chat({ messages, memories: [{ content: 'm', timestamp: 5 }] })).map(m => m.content), ['d']);
+  // A memory the player wrote does not count as a summary
+  assert.deepEqual(messagesSinceLastMemory(chat({ messages, memories: [{ content: 'note', timestamp: 99, source: 'user' }] })).map(m => m.content), ['a', 'b', 'c', 'd']);
 });
 
 test('a memory is due after enough real user messages since the last one', () => {
