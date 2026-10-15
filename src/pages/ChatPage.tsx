@@ -24,13 +24,14 @@ import {
   Send, Settings as SettingsIcon, Brain, Info,
   ChevronLeft, MessageSquare, RefreshCw, Trash2,
   X, User, Edit2, FileDown, Play, Square, RotateCcw, ArrowDown,
-  ChevronRight, RefreshCcw, Undo2
+  ChevronRight, RefreshCcw, Undo2, MapPin, CalendarDays, Clock
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek, ReplyMode, ReplyResult } from '../services/deepseek';
 import { Chat, Message, Scenario, Persona, Memory, ReplyContext } from '../types';
 import { MemoryPanel } from '../components/MemoryPanel';
 import { chapters, messagesSinceLastMemory } from '../utils/memories';
+import { parseSceneHeader, latestScene } from '../utils/scene';
 import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
 import { useNotifications } from '../utils/notifications';
@@ -707,6 +708,21 @@ export const ChatPage: React.FC = () => {
     );
   };
 
+  /** Scene: the latest scene line the AI wrote, and where the place changed */
+  const currentScene = latestScene(chat.messages);
+  const startPlace = scenario?.lorePieces.find(p => p.isStartLocation)?.title || '';
+  const placeChanges = new Map<string, string>();
+  {
+    let previous = '';
+    for (const m of chat.messages) {
+      if (m.role !== 'assistant') continue;
+      const place = parseSceneHeader(m.content)?.place;
+      if (!place) continue;
+      if (previous && place.toLowerCase() !== previous.toLowerCase()) placeChanges.set(m.id, place);
+      previous = place;
+    }
+  }
+
   /** Memory markers: each memory follows the last message it covers */
   const markersByMessage = new Map<string, ReturnType<typeof chapters>>();
   for (const c of chapters(chat.memories, chat.messages)) {
@@ -755,6 +771,17 @@ export const ChatPage: React.FC = () => {
         </div>
       </header>
 
+      {/* Scene bar: where and when the story is (from the AI's scene line, else the start location) */}
+      {(currentScene || startPlace) && (
+        <div className="flex-shrink-0 border-b border-zinc-800/60 bg-zinc-900/40" aria-label="Current scene">
+          <div className="mx-auto w-full max-w-3xl px-4 sm:px-6 py-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zinc-400">
+            {(currentScene?.place || startPlace) && <span className="flex items-center gap-1.5 font-bold text-zinc-200"><MapPin size={12} className="text-indigo-400" /> {currentScene?.place || startPlace}</span>}
+            {currentScene?.day && <span className="flex items-center gap-1.5"><CalendarDays size={12} /> {currentScene.day}</span>}
+            {currentScene?.time && <span className="flex items-center gap-1.5"><Clock size={12} /> {currentScene.time}</span>}
+          </div>
+        </div>
+      )}
+
       {/* Read-Only Banner (shown when admin views another user's chat) */}
       {isReadOnly && !scenarioDeleted && (
         <div className="flex-shrink-0 bg-amber-600/10 border-b border-amber-600/20 px-4 py-2 text-center">
@@ -798,6 +825,13 @@ export const ChatPage: React.FC = () => {
               </div>
             ) : (
               <div key={m.id} id={`msg-${m.id}`} className={`group flex flex-col scroll-mt-4 ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+                {placeChanges.has(m.id) && (
+                  <div className="self-stretch flex items-center gap-3 mb-4 text-[11px] font-bold text-zinc-500" role="separator">
+                    <span className="flex-1 h-px bg-zinc-800" />
+                    <span className="flex items-center gap-1.5"><MapPin size={12} /> {placeChanges.get(m.id)}</span>
+                    <span className="flex-1 h-px bg-zinc-800" />
+                  </div>
+                )}
                 {/* Message header: avatar, name, timestamp */}
                 <div className={`flex items-center gap-2 mb-1.5 px-1 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
                   <Avatar

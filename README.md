@@ -30,6 +30,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Regenerate & Continue** — Regenerate the last reply and flip between versions; Continue extends a reply, picking up exactly where it stopped
 - **Message Editing** — Edit, delete, or rewind messages
 - **Reading Layout** — Centred reading column that fits any screen; the view follows new text while you are at the bottom and leaves you in place when you scroll up
+- **Scene Bar** — Shows the place, day and time from the scene line the AI writes, with a divider when the place changes
 
 ### 🧩 Characters & Personas
 - **Multi-Character Casts** — Scenarios can have any number of NPCs with names, descriptions, and personality profiles
@@ -239,6 +240,7 @@ AI-Roleplay/
 │   │   ├── diff.ts              # Word diff for AI Enhance
 │   │   ├── image.ts             # Image handling (camera/file, resize, import download)
 │   │   ├── memories.ts          # Memory chapters, covered messages, progress
+│   │   ├── scene.ts             # Reads the AI's scene line (place, day, time)
 │   │   ├── notifications.tsx    # Toast & confirm dialog system
 │   │   └── sanitize.ts          # Browser-side rich text sanitizing
 │   ├── vite-env.d.ts            # Build-time constants (app version)
