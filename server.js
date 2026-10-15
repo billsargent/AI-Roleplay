@@ -68,6 +68,7 @@ import {
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
 import { validateCompletionRequest, relayCompletion, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
+import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt } from './lib/prompt.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -218,9 +219,6 @@ const ROUTE_PARSED_BODIES = new Set([
   'POST /api/scenarios',
   'POST /api/chats',
   'POST /api/personas',
-  'POST /api/deepseek/chat',
-  'POST /api/deepseek/chat/stream',
-  'POST /api/deepseek/generate',
 ]);
 const defaultBody = express.json({ limit: DEFAULT_JSON_BODY_SIZE });
 app.use((req, res, next) => {
@@ -1075,48 +1073,102 @@ const llmLimiter = rateLimit({
 });
 
 /**
- * Shared handler for the DeepSeek proxy routes. Validates the request
- * (lib/deepseek.js), always uses the admin-configured model, and relays the
- * answer. The API key stays server-side — never exposed to the client.
+ * Sends a server-built prompt to DeepSeek and relays the answer.
+ * The model, thinking mode and token cap come from admin settings
+ * (lib/deepseek.js); the browser never supplies prompt text.
  */
-function deepseekRoute({ stream = false, label, defaultMaxTokens, defaultTemperature }) {
-  return async (req, res) => {
-    const deepseekKey = getSystemSetting('deepseekKey');
-    if (!deepseekKey) {
-      return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
-    }
-    let params;
-    try {
-      params = validateCompletionRequest(req.body, {
+async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, label, stream = false }) {
+  const deepseekKey = getSystemSetting('deepseekKey');
+  if (!deepseekKey) {
+    return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
+  }
+  let params;
+  try {
+    params = validateCompletionRequest(
+      { messages, max_tokens: maxTokens, temperature, frequency_penalty: frequencyPenalty, presence_penalty: presencePenalty },
+      {
         model: getSystemSetting('deepseekModel') || DEFAULT_MODEL,
-        defaultMaxTokens,
-        defaultTemperature,
-        // Admin "Max Tokens Cap" (it was saved but never applied before)
+        // Admin "Max Tokens Cap"
         maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
         thinking: getSystemSetting('deepseekThinking') || '',
-      });
-    } catch (err) {
-      if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
-      throw err;
-    }
-
-    // Debug logging for admin users
-    debugLogLlmPrompt(req.userId, params, label);
-    await relayCompletion(req, res, params, { apiKey: deepseekKey, stream });
-  };
+      }
+    );
+  } catch (err) {
+    if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+  // Debug logging for admin users
+  debugLogLlmPrompt(req.userId, params, label);
+  await relayCompletion(req, res, params, { apiKey: deepseekKey, stream });
 }
 
-/** POST /api/deepseek/chat — Proxies non-streaming chat to DeepSeek API */
-app.post('/api/deepseek/chat', auth, llmLimiter, mediumBody, deepseekRoute({ label: 'Chat' }));
+/**
+ * Loads a chat the caller may generate for: it must exist and belong to
+ * them (admins can read other users' chats but not write to them).
+ * Sends the error response and returns null otherwise.
+ */
+function loadOwnChatForAi(req, res) {
+  const chat = getChatById(req.params.id);
+  if (!chat) { res.status(404).json({ error: 'Chat not found' }); return null; }
+  if (chat.userId !== req.userId) { res.status(403).json({ error: 'You can only generate replies in your own chats' }); return null; }
+  return chat;
+}
 
 /**
- * POST /api/deepseek/chat/stream — Proxies SSE streaming chat to DeepSeek API
- * Streams data chunks back to the client as they arrive from DeepSeek.
+ * POST /api/chats/:id/reply — AI reply to the chat's last user message.
+ * Body: { stream?: boolean }. The prompt is built here from the stored
+ * chat and scenario, so the global instructions cannot be bypassed.
+ * The client saves the user message first and saves the reply afterwards.
  */
-app.post('/api/deepseek/chat/stream', auth, llmLimiter, mediumBody, deepseekRoute({ stream: true, label: 'Chat Stream' }));
+app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
+  const chat = loadOwnChatForAi(req, res);
+  if (!chat) return;
+  if (!chat.scenarioId) return res.status(409).json({ error: 'This chat\'s scenario has been deleted' });
+  const scenario = getScenarioById(chat.scenarioId);
+  if (!scenario) return res.status(409).json({ error: 'This chat\'s scenario has been deleted' });
+  const last = chat.messages[chat.messages.length - 1];
+  if (!last || last.role !== 'user') {
+    return res.status(400).json({ error: 'The last message must be from the user' });
+  }
 
-/** POST /api/deepseek/generate — Proxies scenario generation to DeepSeek API */
-app.post('/api/deepseek/generate', auth, llmLimiter, mediumBody, deepseekRoute({ label: 'Generate', defaultMaxTokens: 4000, defaultTemperature: 0.8 }));
+  const llm = readLlmSettings(getSystemSetting);
+  const { messages, maxTokens } = buildChatPrompt({ messages: chat.messages, scenario, chat, llm });
+  await runCompletion(req, res, {
+    messages, maxTokens,
+    temperature: llm.temperature, frequencyPenalty: llm.frequencyPenalty, presencePenalty: llm.presencePenalty,
+    label: req.body?.stream ? 'Chat Stream' : 'Chat',
+    stream: !!req.body?.stream,
+  });
+});
+
+/**
+ * POST /api/chats/:id/memory — Summarises recent messages into a memory
+ * card. Returns the DeepSeek completion; the client adds it to the chat.
+ */
+app.post('/api/chats/:id/memory', auth, llmLimiter, async (req, res) => {
+  const chat = loadOwnChatForAi(req, res);
+  if (!chat) return;
+  if (chat.messages.length === 0) return res.status(400).json({ error: 'Nothing to summarise yet' });
+  const llm = readLlmSettings(getSystemSetting);
+  const { messages, maxTokens, temperature } = buildMemoryPrompt(chat.messages, llm.memoryWordCount);
+  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Memory' });
+});
+
+/**
+ * POST /api/deepseek/generate — Generates a scenario draft from a description.
+ * Body: { description: string }. The instructions are built here.
+ */
+app.post('/api/deepseek/generate', auth, llmLimiter, async (req, res) => {
+  const description = req.body?.description;
+  if (typeof description !== 'string' || !description.trim()) {
+    return res.status(400).json({ error: 'Describe the scenario you want' });
+  }
+  if (description.length > 10000) {
+    return res.status(413).json({ error: 'Description is too long (max 10,000 characters)' });
+  }
+  const { messages, maxTokens, temperature } = buildScenarioGenerationPrompt(description);
+  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate' });
+});
 
 /** GET /api/system/llm-settings — Returns LLM configuration (any authenticated user) */
 app.get('/api/system/llm-settings', auth, (req, res) => {

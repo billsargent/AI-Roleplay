@@ -201,9 +201,14 @@ test('R5: unauthenticated requests cannot send large bodies', async () => {
   assert.equal(await postSized('/api/login', 2 * 1024 * 1024), 413);
   assert.equal(await postSized('/api/register', 2 * 1024 * 1024), 413);
   // Large-limit routes check login before reading the body
-  for (const url of ['/api/scenarios', '/api/chats', '/api/deepseek/chat']) {
+  for (const url of ['/api/scenarios', '/api/chats', '/api/personas']) {
     const status = await postSized(url, 20 * 1024 * 1024);
     assert.ok(status === 401 || status === 'reset', `${url}: ${status}`);
+  }
+  // AI routes only take small bodies now (the server builds the prompt)
+  for (const url of ['/api/deepseek/generate', '/api/chats/x/reply']) {
+    const status = await postSized(url, 2 * 1024 * 1024);
+    assert.ok(status === 413 || status === 'reset', `${url}: ${status}`);
   }
 });
 

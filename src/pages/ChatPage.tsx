@@ -262,9 +262,12 @@ export const ChatPage: React.FC = () => {
     const base = { ...chat, messages: [...chat.messages, userMessage] };
     commitChat(base);
     try {
+      // The server builds the AI prompt from the saved chat
       await apiService.saveChat(base);
     } catch {
+      setLastError('Could not save your message');
       showToast('Could not save your message to the server', 'error');
+      return;
     }
     await generateReply(base);
   };
@@ -300,7 +303,7 @@ export const ChatPage: React.FC = () => {
       let content: string;
       if (base.settings.streamResponse) {
         commitChat(withReply(''));
-        content = await deepseek.chatStream(base.messages, base.settings, scenario, base, (chunk) => {
+        content = await deepseek.chatStream(base.id, (chunk) => {
           partial += chunk;
           if (!isCurrent()) return;
           setChat(prev => prev && {
@@ -309,7 +312,7 @@ export const ChatPage: React.FC = () => {
           });
         }, controller.signal);
       } else {
-        content = await deepseek.chat(base.messages, base.settings, scenario, base, controller.signal);
+        content = await deepseek.chat(base.id, controller.signal);
       }
 
       const final = withReply(content);
@@ -353,6 +356,13 @@ export const ChatPage: React.FC = () => {
     if (end === 0) return;
     const base = { ...current, messages: current.messages.slice(0, end) };
     commitChat(base);
+    try {
+      // Drop the failed partial reply on the server too, before asking again
+      await apiService.saveChat(base);
+    } catch {
+      showToast('Could not save the chat; try again', 'error');
+      return;
+    }
     await generateReply(base);
   };
 
@@ -379,7 +389,7 @@ export const ChatPage: React.FC = () => {
     const genInterval = window.__memoryGenerateInterval || 25;
     if (userMsgCount === 0 || userMsgCount % genInterval !== 0) return;
 
-    const memoryContent = await deepseek.generateMemory(snapshot.messages, window.__memoryWordCount || 100);
+    const memoryContent = await deepseek.generateMemory(snapshot.id);
     if (!memoryContent) return;
 
     const isCurrent = activeChatIdRef.current === snapshot.id;
@@ -554,7 +564,7 @@ export const ChatPage: React.FC = () => {
           ))}
 
           {/* Retry button — after a failed AI request */}
-          {!isReadOnly && !isTyping && lastError && (
+          {!isReadOnly && !isTyping && (lastError || chat.messages[chat.messages.length - 1]?.role === 'user') && (
             <div className="flex justify-center">
               <button
                 onClick={retryLastReply}
@@ -787,7 +797,7 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
             <h4 className="text-xs uppercase font-bold text-zinc-600 tracking-wider">Memories ({chat.memories.length})</h4>
             <button
               onClick={async () => {
-                const memoryContent = await deepseek.generateMemory(chat.messages);
+                const memoryContent = await deepseek.generateMemory(chat.id);
                 if (memoryContent && await showConfirm(`Add this memory?\n\n"${memoryContent}"`)) {
                   const newMemories = [...chat.memories, { id: uuidv4(), content: memoryContent, pinned: false, timestamp: Date.now() }];
                   const newChat = { ...chat, memories: newMemories };
