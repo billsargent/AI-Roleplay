@@ -61,6 +61,9 @@ export interface ReplyResult {
   continueMode?: 'prefix' | 'instruct';
 }
 
+/** A trimmed string, or '' for anything that is not a string (AI output is untrusted) */
+const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+
 /** Turns an axios error into a readable message */
 function errorMessage(error: any, fallback: string): string {
   return error?.response?.data?.error || error?.message || fallback;
@@ -98,12 +101,21 @@ export const deepseek = {
       return {
         name: parsed.name || '',
         description: parsed.description || '',
-        tags: Array.isArray(parsed.tags) ? parsed.tags : [],
+        tags: (Array.isArray(parsed.tags) ? parsed.tags : []).map(text).filter(Boolean),
         backstory: parsed.backstory || '',
         greetingMessage: parsed.greetingMessage || '',
         customInstructions: parsed.customInstructions || '',
-        characters: Array.isArray(parsed.characters) ? parsed.characters : [],
-        lorePieces: Array.isArray(parsed.lorePieces) ? parsed.lorePieces : [],
+        characters: (Array.isArray(parsed.characters) ? parsed.characters : [])
+          .filter((c: any) => c && typeof c === 'object' && text(c.name))
+          .map((c: any) => ({ name: text(c.name), description: text(c.description), personality: text(c.personality) })),
+        lorePieces: (Array.isArray(parsed.lorePieces) ? parsed.lorePieces : [])
+          .filter((p: any) => p && typeof p === 'object' && (text(p.title) || text(p.content)))
+          .map((p: any) => ({
+            type: text(p.type) || 'other',
+            title: text(p.title),
+            content: text(p.content),
+            triggers: (Array.isArray(p.triggers) ? p.triggers : []).map(text).filter(Boolean),
+          })),
       };
     } catch (parseError: any) {
       console.error('Failed to parse AI-generated scenario JSON:', parseError.message);

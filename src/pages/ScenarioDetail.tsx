@@ -430,7 +430,7 @@ export const ScenarioDetail: React.FC = () => {
                           type: lp.type,
                           triggers: lp.triggers || [],
                           linkedPieces: lp.linkedPieces || [],
-                          weight: lp.weight || 100,
+                          weight: lp.weight ?? 100,
                           pinned: !!lp.pinned,
                           hidden: !!lp.hidden,
                           smartActivation: !!lp.smartActivation,
@@ -491,12 +491,12 @@ export const ScenarioDetail: React.FC = () => {
              {/* Scenario metadata details */}
              <div className="pt-4 border-t border-zinc-800 space-y-4">
                 <div className="flex items-center justify-between text-sm">
-                   <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">User Character</span>
-                   <span className="text-white font-bold">Selectable</span>
+                   <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Characters</span>
+                   <span className="text-white font-bold">{scenario.characters.length}</span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
-                   <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Model Support</span>
-                   <span className="text-white font-bold">DeepSeek</span>
+                   <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Lore Pieces</span>
+                   <span className="text-white font-bold">{scenario.lorePieces.length}</span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
                    <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Safety</span>

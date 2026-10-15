@@ -110,6 +110,20 @@ test('lore is ordered by weight and capped', () => {
   assert.equal(selectLore(pinned, [], [], llm).pinned.length, 10);
 });
 
+test('linked lore is sent right after the piece that brought it in', () => {
+  const pieces = [
+    lore('Ship', { id: 's', triggers: ['ship'], linkedPieces: ['c', 'gone'] }),
+    lore('Captain', { id: 'c', smartActivation: false }), // draft: only sent through the link
+    lore('Port', { id: 'p', pinned: true, smartActivation: false, linkedPieces: ['c'] }),
+  ];
+  const { pinned, triggered } = selectLore(pieces, [msg('user', 'board the ship')], [], llm);
+  assert.deepEqual(pinned.map(p => p.title), ['Port', 'Captain']);
+  assert.deepEqual(triggered.map(p => p.title), ['Ship'], 'Captain already sent; unknown ids ignored');
+  // Links count toward the cap
+  const capped = selectLore(pieces.slice(0, 2), [msg('user', 'ship')], [], { ...llm, loreActiveMax: 1 });
+  assert.deepEqual(capped.triggered.map(p => p.title), ['Ship']);
+});
+
 test('character lore that repeats a cast member is skipped', () => {
   const pieces = [lore('Mara', { type: 'character', pinned: true }), lore('Harbour', { pinned: true })];
   const { pinned } = selectLore(pieces, [], [{ name: 'Mara' }], llm);
