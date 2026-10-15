@@ -369,6 +369,23 @@ test('players get only the settings the browser needs', async () => {
   assert.ok(!r.text.includes('SECRET RULES'));
 });
 
+test('AI Enhance fixes one whitelisted field (#37)', async () => {
+  const u = await srv.register();
+  const enhance = (body) => srv.request('POST', '/api/deepseek/enhance', { token: u.token, body });
+  assert.equal((await enhance({ field: 'password', text: 'x' })).status, 400, 'unknown field');
+  assert.equal((await enhance({ field: 'backstory', text: '   ' })).status, 400);
+  assert.equal((await enhance({ field: 'backstory', text: 'x'.repeat(12001) })).status, 413);
+  const r = await enhance({ field: 'backstory', text: 'teh harbour is wet, {{user}} arives', context: { name: 'Harbour' } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.text, 'hello');
+  assert.match(seen.last.messages[0].content, /Change as little as possible/);
+  assert.match(seen.last.messages[0].content, /world and backstory/);
+  assert.match(seen.last.messages[0].content, /Scenario: Harbour/);
+  assert.equal(seen.last.messages[1].content, 'teh harbour is wet, {{user}} arives');
+  await enhance({ field: 'greeting', text: 'hi', mode: 'vivid' });
+  assert.match(seen.last.messages[0].content, /more vivid/);
+});
+
 test('memories are summarised on the server', async () => {
   const chatId = await makeChat(user.token, 'We crossed the river.');
   const r = await srv.request('POST', `/api/chats/${chatId}/memory`, { token: user.token });

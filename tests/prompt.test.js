@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import {
   buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, readLlmSettings, responseTokensFor,
   triggerMatches, selectLore, selectHistory, estimateTokens, memoryDue, messagesSinceLastMemory, htmlToText, stopSequencesFor,
-  parseLoreSuggestions, buildLoreSuggestPrompt,
+  parseLoreSuggestions, buildLoreSuggestPrompt, buildEnhancePrompt, cleanEnhanced,
 } from '../lib/prompt.js';
 
 const llm = readLlmSettings(() => '');
@@ -262,6 +262,23 @@ test('lore suggestion prompt includes the draft and the focus', () => {
   assert.match(messages[1].content, /- Mara: Keeper/);
   assert.match(messages[1].content, /- Pier/);
   assert.match(messages[1].content, /CARDS ABOUT: ships/);
+});
+
+// ── AI Enhance (#37) ──
+test('enhanced text is unwrapped from fences and whole-text quotes only', () => {
+  assert.equal(cleanEnhanced('```\nFixed text.\n```'), 'Fixed text.');
+  assert.equal(cleanEnhanced('"Fixed text."'), 'Fixed text.');
+  assert.equal(cleanEnhanced('"Hi," she said. "Bye."'), '"Hi," she said. "Bye."', 'dialogue keeps its quotes');
+  assert.equal(cleanEnhanced('  '), '');
+});
+
+test('enhance prompt keeps placeholders and sizes the reply to the text', () => {
+  const p = buildEnhancePrompt('loreContent', 'a'.repeat(1000));
+  assert.match(p.messages[0].content, /\{\{user\}\}/);
+  assert.match(p.messages[0].content, /lore card/);
+  assert.equal(p.maxTokens, 700);
+  assert.equal(p.temperature, 0.3);
+  assert.equal(buildEnhancePrompt('backstory', 'x', {}, 'vivid').temperature, 0.8);
 });
 
 test('scenario generation prompt', () => {

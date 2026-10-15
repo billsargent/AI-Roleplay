@@ -14,6 +14,8 @@
   - The Memories panel shows the story so far: pinned "key facts" (up to 10 by default, admin setting "Max Pinned Memories") and every memory as a chapter with the messages it covers. Memories can be edited, pinned and deleted, you can write your own or make one now, and "Jump to" scrolls to that part of the chat.
   - Under each AI reply, a small line shows what the AI was given: how many memories and which lore (hidden lore only as a count), and how many older messages were summarised.
 
+- **AI Enhance** (#37): an Enhance button beside the editor's text fields fixes spelling, grammar and clarity while keeping your wording, facts, names and `{{user}}`; "Also make it more vivid" is opt-in. You see every change word by word and nothing is replaced until you accept; Undo puts the old text back for a minute.
+
 ### Changed
 - The default temperature is 1.0 (was 1.3); the help text recommends 0.8–1.2 for roleplay.
 

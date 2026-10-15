@@ -12,6 +12,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Create & Edit Rich Scenarios** — Full-featured editor with backstory, cast of characters, lore pieces, and custom instructions
 - **AI-Powered Generation** — Describe a scenario in natural language and the AI builds a complete world with characters and lore
 - **Lore Suggestions** — The AI proposes lore cards from your story; pick and adjust the ones to add
+- **AI Enhance** — Fix spelling, grammar and clarity in any editor field; you see the changes before accepting
 - **Public / Private Scenarios** — Share your creations with the community or keep them private
 - **Copy & Customize** — Fork any public scenario and make it your own
 - **Tag-Based Discovery** — Search and browse community scenarios by name, tags, or creator
@@ -204,6 +205,7 @@ AI-Roleplay/
 ├── uploads/                  # Uploaded images (created at startup, not in git)
 ├── src/
 │   ├── components/
+│   │   ├── AIEnhanceButton.tsx   # AI Enhance for editor fields (word diff, undo)
 │   │   ├── AIGeneratorModal.tsx  # AI scenario generation dialog
 │   │   ├── LoreSuggestModal.tsx  # AI lore card suggestions for the editor
 │   │   ├── MemoryPanel.tsx       # Chat memories: key facts, chapters, edit/pin/write
@@ -229,6 +231,7 @@ AI-Roleplay/
 │   │   └── index.ts             # TypeScript interfaces
 │   ├── utils/
 │   │   ├── cn.ts                # Tailwind classname utility
+│   │   ├── diff.ts              # Word diff for AI Enhance
 │   │   ├── image.ts             # Image handling (camera/file, resize, import download)
 │   │   ├── memories.ts          # Memory chapters, covered messages, progress
 │   │   ├── notifications.tsx    # Toast & confirm dialog system
@@ -308,6 +311,7 @@ AI-Roleplay/
 |--------|------|--------|-------------|
 | POST | `/api/deepseek/generate` | Auth | AI scenario generation from a description |
 | POST | `/api/deepseek/lore-suggest` | Auth | Lore card suggestions for a scenario draft |
+| POST | `/api/deepseek/enhance` | Auth | AI Enhance: fixed text for one editor field |
 
 Chat replies and memories use the chat endpoints above; the server builds every prompt.
 

@@ -27,6 +27,7 @@ import { useLocation } from 'react-router-dom';
 import { useNotifications } from '../utils/notifications';
 import { AIGeneratorModal } from '../components/AIGeneratorModal';
 import { LoreSuggestModal } from '../components/LoreSuggestModal';
+import { AIEnhanceButton } from '../components/AIEnhanceButton';
 import { RichtextEditor } from '../components/RichtextEditor';
 
 
@@ -542,6 +543,14 @@ export const CreateScenario: React.FC = () => {
   // ── Render ──
   const inputClass = 'w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500';
   const labelClass = 'block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2';
+  const enhanceContext = { name: scenario.name, description: scenario.description };
+  /** A field label with the Enhance button on the right */
+  const labelRow = (label: React.ReactNode, enhance: React.ReactNode, htmlFor?: string, small = false) => (
+    <div className={`flex items-center justify-between gap-2 ${small ? 'mb-1' : 'mb-2'}`}>
+      <label className={small ? 'text-[10px] font-black text-zinc-500 uppercase' : labelClass.replace(' mb-2', '')} htmlFor={htmlFor}>{label}</label>
+      {enhance}
+    </div>
+  );
   const sectionClass = 'scroll-mt-32 bg-zinc-900/60 ring-1 ring-white/5 rounded-2xl p-5 sm:p-8 space-y-6';
 
   return (
@@ -628,7 +637,7 @@ export const CreateScenario: React.FC = () => {
             </div>
           </div>
           <div>
-            <label className={labelClass} htmlFor="scenario-summary">Brief Summary</label>
+            {labelRow('Brief Summary', <AIEnhanceButton field="description" label="Brief Summary" value={scenario.description} onChange={v => updateScenario({ description: v })} context={enhanceContext} />, 'scenario-summary')}
             <AutoTextarea id="scenario-summary" minRows={3} className={`${inputClass} ${errors.description ? 'ring-1 ring-red-500 border-red-500/60' : ''}`} placeholder="A short hook to grab players' attention..." value={scenario.description} onChange={v => { updateScenario({ description: v }); if (errors.description) setErrors(p => ({ ...p, description: undefined })); }} />
             {errors.description && <p className="text-xs text-red-400 mt-1">{errors.description}</p>}
             <p className="text-[11px] text-zinc-600 mt-1 flex justify-between gap-4">
@@ -657,18 +666,18 @@ export const CreateScenario: React.FC = () => {
         <section id="editor-story" className={sectionClass}>
           <h2 className="text-xl font-bold flex items-center gap-3"><BookOpen className="text-emerald-400" /> Story Foundation</h2>
           <div>
-            <label className={labelClass} htmlFor="scenario-backstory">Main Backstory & World Details</label>
+            {labelRow('Main Backstory & World Details', <AIEnhanceButton field="backstory" label="Backstory" value={scenario.backstory} onChange={v => updateScenario({ backstory: v })} context={enhanceContext} />, 'scenario-backstory')}
             <AutoTextarea id="scenario-backstory" minRows={10} className={`${inputClass} font-serif text-lg leading-relaxed ${errors.backstory ? 'ring-1 ring-red-500 border-red-500/60' : ''}`} placeholder="Describe the environment, the history, and the current situation. Use {{user}} to refer to the player's character." value={scenario.backstory} onChange={v => { updateScenario({ backstory: v }); if (errors.backstory) setErrors(p => ({ ...p, backstory: undefined })); }} />
             {errors.backstory && <p className="text-xs text-red-400 mt-1">{errors.backstory}</p>}
             <p className="text-[11px] text-zinc-600 mt-1">Sent to the AI with every reply. Use <strong className="text-zinc-400">{'{{user}}'}</strong> for the player's persona name.</p>
           </div>
           <div>
-            <label className={labelClass} htmlFor="scenario-greeting">Greeting Message</label>
+            {labelRow('Greeting Message', <AIEnhanceButton field="greeting" label="Greeting Message" value={scenario.greetingMessage || ''} onChange={v => updateScenario({ greetingMessage: v })} context={enhanceContext} />, 'scenario-greeting')}
             <AutoTextarea id="scenario-greeting" minRows={5} className={`${inputClass} text-sm text-zinc-300`} placeholder="The first message sent to the player. Set the tone here." value={scenario.greetingMessage} onChange={v => updateScenario({ greetingMessage: v })} />
             <p className="text-[11px] text-zinc-600 mt-1">Becomes the AI's first message in every new chat.</p>
           </div>
           <div>
-            <label className={labelClass} htmlFor="scenario-instructions">Custom AI Instructions</label>
+            {labelRow('Custom AI Instructions', <AIEnhanceButton field="customInstructions" label="Custom AI Instructions" value={scenario.customInstructions || ''} onChange={v => updateScenario({ customInstructions: v })} context={enhanceContext} />, 'scenario-instructions')}
             <AutoTextarea id="scenario-instructions" minRows={4} className={`${inputClass} text-sm text-zinc-300`} placeholder="Special rules for the AI (e.g., 'Joe always speaks in rhymes')" value={scenario.customInstructions} onChange={v => updateScenario({ customInstructions: v })} />
             <p className="text-[11px] text-zinc-600 mt-1">Sent to the AI with every reply. The site's global rules still take priority.</p>
           </div>
@@ -708,11 +717,11 @@ export const CreateScenario: React.FC = () => {
                   <button onClick={() => updateScenario({ characters: scenario.characters.filter(c => c.id !== char.id) })} className="text-zinc-600 hover:text-red-500 p-2" title="Remove character" aria-label="Remove character"><Trash2 size={18} /></button>
                 </div>
                 <div>
-                  <label className="text-[10px] font-black text-zinc-500 uppercase mb-1 block">Role & Appearance</label>
+                  {labelRow('Role & Appearance', <AIEnhanceButton field="characterDescription" label={`${char.name || 'Character'}: Role & Appearance`} value={char.description || ''} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, description: v } : c) })} context={enhanceContext} />, undefined, true)}
                   <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Who they are and what they look like" value={char.description} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, description: v } : c) })} />
                 </div>
                 <div>
-                  <label className="text-[10px] font-black text-zinc-500 uppercase mb-1 block">Personality & Mannerisms</label>
+                  {labelRow('Personality & Mannerisms', <AIEnhanceButton field="characterPersonality" label={`${char.name || 'Character'}: Personality`} value={char.personality || ''} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, personality: v } : c) })} context={enhanceContext} />, undefined, true)}
                   <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="How they think, speak and behave" value={char.personality} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, personality: v } : c) })} />
                 </div>
               </div>
@@ -749,6 +758,7 @@ export const CreateScenario: React.FC = () => {
                   <input aria-label="Lore title" placeholder="Lore title" className="bg-transparent text-lg font-bold text-white outline-none focus:border-b border-indigo-500 flex-1 min-w-0" value={piece.title} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, title: e.target.value } : p) }); }} />
                   <button onClick={() => removeLorePiece(piece.id)} className="text-zinc-600 hover:text-red-500 p-2" title="Remove lore" aria-label="Remove lore"><Trash2 size={16} /></button>
                 </div>
+                {labelRow('Content', <AIEnhanceButton field="loreContent" label={piece.title || 'Lore'} value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} context={enhanceContext} />, undefined, true)}
                 <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Describe this location, object, or event..." value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} />
                 {/* How this lore reaches the AI: one mode instead of three checkboxes */}
                 <div className="flex flex-wrap items-end gap-4">

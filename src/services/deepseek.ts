@@ -79,6 +79,9 @@ function parseReplyContext(header: string | null | undefined): ReplyContext | un
   }
 }
 
+/** Editor fields AI Enhance works on (the server keeps the same list) */
+export type EnhanceField = 'description' | 'backstory' | 'greeting' | 'customInstructions' | 'characterDescription' | 'characterPersonality' | 'loreContent';
+
 /** What the lore suggester reads from the editor */
 export interface LoreSuggestDraft {
   name: string;
@@ -292,6 +295,20 @@ export const deepseek = {
       return Array.isArray(response.data?.suggestions) ? response.data.suggestions : [];
     } catch (error: any) {
       throw new Error(errorMessage(error, 'Could not get lore suggestions'));
+    }
+  },
+
+  /**
+   * AI Enhance: returns an improved version of one editor field for the
+   * author to accept or not ("fix" = spelling, grammar, clarity only).
+   * @throws With the server's message on failure
+   */
+  async enhanceText(field: EnhanceField, text: string, context: { name?: string; description?: string }, mode: 'fix' | 'vivid' = 'fix'): Promise<string> {
+    try {
+      const response = await api.post('/deepseek/enhance', { field, text, context, mode });
+      return String(response.data?.text || '');
+    } catch (error: any) {
+      throw new Error(errorMessage(error, 'Could not enhance the text'));
     }
   },
 

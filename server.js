@@ -69,7 +69,7 @@ import {
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
 import { validateCompletionRequest, relayCompletion, completeOnce, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
-import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, buildLoreSuggestPrompt, parseLoreSuggestions, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
+import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, buildLoreSuggestPrompt, parseLoreSuggestions, buildEnhancePrompt, cleanEnhanced, ENHANCE_FIELDS, MAX_ENHANCE_CHARS, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1348,6 +1348,39 @@ app.post('/api/deepseek/lore-suggest', auth, llmLimiter, async (req, res, next) 
     const suggestions = parseLoreSuggestions(await completeOnce(params, { apiKey: deepseekKey }), clean.loreTitles);
     if (suggestions.length === 0) return res.status(502).json({ error: 'The AI did not return any usable lore cards; try again' });
     res.json({ suggestions });
+  } catch (err) {
+    if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+/**
+ * POST /api/deepseek/enhance — AI Enhance for one editor field.
+ * Body: { field, text, context?: { name, description }, mode?: 'fix' | 'vivid' }.
+ * "fix" corrects spelling, grammar and clarity only; "vivid" may also
+ * strengthen the wording. Returns { text } for the author to accept or not.
+ */
+app.post('/api/deepseek/enhance', auth, llmLimiter, async (req, res, next) => {
+  const { field, text, context, mode } = req.body || {};
+  if (!Object.hasOwn(ENHANCE_FIELDS, field)) return res.status(400).json({ error: 'This field cannot be enhanced' });
+  if (typeof text !== 'string' || !text.trim()) return res.status(400).json({ error: 'Write something first' });
+  if (text.length > MAX_ENHANCE_CHARS) return res.status(413).json({ error: `Text is too long to enhance (max ${MAX_ENHANCE_CHARS.toLocaleString('en')} characters)` });
+  const deepseekKey = getSystemSetting('deepseekKey');
+  if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+  try {
+    const safeContext = context && typeof context === 'object'
+      ? { name: typeof context.name === 'string' ? context.name : '', description: typeof context.description === 'string' ? context.description : '' }
+      : {};
+    const { messages, maxTokens, temperature } = buildEnhancePrompt(field, text, safeContext, mode === 'vivid' ? 'vivid' : 'fix');
+    const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature }, {
+      model: utilityModel(),
+      maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
+      thinking: getSystemSetting('deepseekThinking') || '',
+    });
+    debugLogLlmPrompt(req.userId, params, 'Enhance');
+    const result = cleanEnhanced(await completeOnce(params, { apiKey: deepseekKey }));
+    if (!result) return res.status(502).json({ error: 'The AI returned nothing; try again' });
+    res.json({ text: result });
   } catch (err) {
     if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
     next(err);
