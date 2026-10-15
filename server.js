@@ -68,7 +68,7 @@ import {
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
 import { validateCompletionRequest, relayCompletion, completeOnce, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
-import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
+import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, buildLoreSuggestPrompt, parseLoreSuggestions, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1126,7 +1126,7 @@ function utilityModel() {
   return getSystemSetting('utilityModel') || getSystemSetting('deepseekModel') || DEFAULT_MODEL;
 }
 
-async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, stop, label, stream = false, beta = false, model }) {
+async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, stop, label, stream = false, beta = false, model, json = false }) {
   const deepseekKey = getSystemSetting('deepseekKey');
   if (!deepseekKey) {
     return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
@@ -1140,6 +1140,7 @@ async function runCompletion(req, res, { messages, maxTokens, temperature, frequ
         // Admin "Max Tokens Cap"
         maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
         thinking: getSystemSetting('deepseekThinking') || '',
+        json,
       }
     );
   } catch (err) {
@@ -1285,7 +1286,49 @@ app.post('/api/deepseek/generate', auth, llmLimiter, async (req, res) => {
     return res.status(413).json({ error: 'Description is too long (max 10,000 characters)' });
   }
   const { messages, maxTokens, temperature } = buildScenarioGenerationPrompt(description);
-  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate', model: utilityModel() });
+  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate', model: utilityModel(), json: true });
+});
+
+/**
+ * POST /api/deepseek/lore-suggest — Proposes lore cards for a scenario draft.
+ * Body: { draft: { name, description, backstory, introduction (plain text),
+ * customInstructions, characters: [{ name, description }], loreTitles },
+ * focus?: string }. Works on unsaved drafts; nothing is stored.
+ * Returns { suggestions: [{ title, type, content, triggers, mode }] }.
+ */
+app.post('/api/deepseek/lore-suggest', auth, llmLimiter, async (req, res, next) => {
+  const draft = req.body?.draft;
+  if (!draft || typeof draft !== 'object' || Array.isArray(draft)) {
+    return res.status(400).json({ error: 'Send the scenario draft' });
+  }
+  const text = (v) => (typeof v === 'string' ? v : '');
+  const clean = {
+    name: text(draft.name), description: text(draft.description), backstory: text(draft.backstory),
+    introduction: text(draft.introduction), customInstructions: text(draft.customInstructions),
+    characters: (Array.isArray(draft.characters) ? draft.characters : []).filter(c => c && typeof c === 'object').map(c => ({ name: text(c.name), description: text(c.description) })),
+    loreTitles: (Array.isArray(draft.loreTitles) ? draft.loreTitles : []).map(text).filter(Boolean),
+  };
+  if (!clean.backstory.trim() && !clean.description.trim() && !clean.introduction.trim()) {
+    return res.status(400).json({ error: 'Write a summary, backstory or introduction first, so there is a story to build lore from' });
+  }
+  const deepseekKey = getSystemSetting('deepseekKey');
+  if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+  try {
+    const { messages, maxTokens } = buildLoreSuggestPrompt(clean, text(req.body?.focus));
+    const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature: 0.7 }, {
+      model: utilityModel(),
+      maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
+      thinking: getSystemSetting('deepseekThinking') || '',
+      json: true,
+    });
+    debugLogLlmPrompt(req.userId, params, 'Lore suggestions');
+    const suggestions = parseLoreSuggestions(await completeOnce(params, { apiKey: deepseekKey }), clean.loreTitles);
+    if (suggestions.length === 0) return res.status(502).json({ error: 'The AI did not return any usable lore cards; try again' });
+    res.json({ suggestions });
+  } catch (err) {
+    if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 /** GET /api/system/llm-settings — Returns LLM configuration (any authenticated user) */

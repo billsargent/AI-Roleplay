@@ -61,6 +61,27 @@ export interface ReplyResult {
   continueMode?: 'prefix' | 'instruct';
 }
 
+/** What the lore suggester reads from the editor */
+export interface LoreSuggestDraft {
+  name: string;
+  description: string;
+  backstory: string;
+  /** Plain text of the introduction (no HTML or images) */
+  introduction: string;
+  customInstructions: string;
+  characters: Array<{ name: string; description: string }>;
+  loreTitles: string[];
+}
+
+/** A lore card proposed by the AI (validated by the server) */
+export interface LoreSuggestion {
+  title: string;
+  type: 'location' | 'event' | 'object' | 'character' | 'other';
+  content: string;
+  triggers: string[];
+  mode: 'triggered' | 'always';
+}
+
 /** A trimmed string, or '' for anything that is not a string (AI output is untrusted) */
 const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 
@@ -235,6 +256,23 @@ export const deepseek = {
     } catch (error: any) {
       console.error('DeepSeek streaming error:', error.message);
       throw new Error(error.message || 'Failed to connect to DeepSeek API');
+    }
+  },
+
+  /**
+   * Asks the AI to propose lore cards for a scenario draft (saved or not).
+   * Nothing is stored; the author picks which cards to add.
+   *
+   * @param draft - The editor's current fields; introduction as plain text
+   * @param focus - Optional wish, e.g. "factions" or "the harbour"
+   * @throws With the server's message if nothing usable came back
+   */
+  async suggestLore(draft: LoreSuggestDraft, focus = ''): Promise<LoreSuggestion[]> {
+    try {
+      const response = await api.post('/deepseek/lore-suggest', { draft, focus });
+      return Array.isArray(response.data?.suggestions) ? response.data.suggestions : [];
+    } catch (error: any) {
+      throw new Error(errorMessage(error, 'Could not get lore suggestions'));
     }
   },
 

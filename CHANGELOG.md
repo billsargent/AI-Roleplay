@@ -6,6 +6,8 @@
 - **LLM options with explanations** (#34): every LLM Config setting now says what it does and what to choose.
   - **Stop sequences**: a reply stops when the AI starts a line as the player (on by default), plus up to 16 custom stops (`\n` and `{{user}}` supported).
   - **Background model and temperature** for memory summaries and the scenario generator (default: the chat model, 0.5).
+- **Suggest Lore** in the scenario editor (#35): the AI reads the draft (saved or not) and proposes up to 8 lore cards with trigger words; you tick, adjust and add the ones you want. Uses JSON output mode and the background model.
+- The AI scenario generator asks DeepSeek for JSON output, so its replies parse reliably.
 
 ### Changed
 - The default temperature is 1.0 (was 1.3); the help text recommends 0.8–1.2 for roleplay.

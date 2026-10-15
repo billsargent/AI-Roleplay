@@ -18,7 +18,7 @@ import {
   FileJson, Sparkles, FileText
 } from 'lucide-react';
 import { apiService } from '../services/api';
-import { AiGeneratedScenarioData } from '../services/deepseek';
+import { AiGeneratedScenarioData, LoreSuggestDraft, LoreSuggestion } from '../services/deepseek';
 
 import { Scenario, LorePiece, StoryCharacter } from '../types';
 import { v4 as uuidv4 } from 'uuid';
@@ -26,6 +26,7 @@ import { fileToBase64, urlToBase64 } from '../utils/image';
 import { useLocation } from 'react-router-dom';
 import { useNotifications } from '../utils/notifications';
 import { AIGeneratorModal } from '../components/AIGeneratorModal';
+import { LoreSuggestModal } from '../components/LoreSuggestModal';
 import { RichtextEditor } from '../components/RichtextEditor';
 
 
@@ -96,6 +97,7 @@ export const CreateScenario: React.FC = () => {
 
   const [newTag, setNewTag] = useState('');
   const [showAiGenerator, setShowAiGenerator] = useState(false);
+  const [showLoreSuggest, setShowLoreSuggest] = useState(false);
   const [triggerInputs, setTriggerInputs] = useState<Record<string, string>>({});
   const [rteKey, setRteKey] = useState(0);
   /** Problems found when saving, shown under the fields (cleared as they are edited) */
@@ -430,6 +432,35 @@ export const CreateScenario: React.FC = () => {
     updateScenario({ characters: [...scenario.characters, char] });
   };
 
+  /** The editor's current fields for the lore suggester (introduction as plain text) */
+  const loreSuggestDraft = (): LoreSuggestDraft => ({
+    name: scenario.name,
+    description: scenario.description,
+    backstory: scenario.backstory,
+    introduction: new DOMParser().parseFromString(scenario.introduction || '', 'text/html').body.textContent || '',
+    customInstructions: scenario.customInstructions || '',
+    characters: scenario.characters.map(c => ({ name: c.name || '', description: c.description || '' })),
+    loreTitles: scenario.lorePieces.map(p => p.title).filter(Boolean),
+  });
+
+  /** Adds the lore cards the author picked from the suggestions */
+  const addSuggestedLore = (cards: LoreSuggestion[]) => {
+    const pieces: LorePiece[] = cards.map(c => ({
+      id: uuidv4(),
+      type: c.type,
+      title: c.title,
+      description: '',
+      content: c.content,
+      weight: 100,
+      pinned: c.mode === 'always',
+      smartActivation: c.mode !== 'always',
+      triggers: c.mode === 'always' ? [] : c.triggers,
+      linkedPieces: [],
+    }));
+    updateScenario({ lorePieces: [...scenario.lorePieces, ...pieces] });
+    showToast(`Added ${pieces.length} lore card${pieces.length === 1 ? '' : 's'}. Review them, then save.`, 'success');
+  };
+
   /** Adds a new lore piece with default values. */
   const addLorePiece = () => {
     const piece: LorePiece = {
@@ -698,9 +729,14 @@ export const CreateScenario: React.FC = () => {
         <section id="editor-lore" className={sectionClass}>
           <div className="flex items-center justify-between gap-4">
             <h2 className="text-xl font-bold flex items-center gap-3"><Brain className="text-indigo-400" /> World Lore</h2>
-            <button onClick={addLorePiece} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors">
-              <Plus size={16} /> Add Lore
-            </button>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button onClick={() => setShowLoreSuggest(true)} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors" title="Let the AI propose lore cards from your story">
+                <Sparkles size={16} /> Suggest Lore
+              </button>
+              <button onClick={addLorePiece} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors">
+                <Plus size={16} /> Add Lore
+              </button>
+            </div>
           </div>
           <p className="text-xs text-zinc-500">
             "Always" pieces are sent every turn (up to 10). Triggered pieces are sent when a trigger word appears as a
@@ -876,6 +912,14 @@ export const CreateScenario: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* AI lore suggestions for this draft */}
+      <LoreSuggestModal
+        isOpen={showLoreSuggest}
+        onClose={() => setShowLoreSuggest(false)}
+        getDraft={loreSuggestDraft}
+        onAdd={addSuggestedLore}
+      />
 
       {/* AI Scenario Generator Modal */}
       <AIGeneratorModal

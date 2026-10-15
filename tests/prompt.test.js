@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import {
   buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, readLlmSettings, responseTokensFor,
   triggerMatches, selectLore, selectHistory, estimateTokens, memoryDue, messagesSinceLastMemory, htmlToText, stopSequencesFor,
+  parseLoreSuggestions, buildLoreSuggestPrompt,
 } from '../lib/prompt.js';
 
 const llm = readLlmSettings(() => '');
@@ -230,6 +231,35 @@ test('opening sends a request for the first scene and no history', () => {
   assert.equal(out.length, 3);
   assert.equal(out[1].role, 'user');
   assert.match(out[1].content, /The story begins now/);
+});
+
+// ── Lore suggestions (#35) ──
+test('lore suggestions are validated', () => {
+  const text = '```json\n' + JSON.stringify({ lore: [
+    { title: ' Bell ', type: 'weird', content: ' Rings. ', triggers: ['bell', 'bell', ' toll '], mode: 'triggered' },
+    { title: 'Core', type: 'event', content: 'Always true.', triggers: [], mode: 'always' },
+    { title: 'bell', content: 'Repeat of a title', triggers: ['x'] },
+    { title: 'Pier', content: 'Exists already', triggers: ['pier'] },
+    { title: 'Quiet', content: 'No triggers', triggers: [] },
+    { title: '', content: 'No title', triggers: ['y'] },
+    null, 'text',
+  ] }) + '\n```';
+  assert.deepEqual(parseLoreSuggestions(text, ['PIER']), [
+    { title: 'Bell', type: 'other', content: 'Rings.', triggers: ['bell', 'toll'], mode: 'triggered' },
+    { title: 'Core', type: 'event', content: 'Always true.', triggers: [], mode: 'always' },
+  ]);
+  assert.deepEqual(parseLoreSuggestions('not json'), []);
+  const many = JSON.stringify({ lore: Array.from({ length: 20 }, (_, i) => ({ title: `T${i}`, content: 'c', triggers: ['t'] })) });
+  assert.equal(parseLoreSuggestions(many).length, 8);
+});
+
+test('lore suggestion prompt includes the draft and the focus', () => {
+  const { messages } = buildLoreSuggestPrompt({ name: 'N', backstory: 'B', characters: [{ name: 'Mara', description: 'Keeper' }], loreTitles: ['Pier'] }, 'ships');
+  assert.match(messages[0].content, /JSON object/);
+  assert.match(messages[1].content, /BACKSTORY:\nB/);
+  assert.match(messages[1].content, /- Mara: Keeper/);
+  assert.match(messages[1].content, /- Pier/);
+  assert.match(messages[1].content, /CARDS ABOUT: ships/);
 });
 
 test('scenario generation prompt', () => {

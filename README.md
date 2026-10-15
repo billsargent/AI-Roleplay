@@ -11,6 +11,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 ### 📖 Scenario System
 - **Create & Edit Rich Scenarios** — Full-featured editor with backstory, cast of characters, lore pieces, and custom instructions
 - **AI-Powered Generation** — Describe a scenario in natural language and the AI builds a complete world with characters and lore
+- **Lore Suggestions** — The AI proposes lore cards from your story; pick and adjust the ones to add
 - **Public / Private Scenarios** — Share your creations with the community or keep them private
 - **Copy & Customize** — Fork any public scenario and make it your own
 - **Tag-Based Discovery** — Search and browse community scenarios by name, tags, or creator
@@ -203,6 +204,7 @@ AI-Roleplay/
 ├── src/
 │   ├── components/
 │   │   ├── AIGeneratorModal.tsx  # AI scenario generation dialog
+│   │   ├── LoreSuggestModal.tsx  # AI lore card suggestions for the editor
 │   │   ├── Navbar.tsx            # Responsive bottom/top navigation
 │   │   ├── PersonaManager.tsx    # User persona CRUD
 │   │   ├── RichtextEditor.tsx    # Tiptap editor for scenario introductions
@@ -302,6 +304,7 @@ AI-Roleplay/
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
 | POST | `/api/deepseek/generate` | Auth | AI scenario generation from a description |
+| POST | `/api/deepseek/lore-suggest` | Auth | Lore card suggestions for a scenario draft |
 
 Chat replies and memories use the chat endpoints above; the server builds every prompt.
 

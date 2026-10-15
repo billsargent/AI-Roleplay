@@ -32,7 +32,15 @@ before(async () => {
       }
       if (!json.stream) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ choices: [{ message: { content: 'hello' }, finish_reason: 'stop' }] }));
+        // Lore suggestions in JSON mode: one good card, one duplicate, one without triggers
+        const content = json.response_format?.type === 'json_object' && /lore cards/.test(json.messages?.[0]?.content || '')
+          ? JSON.stringify({ lore: [
+            { title: 'The Drowned Bell', type: 'object', content: 'A bell under the harbour.', triggers: ['bell'], mode: 'triggered' },
+            { title: 'Old Pier', type: 'location', content: 'Already exists.', triggers: ['pier'] },
+            { title: 'No Triggers', type: 'event', content: 'Never fires.', triggers: [] },
+          ] })
+          : 'hello';
+        return res.end(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] }));
       }
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       sse(res, chunk('Hel'));
@@ -249,6 +257,31 @@ test('LLM options: stop sequences on replies, utility model for memories (#34)',
 
   // Back to defaults for the other tests
   await save({ utilityModel: '', stopSequences: '', stopOnPlayerLines: true });
+});
+
+test('lore suggestions for a draft come back validated (#35)', async () => {
+  const u = await srv.register();
+  const suggest = (body) => srv.request('POST', '/api/deepseek/lore-suggest', { token: u.token, body });
+  assert.equal((await suggest({})).status, 400);
+  assert.equal((await suggest({ draft: { name: 'Empty' } })).status, 400, 'needs some story');
+  const r = await suggest({
+    draft: { name: 'Harbour', backstory: 'A misty harbour where {{user}} arrives.', characters: [{ name: 'Mara', description: 'Ferry keeper' }], loreTitles: ['Old Pier'] },
+    focus: 'secrets',
+  });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(r.json.suggestions, [{ title: 'The Drowned Bell', type: 'object', content: 'A bell under the harbour.', triggers: ['bell'], mode: 'triggered' }]);
+  assert.deepEqual(seen.last.response_format, { type: 'json_object' });
+  const sent = seen.last.messages[1].content;
+  assert.match(sent, /A misty harbour/);
+  assert.match(sent, /- Mara: Ferry keeper/);
+  assert.match(sent, /- Old Pier/);
+  assert.match(sent, /WOULD LIKE CARDS ABOUT: secrets/);
+});
+
+test('the scenario generator asks for JSON output', async () => {
+  const r = await srv.request('POST', '/api/deepseek/generate', { token: user.token, body: { description: 'A heist' } });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(seen.last.response_format, { type: 'json_object' });
 });
 
 test('memories are summarised on the server', async () => {
