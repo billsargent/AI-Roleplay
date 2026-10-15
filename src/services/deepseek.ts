@@ -45,7 +45,7 @@ interface BuildPromptResult {
   frequencyPenalty: number;
   /** Presence penalty (-2 to 2) */
   presencePenalty: number;
-  /** DeepSeek model ID (e.g., "deepseek-chat", "deepseek-reasoner") */
+  /** DeepSeek model ID (informational; the server always uses the admin-configured model) */
   model: string;
 }
 
@@ -79,9 +79,10 @@ function preparePrompt(
   llmSettings: any
 ): BuildPromptResult {
   // Extract LLM parameters with sensible defaults
-  const model = llmSettings?.deepseekModel || 'deepseek-chat';
+  const model = llmSettings?.deepseekModel || 'deepseek-flash';
   const globalInstructions = llmSettings?.globalInstructions || 'Maintain immersive roleplay, focusing on sensory details and character consistency.';
-  const temperature = llmSettings?.temperature ? parseFloat(llmSettings.temperature) : 0.9;
+  // Unset: DeepSeek's recommendation for general conversation (1.5 for creative writing)
+  const temperature = llmSettings?.temperature ? parseFloat(llmSettings.temperature) : 1.3;
   const frequencyPenalty = llmSettings?.frequencyPenalty ? parseFloat(llmSettings.frequencyPenalty) : 0;
   const presencePenalty = llmSettings?.presencePenalty ? parseFloat(llmSettings.presencePenalty) : 0;
   const tokenShort = llmSettings?.tokenShort ? parseInt(llmSettings.tokenShort) : 300;
@@ -285,7 +286,7 @@ export const deepseek = {
    */
   async generateScenario(userDescription: string): Promise<AiGeneratedScenarioData> {
     const llmSettings = await fetchLlmSettings();
-    const model = llmSettings?.deepseekModel || 'deepseek-chat';
+    const model = llmSettings?.deepseekModel || 'deepseek-flash';
 
     const response = await api.post('/deepseek/generate', {
       messages: [
@@ -486,7 +487,7 @@ export const deepseek = {
     const recentMessages = messages.slice(-10).map(m => `${m.role}: ${m.content}`).join('\n');
 
     const llmSettings = await fetchLlmSettings();
-    const model = llmSettings?.deepseekModel || 'deepseek-chat';
+    const model = llmSettings?.deepseekModel || 'deepseek-flash';
 
     try {
       const response = await api.post('/deepseek/chat', {

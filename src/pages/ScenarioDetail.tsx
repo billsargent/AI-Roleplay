@@ -138,7 +138,7 @@ export const ScenarioDetail: React.FC = () => {
       ] : [],
       memories: [],
       settings: {
-        model: 'deepseek-chat',
+        model: 'deepseek-flash',
         responseLength: 'medium' as const,
         streamResponse: true,
         showSuggestions: true,

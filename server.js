@@ -67,7 +67,7 @@ import {
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
-import { validateCompletionRequest, relayCompletion, LlmRequestError, DEEPSEEK_BASE_URL } from './lib/deepseek.js';
+import { validateCompletionRequest, relayCompletion, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -932,7 +932,8 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const debugLlmPrompt = getSystemSetting('debugLlmPrompt');
   const registrationOpen = getSystemSetting('registrationOpen') !== 'false';
   const rateLimitMax = getSystemSetting('rateLimitMax') || '1000';
-  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax });
+  const deepseekThinking = getSystemSetting('deepseekThinking') || '';
+  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking });
 
 
 
@@ -940,7 +941,7 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
 
 /** POST /api/system/settings — Updates system settings (admin only) */
 app.post('/api/system/settings', adminAuth, (req, res) => {
-  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax } = req.body;
+  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking } = req.body;
   // Ignore an echoed masked key so it can never overwrite the real one
   if (typeof deepseekKey === 'string' && deepseekKey.trim() && !deepseekKey.includes('…')) {
     setSystemSetting('deepseekKey', deepseekKey.trim());
@@ -963,6 +964,7 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   if (deepseekModel !== undefined) setSystemSetting('deepseekModel', deepseekModel);
   if (debugLlmPrompt !== undefined) setSystemSetting('debugLlmPrompt', debugLlmPrompt ? 'true' : 'false');
   if (registrationOpen !== undefined) setSystemSetting('registrationOpen', registrationOpen ? 'true' : 'false');
+  if (deepseekThinking !== undefined && THINKING_LEVELS.includes(deepseekThinking)) setSystemSetting('deepseekThinking', deepseekThinking);
   if (rateLimitMax !== undefined) {
     const n = Math.round(Number(rateLimitMax));
     if (Number.isFinite(n) && n >= 10 && n <= 100000) setSystemSetting('rateLimitMax', String(n));
@@ -995,7 +997,7 @@ function debugLogLlmPrompt(userId, payload, endpoint) {
     console.log('┌─────────────────────────────────────────────────────────────┐');
     console.log(`│ 🔍 LLM DEBUG — ${endpoint.padEnd(40)}│`);
     console.log('├─────────────────────────────────────────────────────────────┤');
-    console.log(`│ Model:            ${String(model || 'deepseek-chat').padEnd(37)}│`);
+    console.log(`│ Model:            ${String(model || DEFAULT_MODEL).padEnd(37)}│`);
     console.log(`│ Temperature:      ${String(temperature ?? 'N/A').padEnd(37)}│`);
     console.log(`│ Max Tokens:       ${String(max_tokens ?? 'N/A').padEnd(37)}│`);
     console.log(`│ Freq Penalty:     ${String(frequency_penalty ?? 'N/A').padEnd(37)}│`);
@@ -1086,9 +1088,12 @@ function deepseekRoute({ stream = false, label, defaultMaxTokens, defaultTempera
     let params;
     try {
       params = validateCompletionRequest(req.body, {
-        model: getSystemSetting('deepseekModel') || 'deepseek-chat',
+        model: getSystemSetting('deepseekModel') || DEFAULT_MODEL,
         defaultMaxTokens,
         defaultTemperature,
+        // Admin "Max Tokens Cap" (it was saved but never applied before)
+        maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
+        thinking: getSystemSetting('deepseekThinking') || '',
       });
     } catch (err) {
       if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });

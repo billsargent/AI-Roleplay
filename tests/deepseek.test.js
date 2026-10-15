@@ -175,3 +175,45 @@ test('AI requests are rate limited per user (admins exempt)', async () => {
   const r = await srv.request('POST', '/api/deepseek/chat', { token: admin.token, body: { messages: msgs('hi') } });
   assert.equal(r.status, 200, 'admin should not be limited');
 });
+
+test('thinking off sends sampling values and disables thinking', () => {
+  const p = validateCompletionRequest({ messages: msgs('x'), temperature: 1.3, frequency_penalty: 0.2 }, { model: 'm', thinking: 'off' });
+  assert.deepEqual(p.thinking, { type: 'disabled' });
+  assert.equal(p.temperature, 1.3);
+  assert.equal(p.frequency_penalty, 0.2);
+});
+
+test('thinking on drops ignored sampling values and adds reasoning headroom', () => {
+  const p = validateCompletionRequest(
+    { messages: msgs('x'), temperature: 1.3, presence_penalty: 0.5, max_tokens: 300 },
+    { model: 'm', thinking: 'high' }
+  );
+  assert.deepEqual(p.thinking, { type: 'enabled' });
+  assert.equal(p.reasoning_effort, 'high');
+  assert.equal(p.temperature, undefined);
+  assert.equal(p.presence_penalty, undefined);
+  assert.equal(p.max_tokens, 300 + 4096);
+});
+
+test('model default sends no thinking field; unknown levels are ignored', () => {
+  assert.equal(validateCompletionRequest({ messages: msgs('x') }, { model: 'm' }).thinking, undefined);
+  assert.equal(validateCompletionRequest({ messages: msgs('x') }, { model: 'm', thinking: 'turbo' }).thinking, undefined);
+});
+
+test('the admin token cap applies to replies', () => {
+  const p = validateCompletionRequest({ messages: msgs('x'), max_tokens: 5000 }, { model: 'm', maxTokensCap: 2000 });
+  assert.equal(p.max_tokens, 2000);
+});
+
+test('admin thinking setting and token cap reach DeepSeek', async () => {
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { deepseekThinking: 'low', maxTokens: 1000 } });
+  const r = await srv.request('POST', '/api/deepseek/chat', { token: admin.token, body: { messages: msgs('hi'), max_tokens: 5000, temperature: 1 } });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(seen.last.thinking, { type: 'enabled' });
+  assert.equal(seen.last.reasoning_effort, 'low');
+  assert.equal(seen.last.max_tokens, 1000 + 2048);
+  assert.equal(seen.last.temperature, undefined);
+  const s = await srv.request('GET', '/api/system/settings', { token: admin.token });
+  assert.equal(s.json.deepseekThinking, 'low');
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { deepseekThinking: '', maxTokens: 8192 } });
+});

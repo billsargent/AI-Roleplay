@@ -51,7 +51,7 @@ export const AdminPage: React.FC = () => {
 
   // ─── LLM settings ───
   const [globalInstructions, setGlobalInstructions] = useState('');
-  const [temperature, setTemperature] = useState('0.9');
+  const [temperature, setTemperature] = useState('1.3');
   const [maxTokens, setMaxTokens] = useState('4096');
   const [tokenShort, setTokenShort] = useState('300');
   const [tokenMedium, setTokenMedium] = useState('800');
@@ -64,7 +64,9 @@ export const AdminPage: React.FC = () => {
   const [memoryMaxCount, setMemoryMaxCount] = useState('50');
   const [frequencyPenalty, setFrequencyPenalty] = useState('0');
   const [presencePenalty, setPresencePenalty] = useState('0');
-  const [deepseekModel, setDeepseekModel] = useState('deepseek-chat');
+  const [deepseekModel, setDeepseekModel] = useState('deepseek-flash');
+  /** '' = model default, 'off', or a thinking effort level */
+  const [deepseekThinking, setDeepseekThinking] = useState('');
   const [availableModels, setAvailableModels] = useState<Array<{ id: string }>>([]);
   const [loadingModels, setLoadingModels] = useState(false);
 
@@ -83,7 +85,7 @@ export const AdminPage: React.FC = () => {
         // Only a masked form of the stored key is returned (e.g. "sk-…abcd")
         setMaskedKey(settings.deepseekKeySet ? settings.deepseekKey || 'set' : '');
         setGlobalInstructions(settings.globalInstructions || DEFAULT_GLOBAL_INSTRUCTIONS);
-        setTemperature(settings.temperature || '0.9');
+        setTemperature(settings.temperature || '1.3');
         setMaxTokens(settings.maxTokens || '4096');
         setTokenShort(settings.tokenShort || '300');
         setTokenMedium(settings.tokenMedium || '800');
@@ -99,7 +101,8 @@ export const AdminPage: React.FC = () => {
         setMemoryMaxCount(settings.memoryMaxCount || '50');
         setRateLimitMax(settings.rateLimitMax || '1000');
         setRegistrationOpen(settings.registrationOpen !== false);
-        setDeepseekModel(settings.deepseekModel || 'deepseek-chat');
+        setDeepseekModel(settings.deepseekModel || 'deepseek-flash');
+        setDeepseekThinking(settings.deepseekThinking || '');
         setDebugLlmPrompt(settings.debugLlmPrompt === 'true');
       } catch (e) {
         console.error('Failed to load settings', e);
@@ -188,6 +191,7 @@ export const AdminPage: React.FC = () => {
         chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName,
         memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount,
         deepseekModel,
+        deepseekThinking,
       });
       setLlmSaved(true);
       setTimeout(() => setLlmSaved(false), 3000);
@@ -449,8 +453,11 @@ export const AdminPage: React.FC = () => {
                     ))
                   ) : (
                     <>
-                      <option value="deepseek-chat">deepseek-chat</option>
-                      <option value="deepseek-reasoner">deepseek-reasoner</option>
+                      <option value="deepseek-flash">deepseek-flash</option>
+                      <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+                      {!['deepseek-flash', 'deepseek-v4-pro'].includes(deepseekModel) && (
+                        <option value={deepseekModel}>{deepseekModel}</option>
+                      )}
                     </>
                   )}
                 </select>
@@ -465,6 +472,26 @@ export const AdminPage: React.FC = () => {
               </div>
               <p className="mt-2 text-xs text-zinc-500">
                 Select which DeepSeek model to use for all AI responses. Click refresh to fetch the latest available models from the DeepSeek API.
+                The older names deepseek-chat and deepseek-reasoner were scheduled for retirement by DeepSeek in July 2026.
+              </p>
+            </div>
+            <div className="mt-4">
+              <label className="block text-sm font-bold text-zinc-400 mb-2" htmlFor="thinking-mode">Thinking (reasoning) mode</label>
+              <select
+                id="thinking-mode"
+                value={deepseekThinking}
+                onChange={(e) => setDeepseekThinking(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none cursor-pointer"
+              >
+                <option value="">Model default (send nothing)</option>
+                <option value="off">Off: faster, uses temperature and penalties</option>
+                <option value="low">On, low effort</option>
+                <option value="high">On, high effort</option>
+                <option value="max">On, maximum effort</option>
+              </select>
+              <p className="mt-2 text-xs text-zinc-500">
+                When thinking is on, DeepSeek ignores temperature and the frequency/presence penalties, and the
+                reply budget is raised to leave room for the reasoning. deepseek-flash thinks by default.
               </p>
             </div>
           </div>
@@ -486,6 +513,9 @@ export const AdminPage: React.FC = () => {
               <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
                 <span>Precise (0)</span><span>Creative (2)</span>
               </div>
+              <p className="mt-2 text-xs text-zinc-500">
+                DeepSeek recommends 1.3 for conversation and 1.5 for creative writing. Ignored while thinking mode is on.
+              </p>
             </div>
 
             {/* Max tokens cap slider */}
