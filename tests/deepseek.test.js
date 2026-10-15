@@ -33,7 +33,11 @@ before(async () => {
       if (!json.stream) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         // Lore suggestions in JSON mode: one good card, one duplicate, one without triggers
-        const content = json.response_format?.type === 'json_object' && /lore cards/.test(json.messages?.[0]?.content || '')
+        // Lore fixes: suggest triggers for whatever card ids were sent
+        const fixIds = [...String(json.messages?.[1]?.content || '').matchAll(/\[id: ([^\]]+)\]/g)].map(m => m[1]);
+        const content = /You repair lore cards/.test(json.messages?.[0]?.content || '')
+          ? JSON.stringify({ fixes: fixIds.map(id => ({ id, triggers: ['bell', 'tower'], mode: 'triggered', links: ['Docks'], description: 'A fixed card.' })) })
+          : json.response_format?.type === 'json_object' && /lore cards/.test(json.messages?.[0]?.content || '')
           ? JSON.stringify({ lore: [
             { title: 'The Drowned Bell', type: 'object', content: 'A bell under the harbour.', triggers: ['bell'], mode: 'triggered' },
             { title: 'Old Pier', type: 'location', content: 'Already exists.', triggers: ['pier'] },
@@ -276,6 +280,61 @@ test('lore suggestions for a draft come back validated (#35)', async () => {
   assert.match(sent, /- Mara: Ferry keeper/);
   assert.match(sent, /- Old Pier/);
   assert.match(sent, /WOULD LIKE CARDS ABOUT: secrets/);
+});
+
+// ── Lore health (#45) ──
+const loreScenario = (over = {}) => ({
+  id: randomUUID(), name: 'Bells', description: 'd', tags: [], backstory: 'A town of bells.', customInstructions: 'Be quiet.',
+  characters: [{ id: randomUUID(), name: 'Oz', description: 'Keeper', personality: '' }], settings: { isPublic: false },
+  lorePieces: [
+    { id: randomUUID(), type: 'location', title: 'Docks', content: 'Wet.', weight: 3, pinned: false, smartActivation: true, triggers: ['docks', 'the'], linkedPieces: ['gone-id'] },
+    { id: randomUUID(), type: 'object', title: 'Bell Tower', content: 'Rings at dusk.', weight: 2, pinned: false, smartActivation: false, triggers: [], linkedPieces: [] },
+    { id: randomUUID(), type: 'rule', title: 'Quiet hours', content: 'Nobody rings after dark.', weight: 1, pinned: false, smartActivation: false, triggers: [], linkedPieces: [] },
+  ],
+  ...over,
+});
+
+test('the editor lore check returns issues and the safely fixed draft', async () => {
+  const u = await srv.register();
+  const r = await srv.request('POST', '/api/lore/check', { token: u.token, body: { draft: loreScenario() } });
+  assert.equal(r.status, 200, r.text);
+  const kinds = r.json.issues.map(i => i.kind).sort();
+  assert.deepEqual(kinds, ['badTriggers', 'brokenLinks', 'neverSent', 'ruleCard', 'weightScale']);
+  assert.deepEqual(r.json.fixed.lorePieces.map(p => [p.title, p.weight, p.triggers, p.linkedPieces]), [['Docks', 60, ['docks'], []], ['Bell Tower', 40, [], []]]);
+  assert.match(r.json.fixed.customInstructions, /House rules \(imported\)\n- Quiet hours: Nobody rings after dark\./);
+});
+
+test('AI lore fixes are validated against the draft', async () => {
+  const u = await srv.register();
+  const draft = loreScenario();
+  const tower = draft.lorePieces[1];
+  assert.equal((await srv.request('POST', '/api/deepseek/lore-fix', { token: u.token, body: { draft, ids: [] } })).status, 400);
+  const r = await srv.request('POST', '/api/deepseek/lore-fix', { token: u.token, body: { draft, ids: [tower.id] } });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(r.json.fixes, [{ id: tower.id, triggers: ['bell', 'tower'], mode: 'triggered', linkedPieces: [draft.lorePieces[0].id], description: 'A fixed card.' }]);
+  assert.deepEqual(seen.last.response_format, { type: 'json_object' });
+  assert.match(seen.last.messages[1].content, new RegExp(`\\[id: ${tower.id}\\] Bell Tower`));
+});
+
+test('admin lore health: dry run, then safe fixes for all scenarios after a backup', async () => {
+  const s = loreScenario();
+  await srv.request('POST', '/api/scenarios', { token: admin.token, body: s });
+  const other = await srv.register();
+  assert.equal((await srv.request('GET', '/api/admin/lore-health', { token: other.token })).status, 403);
+  const dry = await srv.request('GET', '/api/admin/lore-health', { token: admin.token });
+  assert.equal(dry.status, 200, dry.text);
+  const row = dry.json.rows.find(r => r.id === s.id);
+  assert.equal(row.counts.neverSent, 1);
+  assert.ok(row.safeChanges.length >= 3);
+  assert.equal((await srv.request('GET', `/api/scenarios/${s.id}`, { token: admin.token })).json.lorePieces.length, 3, 'dry run saves nothing');
+  const run = await srv.request('POST', '/api/admin/lore-health/apply', { token: admin.token });
+  assert.equal(run.status, 200, run.text);
+  assert.ok(run.json.backup && run.json.changed >= 1);
+  const after = (await srv.request('GET', `/api/scenarios/${s.id}`, { token: admin.token })).json;
+  assert.deepEqual(after.lorePieces.map(p => p.title).sort(), ['Bell Tower', 'Docks']);
+  assert.match(after.customInstructions, /Quiet hours/);
+  const again = (await srv.request('GET', '/api/admin/lore-health', { token: admin.token })).json.rows.find(r => r.id === s.id);
+  assert.deepEqual(again.safeChanges, [], 'nothing left to fix safely');
 });
 
 test('the scenario generator asks for JSON output', async () => {

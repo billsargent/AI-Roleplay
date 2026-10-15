@@ -68,12 +68,13 @@ import {
   backupDatabase,
 } from './database/index.js';
 import { matchScenario, summarizeReimport, mergeReimport } from './lib/fictionlabReimport.js';
+import { checkLore, applySafeFixes } from './lib/loreDoctor.js';
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
 import { parseFictionlab } from './lib/fictionlab.js';
 import { validateCompletionRequest, relayCompletion, completeOnce, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
-import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, buildLoreSuggestPrompt, parseLoreSuggestions, buildEnhancePrompt, cleanEnhanced, ENHANCE_FIELDS, MAX_ENHANCE_CHARS, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
+import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, buildLoreSuggestPrompt, parseLoreSuggestions, buildEnhancePrompt, cleanEnhanced, ENHANCE_FIELDS, MAX_ENHANCE_CHARS, buildLoreFixPrompt, parseLoreFixes, LORE_FIX_BATCH, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -225,6 +226,8 @@ const ROUTE_PARSED_BODIES = new Set([
   'POST /api/import/fictionlab',
   'POST /api/admin/fictionlab/match',
   'POST /api/admin/fictionlab/apply',
+  'POST /api/lore/check',
+  'POST /api/deepseek/lore-fix',
   'POST /api/chats',
   'POST /api/personas',
 ]);
@@ -1501,7 +1504,7 @@ app.post('/api/deepseek/enhance', auth, llmLimiter, async (req, res, next) => {
     const safeContext = context && typeof context === 'object'
       ? { name: typeof context.name === 'string' ? context.name : '', description: typeof context.description === 'string' ? context.description : '' }
       : {};
-    const { messages, maxTokens, temperature } = buildEnhancePrompt(field, text, safeContext, mode === 'vivid' ? 'vivid' : 'fix');
+    const { messages, maxTokens, temperature } = buildEnhancePrompt(field, text, safeContext, ['vivid', 'condense'].includes(mode) ? mode : 'fix');
     const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature }, {
       model: utilityModel(),
       maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
@@ -1513,6 +1516,115 @@ app.post('/api/deepseek/enhance', auth, llmLimiter, async (req, res, next) => {
     res.json({ text: result });
   } catch (err) {
     if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+/** The lore fields the checks and AI fixes need (no images) */
+function loreDraft(draft) {
+  const text = (v) => (typeof v === 'string' ? v : '');
+  const d = draft && typeof draft === 'object' ? draft : {};
+  return {
+    name: text(d.name),
+    backstory: text(d.backstory),
+    customInstructions: text(d.customInstructions),
+    characters: (Array.isArray(d.characters) ? d.characters : []).filter(c => c && typeof c === 'object').map(c => ({ name: text(c.name) })),
+    lorePieces: (Array.isArray(d.lorePieces) ? d.lorePieces : []).filter(p => p && typeof p === 'object' && typeof p.id === 'string').slice(0, 1000).map(p => ({
+      id: p.id, type: text(p.type), title: text(p.title), content: text(p.content), description: text(p.description),
+      weight: Number.isFinite(Number(p.weight)) ? Number(p.weight) : 100, pinned: !!p.pinned, smartActivation: !!p.smartActivation, hidden: !!p.hidden,
+      triggers: (Array.isArray(p.triggers) ? p.triggers : []).filter(t => typeof t === 'string'),
+      linkedPieces: (Array.isArray(p.linkedPieces) ? p.linkedPieces : []).filter(t => typeof t === 'string'),
+    })),
+  };
+}
+
+/**
+ * POST /api/lore/check — Lore health of a scenario draft (saved or not).
+ * Body: { draft: { name, backstory, customInstructions, characters, lorePieces } }.
+ * Returns { issues, fixed: { lorePieces, customInstructions, changes } }: the
+ * problems found and the draft with the safe fixes applied (nothing saved).
+ */
+app.post('/api/lore/check', auth, mediumBody, (req, res) => {
+  const draft = loreDraft(req.body?.draft);
+  const llm = readLlmSettings(getSystemSetting);
+  res.json({ issues: checkLore(draft, llm), fixed: applySafeFixes(draft) });
+});
+
+/**
+ * POST /api/deepseek/lore-fix — AI suggestions for cards that are never sent.
+ * Body: { draft, ids: string[] } with at most 15 ids (LORE_FIX_BATCH) (the client sends batches).
+ * Returns { fixes: [{ id, triggers, mode, linkedPieces, description }] }.
+ */
+app.post('/api/deepseek/lore-fix', auth, mediumBody, llmLimiter, async (req, res, next) => {
+  const draft = loreDraft(req.body?.draft);
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(id => typeof id === 'string') : [];
+  const cards = draft.lorePieces.filter(p => ids.includes(p.id));
+  if (cards.length === 0) return res.status(400).json({ error: 'Choose the cards to fix' });
+  if (cards.length > LORE_FIX_BATCH) return res.status(400).json({ error: `At most ${LORE_FIX_BATCH} cards per request` });
+  const deepseekKey = getSystemSetting('deepseekKey');
+  if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+  try {
+    const { messages, maxTokens } = buildLoreFixPrompt(draft, cards);
+    const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature: 0.4 }, {
+      model: utilityModel(),
+      maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
+      thinking: getSystemSetting('deepseekThinking') || '',
+      json: true,
+    });
+    debugLogLlmPrompt(req.userId, params, 'Lore fix');
+    res.json({ fixes: parseLoreFixes(await completeOnce(params, { apiKey: deepseekKey }), cards, draft.lorePieces) });
+  } catch (err) {
+    if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+/** Lore health of every live scenario: issues by kind and the safe fixes that would apply */
+function loreHealthReport() {
+  const llm = readLlmSettings(getSystemSetting);
+  return listScenarioMatchKeys().map(({ id }) => {
+    const scenario = getScenarioById(id);
+    if (!scenario) return null;
+    const issues = checkLore(scenario, llm);
+    const counts = {};
+    for (const i of issues) counts[i.kind] = (counts[i.kind] || 0) + 1;
+    return { id, name: scenario.name, counts, safeChanges: applySafeFixes(scenario).changes, scenario };
+  }).filter(Boolean);
+}
+
+/**
+ * GET /api/admin/lore-health — Dry run: lore issues of every scenario and
+ * the safe fixes that "apply" would make.
+ */
+app.get('/api/admin/lore-health', adminAuth, (req, res) => {
+  const rows = loreHealthReport().map(({ scenario, ...row }) => row);
+  const totals = {};
+  for (const r of rows) for (const [k, v] of Object.entries(r.counts)) totals[k] = (totals[k] || 0) + v;
+  res.json({ totals, rows });
+});
+
+/**
+ * POST /api/admin/lore-health/apply — Applies the safe lore fixes to every
+ * scenario that needs them, after a database backup.
+ * Returns { backup, changed, failed }.
+ */
+app.post('/api/admin/lore-health/apply', adminAuth, async (req, res, next) => {
+  try {
+    const backup = path.basename(await backupDatabase());
+    let changed = 0;
+    const failed = [];
+    for (const { scenario, safeChanges } of loreHealthReport()) {
+      if (safeChanges.length === 0) continue;
+      const { lorePieces, customInstructions } = applySafeFixes(scenario);
+      try {
+        saveScenarioTransaction({ ...scenario, lorePieces, customInstructions });
+        changed++;
+      } catch (err) {
+        failed.push({ id: scenario.id, name: scenario.name, error: err instanceof DataError ? err.message : 'Could not save' });
+      }
+    }
+    res.json({ backup, changed, failed });
+  } catch (err) {
     next(err);
   }
 });
