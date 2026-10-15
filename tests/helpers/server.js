@@ -22,8 +22,13 @@ function freePort() {
   });
 }
 
-export async function startServer({ env = {} } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rpchat-test-'));
+/**
+ * @param {object} [opts]
+ * @param {object} [opts.env] - extra environment variables
+ * @param {string} [opts.dir] - reuse an existing data folder (kept on stop), e.g. to restart on the same database
+ */
+export async function startServer({ env = {}, dir: reuseDir } = {}) {
+  const dir = reuseDir || fs.mkdtempSync(path.join(os.tmpdir(), 'rpchat-test-'));
   const uploads = path.join(dir, 'uploads');
   const port = await freePort();
   const child = spawn(process.execPath, ['server.js'], {
@@ -88,7 +93,7 @@ export async function startServer({ env = {} } = {}) {
     async stop() {
       child.kill();
       await new Promise(r => child.once('exit', r));
-      fs.rmSync(dir, { recursive: true, force: true });
+      if (!reuseDir) fs.rmSync(dir, { recursive: true, force: true });
     },
   };
 }

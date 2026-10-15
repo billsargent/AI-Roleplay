@@ -42,6 +42,7 @@ export const AdminPage: React.FC = () => {
 
   // ─── System settings ───
   const [apiKey, setApiKey] = useState('');
+  const [maskedKey, setMaskedKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [siteName, setSiteName] = useState('');
   const [rateLimitMax, setRateLimitMax] = useState('1000');
@@ -79,7 +80,8 @@ export const AdminPage: React.FC = () => {
     const loadSettings = async () => {
       try {
         const settings = await apiService.getSystemSettings();
-        setApiKey(settings.deepseekKey || '');
+        // Only a masked form of the stored key is returned (e.g. "sk-…abcd")
+        setMaskedKey(settings.deepseekKeySet ? settings.deepseekKey || 'set' : '');
         setGlobalInstructions(settings.globalInstructions || DEFAULT_GLOBAL_INSTRUCTIONS);
         setTemperature(settings.temperature || '0.9');
         setMaxTokens(settings.maxTokens || '4096');
@@ -131,10 +133,16 @@ export const AdminPage: React.FC = () => {
     }
   }, [activeTab]);
 
-  /** Save only the DeepSeek API key */
+  /** Save only the DeepSeek API key (the stored key is never sent back to the browser) */
   const handleSaveKey = async () => {
+    if (!apiKey.trim()) {
+      showToast('Enter a new API key to replace the current one', 'info');
+      return;
+    }
     try {
-      await apiService.updateSystemSettings({ deepseekKey: apiKey });
+      await apiService.updateSystemSettings({ deepseekKey: apiKey.trim() });
+      setMaskedKey(`${apiKey.trim().slice(0, 3)}…${apiKey.trim().slice(-4)}`);
+      setApiKey('');
       setApiKeySaved(true);
       setTimeout(() => setApiKeySaved(false), 3000);
       showToast('API key saved', 'success');
@@ -250,7 +258,8 @@ export const AdminPage: React.FC = () => {
                   <input
                     type={showKey ? 'text' : 'password'}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 pr-20"
-                    placeholder="sk-..."
+                    placeholder={maskedKey ? `Current key: ${maskedKey} (type a new key to replace it)` : 'sk-...'}
+                    aria-label="DeepSeek API key"
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                   />

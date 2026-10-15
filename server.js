@@ -80,8 +80,24 @@ const MEDIUM_JSON_BODY_SIZE = process.env.MEDIUM_JSON_BODY_SIZE || '10mb';
 /** Body limit for everything else, including unauthenticated routes */
 const DEFAULT_JSON_BODY_SIZE = '1mb';
 
-// Generate a random JWT secret if one isn't provided via environment variable
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+// JWT secret: JWT_SECRET if set, otherwise one generated on first start and
+// kept in the database, so restarting the server no longer logs everyone out.
+getDb();
+const JWT_SECRET = process.env.JWT_SECRET || (() => {
+  let secret = getSystemSetting('jwtSecret');
+  if (!secret) {
+    secret = crypto.randomBytes(64).toString('hex');
+    setSystemSetting('jwtSecret', secret);
+  }
+  return secret;
+})();
+
+// Behind a reverse proxy, set TRUST_PROXY (e.g. "1" or "loopback") so rate
+// limits see each client's address instead of the proxy's
+if (process.env.TRUST_PROXY) {
+  const v = process.env.TRUST_PROXY;
+  app.set('trust proxy', /^\d+$/.test(v) ? Number(v) : v === 'true' ? true : v);
+}
 
 // ─── Image Serving Endpoint (BEFORE rate limiter for performance) ─────
 
@@ -270,7 +286,8 @@ app.use('/api', generalLimiter);
 // Rate limiting for auth endpoints to prevent brute force attacks
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // 20 attempts per window
+  max: 20, // 20 failed attempts per window
+  skipSuccessfulRequests: true, // successful logins do not use up the allowance
   message: { error: 'Too many login/registration attempts. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -886,7 +903,10 @@ app.delete('/api/trash/empty', auth, (req, res) => {
 
 /** GET /api/system/settings — Returns all system settings (admin only) */
 app.get('/api/system/settings', adminAuth, (req, res) => {
-  const deepseekKey = getSystemSetting('deepseekKey');
+  const storedKey = getSystemSetting('deepseekKey');
+  // Only a masked form leaves the server (e.g. "sk-…abcd")
+  const deepseekKey = storedKey ? `${storedKey.slice(0, 3)}…${storedKey.slice(-4)}` : '';
+  const deepseekKeySet = !!storedKey;
   const globalInstructions = getSystemSetting('globalInstructions');
   const temperature = getSystemSetting('temperature');
   const maxTokens = getSystemSetting('maxTokens');
@@ -906,7 +926,7 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const debugLlmPrompt = getSystemSetting('debugLlmPrompt');
   const registrationOpen = getSystemSetting('registrationOpen') !== 'false';
   const rateLimitMax = getSystemSetting('rateLimitMax') || '1000';
-  res.json({ deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax });
+  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax });
 
 
 
@@ -915,7 +935,10 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
 /** POST /api/system/settings — Updates system settings (admin only) */
 app.post('/api/system/settings', adminAuth, (req, res) => {
   const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax } = req.body;
-  if (deepseekKey !== undefined) setSystemSetting('deepseekKey', deepseekKey);
+  // Ignore an echoed masked key so it can never overwrite the real one
+  if (typeof deepseekKey === 'string' && deepseekKey.trim() && !deepseekKey.includes('…')) {
+    setSystemSetting('deepseekKey', deepseekKey.trim());
+  }
   if (globalInstructions !== undefined) setSystemSetting('globalInstructions', globalInstructions);
   if (temperature !== undefined) setSystemSetting('temperature', String(temperature));
   if (maxTokens !== undefined) setSystemSetting('maxTokens', String(maxTokens));
@@ -940,14 +963,6 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   }
 
   res.json({ success: true });
-
-
-});
-
-/** GET /api/system/deepseek-key — Returns the DeepSeek API key (admin only) */
-app.get('/api/system/deepseek-key', adminAuth, (req, res) => {
-  const deepseekKey = getSystemSetting('deepseekKey');
-  res.json({ deepseekKey });
 });
 
 // ─── LLM Debug Logging Helper ────────────────────────────────────────

@@ -42,6 +42,8 @@ export function getDb() {
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');    // Write-Ahead Logging for performance
     db.pragma('foreign_keys = ON');     // Enforce referential integrity
+    db.pragma('busy_timeout = 5000');   // Wait for a lock (e.g. migration script) instead of failing at once
+    db.pragma('synchronous = NORMAL');  // Safe with WAL; fewer fsyncs per write
     initTables();
   }
   return db;
@@ -158,17 +160,39 @@ function initTables() {
     );
   `);
 
-  // ── Safe migrations ──
-  try { db.exec(`ALTER TABLE scenarios ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
-  try { db.exec(`ALTER TABLE chats ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
-  try { db.exec(`ALTER TABLE scenarios ADD COLUMN introduction TEXT DEFAULT ''`); } catch {}
-  // ── Image path columns (file-system storage) ──
-  try { db.exec(`ALTER TABLE scenarios ADD COLUMN image_path TEXT DEFAULT ''`); } catch {}
-  try { db.exec(`ALTER TABLE characters ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
-  try { db.exec(`ALTER TABLE lore_pieces ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
-  try { db.exec(`ALTER TABLE personas ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
-  // ── Session revocation: tokens issued before this time (ms) are rejected ──
-  try { db.exec(`ALTER TABLE users ADD COLUMN password_changed_at INTEGER DEFAULT 0`); } catch {}
+  // ── Column migrations (each adds the column only if it is missing) ──
+  addColumnIfMissing('scenarios', 'deleted_at', 'INTEGER DEFAULT NULL');
+  addColumnIfMissing('chats', 'deleted_at', 'INTEGER DEFAULT NULL');
+  addColumnIfMissing('scenarios', 'introduction', "TEXT DEFAULT ''");
+  // Image path columns (file-system storage)
+  addColumnIfMissing('scenarios', 'image_path', "TEXT DEFAULT ''");
+  addColumnIfMissing('characters', 'avatar_path', "TEXT DEFAULT ''");
+  addColumnIfMissing('lore_pieces', 'avatar_path', "TEXT DEFAULT ''");
+  addColumnIfMissing('personas', 'avatar_path', "TEXT DEFAULT ''");
+  // Session revocation: tokens issued before this time (ms) are rejected
+  addColumnIfMissing('users', 'password_changed_at', 'INTEGER DEFAULT 0');
+
+  // ── Indexes for the lookups every page makes ──
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id, deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_chats_scenario ON chats(scenario_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_memories_chat ON memories(chat_id);
+    CREATE INDEX IF NOT EXISTS idx_characters_scenario ON characters(scenario_id);
+    CREATE INDEX IF NOT EXISTS idx_lore_scenario ON lore_pieces(scenario_id);
+    CREATE INDEX IF NOT EXISTS idx_scenarios_user ON scenarios(user_id, deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_scenarios_deleted ON scenarios(deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_personas_user ON personas(user_id);
+  `);
+}
+
+/**
+ * Adds a column when it does not exist yet. Unlike a bare ALTER wrapped in
+ * try/catch, real errors (typos, locked database) are not swallowed.
+ */
+function addColumnIfMissing(table, column, definition) {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === column);
+  if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 /**
