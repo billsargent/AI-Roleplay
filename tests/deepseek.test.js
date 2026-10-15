@@ -229,6 +229,28 @@ test('opening writes the first message of an empty chat', async () => {
   assert.equal((await reply(u.token, started, { mode: 'opening' })).status, 400);
 });
 
+test('LLM options: stop sequences on replies, utility model for memories (#34)', async () => {
+  const u = await srv.register();
+  const save = (body) => srv.request('POST', '/api/system/settings', { token: admin.token, body });
+  assert.equal((await save({ utilityModel: 'cheap-model', utilityTemperature: 0.3, stopSequences: 'THE END\n\n{{user}} says' })).status, 200);
+  const settings = (await srv.request('GET', '/api/system/settings', { token: admin.token })).json;
+  assert.equal(settings.utilityModel, 'cheap-model');
+  assert.equal(settings.stopSequences, 'THE END\n{{user}} says');
+  assert.equal(settings.stopOnPlayerLines, true);
+
+  const chatId = await makeChat(u.token, 'Hello');
+  assert.equal((await reply(u.token, chatId)).status, 200);
+  assert.deepEqual(seen.last.stop, ['\nRin:', '\n**Rin:**', 'THE END', 'Rin says']);
+  assert.equal(seen.last.model, 'deepseek-chat', 'chat replies keep the chat model');
+
+  assert.equal((await srv.request('POST', `/api/chats/${chatId}/memory`, { token: u.token })).status, 200);
+  assert.equal(seen.last.model, 'cheap-model');
+  assert.ok(!('stop' in seen.last));
+
+  // Back to defaults for the other tests
+  await save({ utilityModel: '', stopSequences: '', stopOnPlayerLines: true });
+});
+
 test('memories are summarised on the server', async () => {
   const chatId = await makeChat(user.token, 'We crossed the river.');
   const r = await srv.request('POST', `/api/chats/${chatId}/memory`, { token: user.token });

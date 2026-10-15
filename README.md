@@ -49,7 +49,8 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 
 ### 🛠️ Admin Panel
 - **DeepSeek API Key Configuration** — Set or replace the AI provider key; the stored key is never sent back to the browser (only a masked form)
-- **Model & Thinking Mode** — Pick the DeepSeek model and whether it reasons before replying
+- **Model & Thinking Mode** — Pick the DeepSeek model for chats, a cheaper background model for memories and generation, and whether it reasons before replying
+- **Stop Sequences** — Stop a reply when the AI starts writing as the player, plus custom stops
 - **LLM Parameters** — Configure temperature, max tokens, frequency/presence penalties
 - **Response Token Limits** — Set short/medium/long response token caps
 - **Memory Management** — Configure how often memories are written, their length, and how many are kept

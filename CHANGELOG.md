@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **LLM options with explanations** (#34): every LLM Config setting now says what it does and what to choose.
+  - **Stop sequences**: a reply stops when the AI starts a line as the player (on by default), plus up to 16 custom stops (`\n` and `{{user}}` supported).
+  - **Background model and temperature** for memory summaries and the scenario generator (default: the chat model, 0.5).
+
+### Changed
+- The default temperature is 1.0 (was 1.3); the help text recommends 0.8–1.2 for roleplay.
+
+### Fixed
+- The penalty slider labels were reversed for negative values (they called -2 "less repetitive"; negative values make the AI repeat itself more).
+
 ## [v2.1.0] - 2026-10-15
 
 Chat replies you can steer, linked lore, and a more honest scenario editor (#14, #15, #18, #19, #23, #24, #25, #39).

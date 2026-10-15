@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, readLlmSettings, responseTokensFor,
-  triggerMatches, selectLore, selectHistory, estimateTokens, memoryDue, messagesSinceLastMemory, htmlToText,
+  triggerMatches, selectLore, selectHistory, estimateTokens, memoryDue, messagesSinceLastMemory, htmlToText, stopSequencesFor,
 } from '../lib/prompt.js';
 
 const llm = readLlmSettings(() => '');
@@ -30,7 +30,9 @@ const chat = (over = {}) => ({
 const msg = (role, content, timestamp = 0) => ({ role, content, timestamp });
 
 test('defaults when nothing is configured', () => {
-  assert.equal(llm.temperature, 1.3);
+  assert.equal(llm.temperature, 1.0);
+  assert.equal(llm.utilityTemperature, 0.5);
+  assert.equal(llm.stopOnPlayerLines, true);
   assert.equal(llm.memoryGenerateInterval, 25);
   assert.equal(llm.contextTokenBudget, 32000);
   assert.equal(llm.loreActiveMax, 5);
@@ -194,6 +196,16 @@ test('the newest history that fits the budget is sent, the rest is noted', () =>
 test('selectHistory always keeps the last message', () => {
   const { history } = selectHistory([msg('user', 'x'.repeat(100000))], 10);
   assert.equal(history.length, 1);
+});
+
+// ── Stop sequences (#34) ──
+test('replies stop when the AI starts a line for the player', () => {
+  const { stop } = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario(), chat: chat(), llm });
+  assert.deepEqual(stop, ['\nRin:', '\n**Rin:**']);
+  const custom = readLlmSettings(k => ({ stopOnPlayerLines: 'false', stopSequences: '\\n{{user}} says\r\nTHE END\n\n' })[k] || '');
+  assert.deepEqual(stopSequencesFor(custom, 'Rin'), ['\nRin says', 'THE END']);
+  const many = { ...llm, stopSequences: Array.from({ length: 30 }, (_, i) => `s${i}`) };
+  assert.equal(stopSequencesFor(many, 'Rin').length, 16);
 });
 
 // ── Reply modes (#18, #19) ──

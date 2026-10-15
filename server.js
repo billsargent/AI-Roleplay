@@ -953,7 +953,11 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const loreScanDepth = getSystemSetting('loreScanDepth');
   const loreActiveMax = getSystemSetting('loreActiveMax');
   const lorePinnedMax = getSystemSetting('lorePinnedMax');
-  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax });
+  const utilityModel = getSystemSetting('utilityModel');
+  const utilityTemperature = getSystemSetting('utilityTemperature');
+  const stopOnPlayerLines = getSystemSetting('stopOnPlayerLines') !== 'false';
+  const stopSequences = getSystemSetting('stopSequences');
+  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax, utilityModel, utilityTemperature, stopOnPlayerLines, stopSequences });
 
 
 
@@ -992,6 +996,20 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   if (rateLimitMax !== undefined) {
     const n = Math.round(Number(rateLimitMax));
     if (Number.isFinite(n) && n >= 10 && n <= 100000) setSystemSetting('rateLimitMax', String(n));
+  }
+  // Background jobs may use another model ('' = the chat model)
+  if (typeof req.body.utilityModel === 'string' && req.body.utilityModel.length <= 100) {
+    setSystemSetting('utilityModel', req.body.utilityModel.trim());
+  }
+  if (req.body.utilityTemperature !== undefined) {
+    const t = Number(req.body.utilityTemperature);
+    if (Number.isFinite(t) && t >= 0 && t <= 2) setSystemSetting('utilityTemperature', String(t));
+  }
+  if (req.body.stopOnPlayerLines !== undefined) setSystemSetting('stopOnPlayerLines', req.body.stopOnPlayerLines ? 'true' : 'false');
+  if (typeof req.body.stopSequences === 'string') {
+    // One per line, at most 16, each up to 100 characters
+    const lines = req.body.stopSequences.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim()).slice(0, 16).map(l => l.slice(0, 100));
+    setSystemSetting('stopSequences', lines.join('\n'));
   }
 
   res.json({ success: true });
@@ -1103,7 +1121,12 @@ const llmLimiter = rateLimit({
  * The model, thinking mode and token cap come from admin settings
  * (lib/deepseek.js); the browser never supplies prompt text.
  */
-async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, label, stream = false, beta = false }) {
+/** Model for background jobs (memories, generator): the utility model, else the chat model */
+function utilityModel() {
+  return getSystemSetting('utilityModel') || getSystemSetting('deepseekModel') || DEFAULT_MODEL;
+}
+
+async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, stop, label, stream = false, beta = false, model }) {
   const deepseekKey = getSystemSetting('deepseekKey');
   if (!deepseekKey) {
     return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
@@ -1111,9 +1134,9 @@ async function runCompletion(req, res, { messages, maxTokens, temperature, frequ
   let params;
   try {
     params = validateCompletionRequest(
-      { messages, max_tokens: maxTokens, temperature, frequency_penalty: frequencyPenalty, presence_penalty: presencePenalty },
+      { messages, max_tokens: maxTokens, temperature, frequency_penalty: frequencyPenalty, presence_penalty: presencePenalty, stop },
       {
-        model: getSystemSetting('deepseekModel') || DEFAULT_MODEL,
+        model: model || getSystemSetting('deepseekModel') || DEFAULT_MODEL,
         // Admin "Max Tokens Cap"
         maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
         thinking: getSystemSetting('deepseekThinking') || '',
@@ -1187,11 +1210,12 @@ app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
   const llm = readLlmSettings(getSystemSetting);
   // Prefix completion continues the text exactly; it needs thinking off
   const prefix = mode === 'continue' && getSystemSetting('deepseekThinking') === 'off';
-  const { messages, maxTokens } = buildChatPrompt({ messages: history, scenario, chat, llm, mode: promptMode, prefix });
+  const { messages, maxTokens, stop } = buildChatPrompt({ messages: history, scenario, chat, llm, mode: promptMode, prefix });
   if (mode === 'continue') res.setHeader('X-Continue-Mode', prefix ? 'prefix' : 'instruct');
   await runCompletion(req, res, {
     messages, maxTokens,
     temperature: llm.temperature, frequencyPenalty: llm.frequencyPenalty, presencePenalty: llm.presencePenalty,
+    stop,
     label: `${req.body?.stream ? 'Chat Stream' : 'Chat'} (${mode})`,
     stream: !!req.body?.stream,
     beta: prefix,
@@ -1223,9 +1247,9 @@ app.post('/api/chats/:id/memory', auth, async (req, res, next) => {
     const deepseekKey = getSystemSetting('deepseekKey');
     if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
     try {
-      const { messages, maxTokens, temperature } = buildMemoryPrompt(source, llm.memoryWordCount);
-      const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature }, {
-        model: getSystemSetting('deepseekModel') || DEFAULT_MODEL,
+      const { messages, maxTokens } = buildMemoryPrompt(source, llm.memoryWordCount);
+      const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature: llm.utilityTemperature }, {
+        model: utilityModel(),
         maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
         thinking: getSystemSetting('deepseekThinking') || '',
       });
@@ -1261,7 +1285,7 @@ app.post('/api/deepseek/generate', auth, llmLimiter, async (req, res) => {
     return res.status(413).json({ error: 'Description is too long (max 10,000 characters)' });
   }
   const { messages, maxTokens, temperature } = buildScenarioGenerationPrompt(description);
-  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate' });
+  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate', model: utilityModel() });
 });
 
 /** GET /api/system/llm-settings — Returns LLM configuration (any authenticated user) */
