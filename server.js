@@ -7,6 +7,8 @@
  * Uses ESM module system (type: "module" in package.json).
  */
 
+// Load .env first so every module below sees its settings (see README)
+import 'dotenv/config';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
