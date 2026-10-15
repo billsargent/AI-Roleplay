@@ -284,6 +284,91 @@ test('the scenario generator asks for JSON output', async () => {
   assert.deepEqual(seen.last.response_format, { type: 'json_object' });
 });
 
+// ── Memories players can see and shape (#36) ──
+test('a reply says which memories and lore it was given', async () => {
+  const u = await srv.register();
+  const scenarioId = randomUUID();
+  await srv.request('POST', '/api/scenarios', { token: u.token, body: {
+    id: scenarioId, name: 'Ctx', description: 'd', tags: [], backstory: 'b', characters: [], settings: { isPublic: false },
+    lorePieces: [
+      { id: randomUUID(), type: 'location', title: 'Harbour', content: 'Wet.', pinned: true, smartActivation: false, triggers: [], linkedPieces: [], weight: 100 },
+      { id: randomUUID(), type: 'object', title: 'Secret Map', content: 'Hidden.', pinned: true, smartActivation: false, triggers: [], linkedPieces: [], weight: 100, hidden: true },
+    ],
+  } });
+  const chatId = randomUUID();
+  const memId = randomUUID();
+  await srv.request('POST', '/api/chats', { token: u.token, body: {
+    id: chatId, scenarioId, title: 't', createdAt: Date.now(), settings: {}, userCharacter: { name: 'Rin' },
+    messages: [{ id: randomUUID(), role: 'user', content: 'hi', timestamp: Date.now() }],
+    memories: [{ id: memId, content: 'They met.', pinned: false, timestamp: 1 }],
+  } });
+  const r = await reply(u.token, chatId);
+  assert.equal(r.status, 200, r.text);
+  const ctx = JSON.parse(decodeURIComponent(r.headers.get('x-reply-context')));
+  // The author sees every title, hidden ones included
+  assert.deepEqual(ctx, { memoryIds: [memId], lore: ['Harbour', 'Secret Map'], hiddenLore: 0, omitted: 0 });
+
+  // A player of someone else's scenario only gets a count for hidden lore
+  const p = await srv.register();
+  await srv.request('POST', '/api/scenarios', { token: u.token, body: { ...(await srv.request('GET', `/api/scenarios/${scenarioId}`, { token: u.token })).json, settings: { isPublic: true } } });
+  const pChat = randomUUID();
+  await srv.request('POST', '/api/chats', { token: p.token, body: {
+    id: pChat, scenarioId, title: 't', createdAt: Date.now(), settings: {}, userCharacter: { name: 'Ash' }, memories: [],
+    messages: [{ id: randomUUID(), role: 'user', content: 'hi', timestamp: Date.now() }],
+  } });
+  const r2 = await reply(p.token, pChat);
+  assert.equal(r2.status, 200, r2.text);
+  assert.deepEqual(JSON.parse(decodeURIComponent(r2.headers.get('x-reply-context'))), { memoryIds: [], lore: ['Harbour'], hiddenLore: 1, omitted: 0 });
+});
+
+test('memory details and reply context are stored with the chat', async () => {
+  const u = await srv.register();
+  const chatId = await makeChat(u.token, 'We crossed the river.');
+  const m = (await srv.request('POST', `/api/chats/${chatId}/memory`, { token: u.token })).json.memory;
+  assert.equal(m.source, 'manual');
+  assert.ok(m.coveredFrom <= m.coveredUntil);
+  const chat = (await srv.request('GET', `/api/chats/${chatId}`, { token: u.token })).json;
+  chat.memories = [{ ...m, editedAt: 123, content: 'Edited.' }, { id: randomUUID(), content: 'Mine', pinned: false, timestamp: 5, source: 'user' }, { id: randomUUID(), content: 'Bad', pinned: false, timestamp: 6, source: 'evil' }];
+  chat.messages.push({ id: randomUUID(), role: 'assistant', content: 'ok', timestamp: Date.now() + 5, contextInfo: { memoryIds: [m.id], lore: ['A'], hiddenLore: 2, omitted: 3, extra: 'dropped' } });
+  assert.equal((await srv.request('POST', '/api/chats', { token: u.token, body: chat })).status, 200);
+  const back = (await srv.request('GET', `/api/chats/${chatId}`, { token: u.token })).json;
+  const byContent = Object.fromEntries(back.memories.map(x => [x.content, x]));
+  assert.equal(byContent['Edited.'].editedAt, 123);
+  assert.equal(byContent['Edited.'].source, 'manual');
+  assert.equal(byContent['Mine'].source, 'user');
+  assert.equal(byContent['Bad'].source, undefined, 'unknown sources are dropped');
+  assert.deepEqual(back.messages[back.messages.length - 1].contextInfo, { memoryIds: [m.id], lore: ['A'], hiddenLore: 2, omitted: 3 });
+  assert.equal(back.messages[0].contextInfo, undefined, 'user messages carry no context');
+});
+
+test('pinned memories are capped, but chats over the cap still save', async () => {
+  const u = await srv.register();
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { memoryPinnedMax: 2 } });
+  const chatId = await makeChat(u.token, 'x');
+  const chat = (await srv.request('GET', `/api/chats/${chatId}`, { token: u.token })).json;
+  const mem = (pinned) => ({ id: randomUUID(), content: 'm', pinned, timestamp: Date.now() });
+  chat.memories = [mem(true), mem(true)];
+  assert.equal((await srv.request('POST', '/api/chats', { token: u.token, body: chat })).status, 200);
+  chat.memories.push(mem(true));
+  const over = await srv.request('POST', '/api/chats', { token: u.token, body: chat });
+  assert.equal(over.status, 409);
+  assert.match(over.json.error, /at most 2/);
+  // Lowering the cap does not lock existing chats
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { memoryPinnedMax: 1 } });
+  chat.memories.pop();
+  chat.messages.push({ id: randomUUID(), role: 'user', content: 'more', timestamp: Date.now() + 9 });
+  assert.equal((await srv.request('POST', '/api/chats', { token: u.token, body: chat })).status, 200);
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { memoryPinnedMax: 10 } });
+});
+
+test('players get only the settings the browser needs', async () => {
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { globalInstructions: 'SECRET RULES' } });
+  const r = await srv.request('GET', '/api/system/llm-settings', { token: user.token });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(r.json).sort(), ['memoryGenerateInterval', 'memoryMaxCount', 'memoryPinnedMax', 'siteName']);
+  assert.ok(!r.text.includes('SECRET RULES'));
+});
+
 test('memories are summarised on the server', async () => {
   const chatId = await makeChat(user.token, 'We crossed the river.');
   const r = await srv.request('POST', `/api/chats/${chatId}/memory`, { token: user.token });

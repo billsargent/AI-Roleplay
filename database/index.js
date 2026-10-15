@@ -175,6 +175,12 @@ function initTables() {
   addColumnIfMissing('messages', 'current_version_index', 'INTEGER DEFAULT 0');
   // Time of the last message a memory summarises (rolling memories)
   addColumnIfMissing('memories', 'covered_until', 'INTEGER DEFAULT NULL');
+  // Memory details shown to players: first message covered, how it was made, last edit
+  addColumnIfMissing('memories', 'covered_from', 'INTEGER DEFAULT NULL');
+  addColumnIfMissing('memories', 'source', "TEXT DEFAULT ''");
+  addColumnIfMissing('memories', 'edited_at', 'INTEGER DEFAULT NULL');
+  // What the AI was given for a reply (memory ids, visible lore titles, omitted count)
+  addColumnIfMissing('messages', 'context_info', "TEXT DEFAULT ''");
 
   // ── Indexes for the lookups every page makes ──
   db.exec(`
@@ -813,6 +819,7 @@ function enrichChat(chat) {
       characterName: m.character_name || undefined,
       versions: parseVersions(m.versions),
       currentVersionIndex: m.current_version_index ?? 0,
+      contextInfo: parseContextInfo(m.context_info),
     })),
     memories: memories.map(m => ({
       id: m.id,
@@ -820,8 +827,36 @@ function enrichChat(chat) {
       pinned: !!m.pinned,
       timestamp: m.timestamp,
       coveredUntil: m.covered_until || undefined,
+      coveredFrom: m.covered_from || undefined,
+      source: MEMORY_SOURCES.has(m.source) ? m.source : undefined,
+      editedAt: m.edited_at || undefined,
     })),
   };
+}
+
+/** How a memory was made: by the app after a reply, on request, or written by the player */
+const MEMORY_SOURCES = new Set(['auto', 'manual', 'user']);
+
+/**
+ * What the AI was given for a reply, as stored with the message:
+ * { memoryIds: string[], lore: string[], hiddenLore: number, omitted: number }.
+ * Anything else becomes undefined (or is trimmed to these fields).
+ */
+function parseContextInfo(value) {
+  let v = value;
+  if (typeof v === 'string') {
+    if (!v) return undefined;
+    try { v = JSON.parse(v); } catch { return undefined; }
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const strings = (a, n) => (Array.isArray(a) ? a.filter(x => typeof x === 'string').slice(0, n).map(x => x.slice(0, 200)) : []);
+  const count = (x) => (Number.isFinite(Number(x)) ? Math.max(0, Math.round(Number(x))) : 0);
+  return { memoryIds: strings(v.memoryIds, 200), lore: strings(v.lore, 100), hiddenLore: count(v.hiddenLore), omitted: count(v.omitted) };
+}
+
+/** Number of pinned memories a chat has stored (for the pinned cap) */
+export function countPinnedMemories(chatId) {
+  return db.prepare(`SELECT COUNT(*) AS n FROM memories WHERE chat_id = ? AND pinned = 1`).get(chatId).n;
 }
 
 /**
@@ -858,14 +893,16 @@ export function saveChatTransaction(chat) {
     // Replace all messages for this chat
     if (chat.messages) {
       db.prepare(`DELETE FROM messages WHERE chat_id = ?`).run(chat.id);
-      const insertMsg = db.prepare(`INSERT INTO messages (id, chat_id, role, content, timestamp, character_name, versions, current_version_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insertMsg = db.prepare(`INSERT INTO messages (id, chat_id, role, content, timestamp, character_name, versions, current_version_index, context_info) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const m of chat.messages) {
         const versions = parseVersions(m.versions);
         const index = Number.isInteger(m.currentVersionIndex) ? m.currentVersionIndex : 0;
+        const context = m.role === 'assistant' ? parseContextInfo(m.contextInfo) : undefined;
         insertMsg.run(
           m.id, chat.id, m.role, m.content || '', m.timestamp || Date.now(),
           m.characterName || '', JSON.stringify(versions),
-          Math.min(Math.max(index, 0), Math.max(versions.length - 1, 0))
+          Math.min(Math.max(index, 0), Math.max(versions.length - 1, 0)),
+          context ? JSON.stringify(context) : ''
         );
       }
     }
@@ -873,10 +910,12 @@ export function saveChatTransaction(chat) {
     // Replace all memories for this chat
     if (chat.memories) {
       db.prepare(`DELETE FROM memories WHERE chat_id = ?`).run(chat.id);
-      const insertMem = db.prepare(`INSERT INTO memories (id, chat_id, content, pinned, timestamp, covered_until) VALUES (?, ?, ?, ?, ?, ?)`);
+      const insertMem = db.prepare(`INSERT INTO memories (id, chat_id, content, pinned, timestamp, covered_until, covered_from, source, edited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const time = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
       for (const m of chat.memories) {
         insertMem.run(m.id, chat.id, m.content || '', m.pinned ? 1 : 0, m.timestamp || Date.now(),
-          Number.isFinite(Number(m.coveredUntil)) ? Number(m.coveredUntil) : null);
+          time(m.coveredUntil), time(m.coveredFrom),
+          MEMORY_SOURCES.has(m.source) ? m.source : '', time(m.editedAt));
       }
     }
   });

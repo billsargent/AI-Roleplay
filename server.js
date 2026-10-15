@@ -63,6 +63,7 @@ import {
   getScenarioLabels,
   purgeExpiredScenarioTrash,
   purgeExpiredChatTrash,
+  countPinnedMemories,
 } from './database/index.js';
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
@@ -731,6 +732,15 @@ app.post('/api/chats', auth, mediumBody, (req, res) => {
       chat.createdAt = chat.createdAt || Date.now();
     }
 
+    // Pinned memories ("key facts") are capped; a chat already over the cap can still be saved, just not pin more
+    if (Array.isArray(chat.memories)) {
+      const pinned = chat.memories.filter(m => m && m.pinned).length;
+      const max = readLlmSettings(getSystemSetting).memoryPinnedMax;
+      if (pinned > max && pinned > (existing ? countPinnedMemories(chat.id) : 0)) {
+        return res.status(409).json({ error: `You can pin at most ${max} memories in a chat. Unpin one first.` });
+      }
+    }
+
     saveChatTransaction(chat);
     res.json(chat);
   } catch (err) {
@@ -953,11 +963,12 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const loreScanDepth = getSystemSetting('loreScanDepth');
   const loreActiveMax = getSystemSetting('loreActiveMax');
   const lorePinnedMax = getSystemSetting('lorePinnedMax');
+  const memoryPinnedMax = getSystemSetting('memoryPinnedMax');
   const utilityModel = getSystemSetting('utilityModel');
   const utilityTemperature = getSystemSetting('utilityTemperature');
   const stopOnPlayerLines = getSystemSetting('stopOnPlayerLines') !== 'false';
   const stopSequences = getSystemSetting('stopSequences');
-  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax, utilityModel, utilityTemperature, stopOnPlayerLines, stopSequences });
+  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax, memoryPinnedMax, utilityModel, utilityTemperature, stopOnPlayerLines, stopSequences });
 
 
 
@@ -967,7 +978,7 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
 app.post('/api/system/settings', adminAuth, (req, res) => {
   const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking } = req.body;
   // Engine limits: whole numbers within sensible ranges
-  for (const [key, min, max] of [['contextTokenBudget', 4000, 1000000], ['loreScanDepth', 1, 200], ['loreActiveMax', 0, 50], ['lorePinnedMax', 0, 100]]) {
+  for (const [key, min, max] of [['contextTokenBudget', 4000, 1000000], ['loreScanDepth', 1, 200], ['loreActiveMax', 0, 50], ['lorePinnedMax', 0, 100], ['memoryPinnedMax', 0, 100]]) {
     if (req.body[key] === undefined) continue;
     const n = Math.round(Number(req.body[key]));
     if (Number.isFinite(n) && n >= min && n <= max) setSystemSetting(key, String(n));
@@ -1211,8 +1222,18 @@ app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
   const llm = readLlmSettings(getSystemSetting);
   // Prefix completion continues the text exactly; it needs thinking off
   const prefix = mode === 'continue' && getSystemSetting('deepseekThinking') === 'off';
-  const { messages, maxTokens, stop } = buildChatPrompt({ messages: history, scenario, chat, llm, mode: promptMode, prefix });
+  const { messages, maxTokens, stop, loreIds, memoryIds, omitted } = buildChatPrompt({ messages: history, scenario, chat, llm, mode: promptMode, prefix });
   if (mode === 'continue') res.setHeader('X-Continue-Mode', prefix ? 'prefix' : 'instruct');
+  // What the reply was given, for the player's context view. Lore the
+  // player may not read (hidden pieces, hidden prompts) is only counted.
+  const readable = new Set((scenario.userId === req.userId ? scenario : scenarioForViewer(scenario)).lorePieces.map(p => p.id));
+  const used = loreIds.map(id => scenario.lorePieces.find(p => p.id === id)).filter(Boolean);
+  res.setHeader('X-Reply-Context', encodeURIComponent(JSON.stringify({
+    memoryIds,
+    lore: used.filter(p => readable.has(p.id)).map(p => p.title),
+    hiddenLore: used.filter(p => !readable.has(p.id)).length,
+    omitted,
+  })));
   await runCompletion(req, res, {
     messages, maxTokens,
     temperature: llm.temperature, frequencyPenalty: llm.frequencyPenalty, presencePenalty: llm.presencePenalty,
@@ -1263,7 +1284,9 @@ app.post('/api/chats/:id/memory', auth, async (req, res, next) => {
           content,
           pinned: false,
           timestamp: Date.now(),
+          coveredFrom: Math.min(...source.map(m => Number(m.timestamp) || 0)),
           coveredUntil: Math.max(...source.map(m => Number(m.timestamp) || 0)),
+          source: req.body?.auto ? 'auto' : 'manual',
         },
       });
     } catch (err) {
@@ -1331,26 +1354,15 @@ app.post('/api/deepseek/lore-suggest', auth, llmLimiter, async (req, res, next) 
   }
 });
 
-/** GET /api/system/llm-settings — Returns LLM configuration (any authenticated user) */
+/** GET /api/system/llm-settings — Site name and memory limits the browser needs (any logged-in user; no prompt text) */
 app.get('/api/system/llm-settings', auth, (req, res) => {
-  const globalInstructions = getSystemSetting('globalInstructions');
-  const temperature = getSystemSetting('temperature');
-  const maxTokens = getSystemSetting('maxTokens');
-  const tokenShort = getSystemSetting('tokenShort');
-  const tokenMedium = getSystemSetting('tokenMedium');
-  const tokenLong = getSystemSetting('tokenLong');
-  const frequencyPenalty = getSystemSetting('frequencyPenalty');
-  const presencePenalty = getSystemSetting('presencePenalty');
-  const siteName = getSystemSetting('siteName');
-  const memorySendInterval = getSystemSetting('memorySendInterval');
-  const memoryGenerateInterval = getSystemSetting('memoryGenerateInterval');
-  const memoryWordCount = getSystemSetting('memoryWordCount');
-  const memoryMaxCount = getSystemSetting('memoryMaxCount');
-  const deepseekModel = getSystemSetting('deepseekModel');
-  res.json({ globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel });
-
-
-
+  const llm = readLlmSettings(getSystemSetting);
+  res.json({
+    siteName: getSystemSetting('siteName'),
+    memoryGenerateInterval: llm.memoryGenerateInterval,
+    memoryMaxCount: llm.memoryMaxCount,
+    memoryPinnedMax: llm.memoryPinnedMax,
+  });
 });
 
 // ─── Change Password ──────────────────────────────────────────────────
