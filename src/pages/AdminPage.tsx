@@ -19,11 +19,12 @@ import { useNavigate } from 'react-router-dom';
 import {
   Key, Shield, BookOpen, Thermometer, Save, CheckCircle,
   ExternalLink, AlignLeft, Brain, ChevronLeft, Users,
-  Settings, Cpu, RefreshCw, Loader, Bug, Terminal
+  Settings, Cpu, RefreshCw, Loader, Bug, Terminal, FileJson
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useNotifications } from '../utils/notifications';
 import { UserEditor } from '../components/UserEditor';
+import { FictionlabReimport } from '../components/FictionlabReimport';
 
 /** Fallback instructions template used if nothing is saved */
 const DEFAULT_GLOBAL_INSTRUCTIONS = `Maintain immersive roleplay, focusing on sensory details and character consistency. Always write in the style of literary fiction, balancing dialogue, action, and internal monologue.`;
@@ -423,6 +424,17 @@ export const AdminPage: React.FC = () => {
               {debugSaved ? <CheckCircle size={20} /> : <Save size={20} />}
               {debugSaved ? 'Saved' : 'Save Debug Setting'}
             </button>
+          </section>
+
+          {/* Fictionlab re-import */}
+          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-amber-600/20 text-amber-500 rounded-lg">
+                <FileJson size={20} />
+              </div>
+              <h2 className="text-xl font-bold text-white">Fictionlab Re-import</h2>
+            </div>
+            <FictionlabReimport />
           </section>
         </div>
       )}

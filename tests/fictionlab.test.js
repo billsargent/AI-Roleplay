@@ -178,6 +178,106 @@ test('imported details are stored; hidden characters stay with the author', asyn
   assert.deepEqual(seen.characters.map(c => c.name), ['Mara']);
 });
 
+// ── Re-import in place (#43) ──
+import fs from 'node:fs';
+
+/** Saves a scenario as the old importer left it, plus a chat on it */
+async function oldImport(token, name) {
+  const id = randomUUID();
+  const lore = [
+    { id: randomUUID(), type: 'location', title: 'Docks', content: 'Old text.', weight: 3, pinned: false, smartActivation: false, triggers: [], linkedPieces: ['lp-old'] },
+    { id: randomUUID(), type: 'rule', title: 'Gone Rule', content: 'Old rule.', weight: 3, pinned: false, smartActivation: false, triggers: [], linkedPieces: [] },
+  ];
+  await srv.request('POST', '/api/scenarios', { token, body: {
+    id, name, description: 'old', tags: [], backstory: 'old backstory', customInstructions: 'old rules',
+    characters: [{ id: randomUUID(), name: 'Mara', description: 'old', personality: '' }], lorePieces: lore,
+    settings: { isPublic: false, hidePrompts: true },
+  } });
+  const chatId = randomUUID();
+  await srv.request('POST', '/api/chats', { token, body: { id: chatId, scenarioId: id, title: 't', createdAt: Date.now(), settings: {}, userCharacter: { name: 'Rin' }, memories: [],
+    messages: [{ id: randomUUID(), role: 'assistant', content: 'Hello', timestamp: Date.now() }] } });
+  return { id, chatId };
+}
+
+/** A fresh export of that scenario: triggers, links, descriptions (no images, so no downloads) */
+const freshFile = (name) => topLevel({
+  id: `fl-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, displayName: name, mainImage: '', customIntroduction: '<p>New intro</p>',
+  lorePieces: [
+    piece({ id: 'lp-1', title: 'Docks', content: 'New text.', triggers: ['docks'], description: 'Where boats land.', linkedPieces: ['lp-2'] }),
+    piece({ id: 'lp-2', title: 'Lighthouse', content: 'Dark.', triggers: ['lighthouse'], weight: 5 }),
+  ],
+  characters: [{ displayName: 'Mara', description: 'Ferry keeper.' }],
+});
+
+test('re-importing a file updates the scenario in place and keeps its chats', async () => {
+  const { id, chatId } = await oldImport(owner.token, 'Harbour Tale');
+  const preview = await srv.request('POST', `/api/scenarios/${id}/reimport`, { token: owner.token, body: { file: freshFile('Harbour Tale') } });
+  assert.equal(preview.status, 200, preview.text);
+  const s = preview.json.summary;
+  assert.deepEqual([s.lore.before, s.lore.after, s.lore.neverSentBefore, s.lore.neverSentAfter, s.lore.workingLinksBefore, s.lore.workingLinksAfter], [2, 2, 2, 0, 0, 1]);
+  assert.deepEqual(s.lore.added, ['Lighthouse']);
+  assert.deepEqual(s.lore.removed, ['Gone Rule']);
+  assert.equal((await srv.request('GET', `/api/scenarios/${id}`, { token: owner.token })).json.backstory, 'old backstory', 'preview changes nothing');
+
+  const other = await srv.register();
+  assert.equal((await srv.request('POST', `/api/scenarios/${id}/reimport`, { token: other.token, body: { file: freshFile('Harbour Tale'), apply: true } })).status, 403);
+
+  const applied = await srv.request('POST', `/api/scenarios/${id}/reimport`, { token: owner.token, body: { file: freshFile('Harbour Tale'), apply: true } });
+  assert.equal(applied.status, 200, applied.text);
+  const after = (await srv.request('GET', `/api/scenarios/${id}`, { token: owner.token })).json;
+  assert.equal(after.name, 'Harbour Tale');
+  assert.equal(after.backstory, '{{user}} arrives.');
+  assert.equal(after.settings.hidePrompts, true, 'settings are kept');
+  assert.equal(after.sourceId, 'fl-harbour-tale');
+  const docks = after.lorePieces.find(p => p.title === 'Docks');
+  const lighthouse = after.lorePieces.find(p => p.title === 'Lighthouse');
+  assert.deepEqual(docks.linkedPieces, [lighthouse.id], 'links work');
+  assert.equal(docks.description, 'Where boats land.');
+  assert.equal(lighthouse.weight, 100);
+  const chat = await srv.request('GET', `/api/chats/${chatId}`, { token: owner.token });
+  assert.equal(chat.status, 200);
+  assert.equal(chat.json.scenarioId, id, 'the chat still belongs to the scenario');
+});
+
+test('bulk re-import: dry run matches files, apply backs up first', async () => {
+  const a = await oldImport(owner.token, 'Bulk One');
+  await oldImport(owner.token, 'Twin');
+  await oldImport(owner.token, 'Twin');
+  const files = [
+    { name: 'one.json', file: freshFile('bulk one') },
+    { name: 'twin.json', file: freshFile('Twin') },
+    { name: 'none.json', file: freshFile('Nobody Has This') },
+    { name: 'chat.json', file: { app: 'x', scenario: { id: 'a', name: 'n' }, messages: [] } },
+  ];
+  const other = await srv.register();
+  assert.equal((await srv.request('POST', '/api/admin/fictionlab/match', { token: other.token, body: { files } })).status, 403);
+  const dry = await srv.request('POST', '/api/admin/fictionlab/match', { token: owner.token, body: { files } });
+  assert.equal(dry.status, 200, dry.text);
+  assert.deepEqual(dry.json.rows.map(r => r.status), ['name', 'ambiguous', 'none', 'not a scenario']);
+  assert.equal(dry.json.rows[0].candidates[0].id, a.id);
+  assert.equal(dry.json.rows[1].candidates.length, 2);
+  assert.equal(dry.json.rows[0].summary.lore.neverSentAfter, 0);
+
+  const run = await srv.request('POST', '/api/admin/fictionlab/apply', { token: owner.token, body: { backup: true, items: [{ scenarioId: a.id, file: freshFile('bulk one') }, { scenarioId: 'nope', file: freshFile('x') }] } });
+  assert.equal(run.status, 200, run.text);
+  assert.ok(run.json.backup && fs.existsSync(`${srv.dir}/${run.json.backup}`), 'backup written next to the database');
+  assert.deepEqual(run.json.results.map(r => r.ok), [true, false]);
+  assert.equal((await srv.request('GET', `/api/scenarios/${a.id}`, { token: owner.token })).json.sourceId, 'fl-bulk-one');
+  // Now the Fictionlab id matches first, even after a rename on Fictionlab
+  const again = await srv.request('POST', '/api/admin/fictionlab/match', { token: owner.token, body: { files: [{ name: 'renamed.json', file: { ...freshFile('Renamed On Fictionlab'), id: 'fl-bulk-one' } }] } });
+  assert.deepEqual([again.json.rows[0].status, again.json.rows[0].candidates[0].id], ['source', a.id]);
+});
+
+test('pieces that share an id in the file still get their own ids', () => {
+  const { draft } = parseFictionlab(topLevel({
+    lorePieces: [piece({ id: 'dup', title: 'A' }), piece({ id: 'dup', title: 'B' }), piece({ id: 'x', title: 'C', linkedPieces: ['dup'] })],
+    storyCards: [{ id: 'dup', cardName: 'D', cardContent: 'd', cardTriggers: ['d'] }],
+  }), { newId });
+  const ids = draft.lorePieces.map(p => p.id);
+  assert.equal(new Set(ids).size, 4);
+  assert.deepEqual(draft.lorePieces[2].linkedPieces, [ids[0]], 'the link follows the first piece with that id');
+});
+
 test('images are listed for download', () => {
   const { imageUrls } = parseFictionlab(topLevel({ lorePieces: [piece({ avatarURL: 'lore/x.webp' })] }), { newId });
   assert.equal(imageUrls.cover, 'scenarios/cover.webp');

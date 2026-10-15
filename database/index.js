@@ -884,6 +884,21 @@ function parseContextInfo(value) {
   return { memoryIds: strings(v.memoryIds, 200), lore: strings(v.lore, 100), hiddenLore: count(v.hiddenLore), omitted: count(v.omitted) };
 }
 
+/** Live scenarios with the fields used to match re-imported files */
+export function listScenarioMatchKeys() {
+  return db.prepare(`SELECT id, name, source_id AS sourceId, user_id AS userId FROM scenarios WHERE deleted_at IS NULL`).all();
+}
+
+/**
+ * Writes a consistent copy of the database next to it
+ * ("<database file>.backup-<timestamp>") and returns its file name.
+ */
+export async function backupDatabase() {
+  const file = `${db.name}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  await db.backup(file);
+  return file;
+}
+
 /** Number of pinned memories a chat has stored (for the pinned cap) */
 export function countPinnedMemories(chatId) {
   return db.prepare(`SELECT COUNT(*) AS n FROM memories WHERE chat_id = ? AND pinned = 1`).get(chatId).n;

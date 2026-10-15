@@ -64,7 +64,10 @@ import {
   purgeExpiredScenarioTrash,
   purgeExpiredChatTrash,
   countPinnedMemories,
+  listScenarioMatchKeys,
+  backupDatabase,
 } from './database/index.js';
+import { matchScenario, summarizeReimport, mergeReimport } from './lib/fictionlabReimport.js';
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
@@ -220,6 +223,8 @@ const mediumBody = express.json({ limit: MEDIUM_JSON_BODY_SIZE });
 const ROUTE_PARSED_BODIES = new Set([
   'POST /api/scenarios',
   'POST /api/import/fictionlab',
+  'POST /api/admin/fictionlab/match',
+  'POST /api/admin/fictionlab/apply',
   'POST /api/chats',
   'POST /api/personas',
 ]);
@@ -228,6 +233,7 @@ app.use((req, res, next) => {
   // Express 5 leaves req.body undefined without a JSON body; routes destructure it
   if (req.body === undefined) req.body = {};
   if (ROUTE_PARSED_BODIES.has(`${req.method} ${req.path}`)) return next();
+  if (req.method === 'POST' && /^\/api\/scenarios\/[^/]+\/reimport$/.test(req.path)) return next();
   defaultBody(req, res, next);
 });
 
@@ -622,6 +628,101 @@ app.post('/api/import/fictionlab', auth, mediumBody, (req, res) => {
     });
   }
   res.json(result);
+});
+
+/** Downloads a remote image (SSRF-safe) as a data URL, for re-imports */
+async function fetchDataUrl(url) {
+  const { contentType, buffer } = await fetchImage(url);
+  return `data:${contentType};base64,${buffer.toString('base64')}`;
+}
+
+/** Re-imports one parsed file into one scenario; returns the change summary */
+async function reimportScenario(existing, parsed) {
+  const summary = summarizeReimport(existing, parsed.draft);
+  const merged = await mergeReimport(existing, parsed, { fetchDataUrl });
+  saveScenarioTransaction(merged);
+  return summary;
+}
+
+/**
+ * POST /api/scenarios/:id/reimport — Updates a scenario from a Fictionlab
+ * export, keeping its id (and its chats), name, settings and pictures.
+ * Body: { file, apply?: boolean }. Without apply, only the summary of what
+ * would change is returned.
+ */
+app.post('/api/scenarios/:id/reimport', auth, largeBody, async (req, res, next) => {
+  try {
+    const existing = getScenarioById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Scenario not found' });
+    const user = getUserById(req.userId);
+    if (existing.userId !== req.userId && user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Only the creator can update this scenario' });
+    }
+    const parsed = parseFictionlab(req.body?.file);
+    if (!parsed) return res.status(400).json({ error: 'This file does not look like a Fictionlab scenario export.' });
+    if (!req.body?.apply) return res.json({ summary: summarizeReimport(existing, parsed.draft), fileName: parsed.draft.name });
+    const summary = await reimportScenario(existing, parsed);
+    res.json({ summary, applied: true });
+  } catch (err) {
+    if (err instanceof DataError) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+/**
+ * POST /api/admin/fictionlab/match — Dry run of a bulk re-import.
+ * Body: { files: [{ name, file }] }. Returns one row per file: which
+ * scenario it matches (by Fictionlab id, else by name) and what would change.
+ */
+app.post('/api/admin/fictionlab/match', adminAuth, largeBody, (req, res) => {
+  const files = Array.isArray(req.body?.files) ? req.body.files : [];
+  if (files.length === 0 || files.length > 500) return res.status(400).json({ error: 'Send between 1 and 500 files' });
+  const scenarios = listScenarioMatchKeys();
+  const rows = files.map(({ name, file }) => {
+    const fileName = typeof name === 'string' ? name.slice(0, 200) : '';
+    const parsed = parseFictionlab(file);
+    if (!parsed) return { fileName, status: 'not a scenario' };
+    const { match, scenarioIds } = matchScenario(parsed.draft, scenarios);
+    const row = { fileName, title: parsed.draft.name, status: match, candidates: scenarioIds.map(id => ({ id, name: scenarios.find(s => s.id === id)?.name })) };
+    if (scenarioIds.length === 1) {
+      const existing = getScenarioById(scenarioIds[0]);
+      if (existing) row.summary = summarizeReimport(existing, parsed.draft);
+    }
+    return row;
+  });
+  res.json({ rows });
+});
+
+/**
+ * POST /api/admin/fictionlab/apply — Re-imports files into the scenarios
+ * the admin picked. Body: { items: [{ scenarioId, file }], backup?: boolean }.
+ * Send backup: true with the first batch: the database is copied first.
+ * Returns { backup?, results: [{ scenarioId, ok, error?, summary? }] }.
+ */
+app.post('/api/admin/fictionlab/apply', adminAuth, largeBody, async (req, res, next) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (items.length === 0 || items.length > 50) return res.status(400).json({ error: 'Send between 1 and 50 items per request' });
+  try {
+    const backup = req.body?.backup ? path.basename(await backupDatabase()) : undefined;
+    const results = [];
+    for (const { scenarioId, file } of items) {
+      const existing = typeof scenarioId === 'string' ? getScenarioById(scenarioId) : null;
+      const parsed = parseFictionlab(file);
+      if (!existing || !parsed) {
+        results.push({ scenarioId, ok: false, error: !existing ? 'Scenario not found' : 'Not a scenario file' });
+        continue;
+      }
+      try {
+        results.push({ scenarioId, ok: true, summary: await reimportScenario(existing, parsed) });
+      } catch (err) {
+        results.push({ scenarioId, ok: false, error: err instanceof DataError ? err.message : 'Could not save' });
+        if (!(err instanceof DataError)) console.error('Re-import failed:', err?.message || err);
+      }
+    }
+    res.json({ backup, results });
+  } catch (err) {
+    next(err);
+  }
 });
 
 /**

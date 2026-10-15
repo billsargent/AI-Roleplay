@@ -197,6 +197,7 @@ AI-Roleplay/
 │   ├── deepseek.js           # Server-side AI request validation and streaming relay
 │   ├── prompt.js             # Prompt builder: history budget, lore selection, memories
 │   ├── fictionlab.js         # Fictionlab export parser (all export shapes)
+│   ├── fictionlabReimport.js # Match export files to scenarios; merge in place
 │   ├── imageType.js          # Detects image type from file bytes
 │   ├── safeImageFetch.js     # SSRF-safe remote image download (import flow)
 │   └── sanitizeHtml.js       # Server-side rich text sanitizing
@@ -273,6 +274,7 @@ AI-Roleplay/
 | GET | `/api/scenarios/:id` | Auth | Get scenario with characters + lore |
 | POST | `/api/scenarios` | Auth | Create/update scenario |
 | POST | `/api/import/fictionlab` | Auth | Turn a Fictionlab export into a scenario draft (nothing saved) |
+| POST | `/api/scenarios/:id/reimport` | Owner | Update a scenario from its Fictionlab file in place (`apply: false` = preview) |
 | DELETE | `/api/scenarios/:id` | Auth | Delete own scenario (or admin) |
 
 ### Chats
@@ -307,6 +309,8 @@ AI-Roleplay/
 | POST | `/api/admin/users` | Admin | Create user |
 | PUT | `/api/admin/users/:id` | Admin | Update user |
 | DELETE | `/api/admin/users/:id` | Admin | Delete user |
+| POST | `/api/admin/fictionlab/match` | Admin | Bulk re-import dry run: match files to scenarios |
+| POST | `/api/admin/fictionlab/apply` | Admin | Bulk re-import selected files (backs up the database first) |
 
 ### AI Generation
 | Method | Path | Access | Description |

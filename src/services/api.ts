@@ -14,6 +14,25 @@
 import axios from 'axios';
 import { Scenario } from '../types';
 
+/** What a re-import changes (see lib/fictionlabReimport.js summarizeReimport) */
+export interface ReimportSummary {
+  fields: string[];
+  lore: {
+    before: number; after: number; added: string[]; removed: string[];
+    neverSentBefore: number; neverSentAfter: number; workingLinksBefore: number; workingLinksAfter: number;
+  };
+  characters: { before: number; after: number };
+}
+
+/** One file in the admin's bulk re-import dry run */
+export interface ReimportRow {
+  fileName: string;
+  title?: string;
+  status: 'source' | 'name' | 'ambiguous' | 'none' | 'not a scenario';
+  candidates?: Array<{ id: string; name: string }>;
+  summary?: ReimportSummary;
+}
+
 /** What the server makes of a Fictionlab export (see lib/fictionlab.js) */
 export interface FictionlabImport {
   draft: Omit<Scenario, 'id' | 'createdAt' | 'image'> & { sourceId?: string };
@@ -311,6 +330,32 @@ export const apiService = {
     } catch (e: any) {
       throw new Error(e?.response?.data?.error || 'Could not read this file');
     }
+  },
+
+  /**
+   * Updates an existing scenario from a Fictionlab export, keeping its id,
+   * chats, name, settings and pictures. Without apply, returns only what
+   * would change.
+   */
+  reimportScenario: async (scenarioId: string, file: unknown, apply: boolean): Promise<{ summary: ReimportSummary }> => {
+    try {
+      const response = await api.post(`/scenarios/${scenarioId}/reimport`, { file, apply });
+      return response.data;
+    } catch (e: any) {
+      throw new Error(e?.response?.data?.error || 'Could not update from this file');
+    }
+  },
+
+  /** Admin: matches export files to scenarios (dry run) */
+  matchFictionlabFiles: async (files: Array<{ name: string; file: unknown }>): Promise<{ rows: ReimportRow[] }> => {
+    const response = await api.post('/admin/fictionlab/match', { files });
+    return response.data;
+  },
+
+  /** Admin: re-imports files into the chosen scenarios (send backup: true with the first batch) */
+  applyFictionlabFiles: async (items: Array<{ scenarioId: string; file: unknown }>, backup: boolean): Promise<{ backup?: string; results: Array<{ scenarioId: string; ok: boolean; error?: string; summary?: ReimportSummary }> }> => {
+    const response = await api.post('/admin/fictionlab/apply', { items, backup });
+    return response.data;
   },
 
   /**

@@ -15,7 +15,7 @@ import {
   X, Image as ImageIcon, Info, BookOpen, Brain, 
   Settings as SettingsIcon, Save, Plus, Trash2, 
   UserPlus, ChevronLeft, Globe, Lock, Upload,
-  FileJson, Sparkles, FileText
+  FileJson, Sparkles, FileText, RefreshCw
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { AiGeneratedScenarioData, LoreSuggestDraft, LoreSuggestion } from '../services/deepseek';
@@ -122,6 +122,50 @@ export const CreateScenario: React.FC = () => {
     navigate('/');
   };
   const importInputRef = React.useRef<HTMLInputElement>(null);
+  const reimportInputRef = React.useRef<HTMLInputElement>(null);
+  /** Editing a saved scenario of one's own (not a new one or a copy): it can be updated from its export file */
+  const isSavedScenario = !!initialScenario && (initialScenario.userId === user?.id || user?.role === 'admin');
+
+  /**
+   * Updates this saved scenario from a Fictionlab export: shows what would
+   * change, then re-imports on the server (id, chats, name, settings and
+   * pictures are kept) and reloads the editor.
+   */
+  const handleReimport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    let json: unknown;
+    try {
+      json = JSON.parse(await file.text());
+    } catch {
+      showToast('This file is not valid JSON', 'error');
+      return;
+    }
+    try {
+      const { summary } = await apiService.reimportScenario(scenario.id, json, false);
+      const lines = [
+        `Lore: ${summary.lore.before} → ${summary.lore.after} cards${summary.lore.added.length ? ` (${summary.lore.added.length} new)` : ''}${summary.lore.removed.length ? `, ${summary.lore.removed.length} not in the file` : ''}`,
+        `Never sent to the AI: ${summary.lore.neverSentBefore} → ${summary.lore.neverSentAfter}`,
+        `Working lore links: ${summary.lore.workingLinksBefore} → ${summary.lore.workingLinksAfter}`,
+        `Characters: ${summary.characters.before} → ${summary.characters.after}`,
+        summary.fields.length ? `Also replaced: ${summary.fields.join(', ')}` : '',
+      ].filter(Boolean);
+      const warning = dirty ? '\n\nYour unsaved changes in the editor will be lost.' : '';
+      if (!(await showConfirm(`Update "${scenario.name}" from this file?\n\n${lines.join('\n')}\n\nThe name, settings, pictures and chats are kept.${warning}`))) return;
+      showToast('Updating from the file…', 'info');
+      await apiService.reimportScenario(scenario.id, json, true);
+      const fresh = await apiService.getScenario(scenario.id);
+      if (fresh) {
+        setScenario(fresh);
+        setRteKey(prev => prev + 1);
+        setDirty(false);
+      }
+      showToast('Scenario updated from the file', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Could not update from this file', 'error');
+    }
+  };
 
   /**
    * Handles clicking the AI Generate button.
@@ -507,6 +551,18 @@ export const CreateScenario: React.FC = () => {
           >
             <FileJson size={16} /> Import
           </button>
+          {isSavedScenario && (
+            <>
+              <input type="file" accept=".json" ref={reimportInputRef} className="hidden" onChange={handleReimport} />
+              <button
+                onClick={() => reimportInputRef.current?.click()}
+                className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all"
+                title="Update this scenario from its Fictionlab export file (chats are kept)"
+              >
+                <RefreshCw size={16} /> Update from file
+              </button>
+            </>
+          )}
         </div>
       </div>
 
