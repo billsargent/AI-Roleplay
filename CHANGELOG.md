@@ -1,5 +1,42 @@
 # Changelog
 
+## [Unreleased]
+
+Security, data-loss and robustness fixes from a code audit (GitHub issues #1–#10).
+
+### Security
+- **Image paths** — Image reads, writes and deletes only accept the `{type}/{prefix}/{id}.{ext}` layout inside the uploads folder. Previously a crafted path could read files such as the database, and a crafted avatar path could delete arbitrary files. Image URLs pointing at another entity's file are copied, never shared.
+- **Image proxy** — `/api/proxy-image` requires login and only fetches public http(s) addresses (checked at connect time and on every redirect), with a timeout, a 10 MB cap and the type detected from the bytes.
+- **Ownership** — Users can no longer overwrite another user's persona, or take over another scenario's characters or lore by reusing their ids.
+- **XSS** — Scenario introductions are sanitized on save (sanitize-html) and before display (DOMPurify). The CSP no longer allows inline or eval script.
+- **Request size** — The 250 MB body limit only applies to scenario saves after login; everything else is 1 MB (chats, personas and AI requests 10 MB).
+- **AI proxy** — The server picks the model, caps reply length and clamps sampling values; per-user AI rate limit; DeepSeek errors return 502 instead of looking like an expired session.
+- **Accounts** — Tokens stop working when a user is deleted or changes password; the first-admin assignment is atomic; admin user edits are validated and the last admin cannot be demoted; login timing no longer reveals which usernames exist.
+- **Dependencies** — `npm audit` from 40 known vulnerabilities to 0 (patch updates, Tiptap 3.31.4, Vite 7.3.6).
+- The DeepSeek key is only returned masked; the raw-key endpoint was removed.
+
+### Fixed
+- Editing a scenario no longer deletes its character avatars.
+- Trash auto-purge after 30 days now actually runs (it was documented in v1.0.4 but never scheduled). Configurable with `TRASH_RETENTION_DAYS`.
+- Replaced images now show up: images use ETag revalidation instead of a one-year immutable cache (v1.0.8 said images get new paths on update; they do not).
+- Base64 copies are no longer written into the database on every save; `migrate-images.js --dry-run` no longer writes files, and a live run backs up the database first.
+- Orphan image files are removed when users, scenarios or introduction images are deleted.
+- Chat: Stop and Retry; partial replies are kept; memory generation no longer blocks or gets overwritten; Enter while the AI replies keeps your text; switching chats quickly no longer shows the wrong chat; custom instructions save once instead of on every keystroke.
+- Home search and tabs now cover all scenarios, not only the current page; the chat list no longer labels chats of later scenarios as deleted.
+- Message `versions` were JSON-encoded again on every save; existing rows are repaired when read.
+- Restarting the server no longer signs everyone out (the JWT secret is kept in the database when `JWT_SECRET` is not set).
+- `.env` files are now loaded (they were documented but ignored).
+- The admin "API Rate Limit" field now takes effect.
+- Imported introductions keep their centred/right alignment.
+
+### Added
+- Admin switch to close new sign-ups.
+- Database indexes; `npm test` with unit and end-to-end tests.
+- Settings: `TRUST_PROXY`, `TRASH_RETENTION_DAYS`, `MEDIUM_JSON_BODY_SIZE`, `MAX_IMAGE_BYTES`, `LLM_RATE_LIMIT`, `LLM_RATE_WINDOW_MIN`, `DB_PATH`, `UPLOADS_DIR`.
+
+### Changed
+- Requires Node.js 20 or later. `package-lock.json` is committed.
+
 ## [v1.0.9] - 2026-07-27
 
 ### Fixed

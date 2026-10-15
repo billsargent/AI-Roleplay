@@ -18,45 +18,47 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 ### 🤖 AI Chat & Roleplay
 - **Real-Time Streaming** — AI responses stream character-by-character via Server-Sent Events (SSE) for instant feedback
 - **Context-Aware Responses** — The AI has full knowledge of the world setting, characters, lore pieces, and conversation history
-- **Smart Lore Activation** — Lore pieces with keyword triggers automatically include themselves when mentioned in conversation
+- **Smart Lore Activation** — Lore pieces with keyword triggers are included when a trigger word appears in the conversation (up to 3 at a time)
 - **Memory System** — The AI generates concise memory cards at configurable intervals to retain long-term context
 - **Response Length Control** — Choose short, medium, or long AI responses
-- **Message Editing & Versioning** — Edit your messages and the AI will regenerate its response; previous versions are preserved
+- **Stop & Retry** — Stop a reply while it is being written (the text so far is kept), and retry a reply that failed
+- **Message Editing** — Edit, delete, or rewind messages (regenerating and switching between alternative replies is planned)
 
 ### 🧩 Characters & Personas
 - **Multi-Character Casts** — Scenarios can have any number of NPCs with names, descriptions, and personality profiles
 - **User Personas** — Create multiple character profiles (personas) to use across different scenarios
-- **Character Avatars** — Upload images for both NPCs and user personas (supports base64 from camera or file picker)
-- **Force Character Mode** — Lock the AI into roleplaying as a specific character
+- **Character Avatars** — Upload images for both NPCs and user personas (camera or file picker); images are stored as files under `uploads/`
 
 ### 🧠 Lore System
 - **Lore Pieces** — Define locations, events, objects, and other world-building elements
-- **Pinned Lore** — Always included in the AI context for essential world knowledge
-- **Smart Activation** — Lore pieces auto-activate when trigger keywords appear in recent conversation
-- **Linked Pieces** — Connect related lore together
-- **Weight-Based Priority** — Control which lore the AI prioritizes
+- **Pinned Lore** — Always included in the AI context for essential world knowledge (up to 10)
+- **Smart Activation** — Lore pieces auto-activate when trigger keywords appear in the conversation
+- Linked pieces and weight-based priority are stored by the editor but not used by the AI yet (planned)
 
 ### 👤 User System
-- **JWT Authentication** — Secure token-based auth with 7-day session expiry
-- **Registration & Login** — First user auto-gains admin role
-- **Password Management** — Change your password with current verification
-- **Trash / Recycle Bin** — Deleted chats and scenarios go to trash instead of being permanently removed. Restore them or permanently delete from the Trash page in Settings. Items auto-purge after 30 days.
+- **JWT Authentication** — Secure token-based auth with 7-day session expiry; sessions survive server restarts
+- **Registration & Login** — First user auto-gains admin role; admins can close new sign-ups
+- **Password Management** — Change your password with current verification; this signs out your other sessions
+- **Trash / Recycle Bin** — Deleted chats and scenarios go to trash instead of being permanently removed. Restore them or permanently delete from the Trash page in Settings. Items are permanently deleted after 30 days (`TRASH_RETENTION_DAYS`, `0` keeps them forever).
 - **Chat Appearance Customization** — Set your own dialog highlight color, narration text color, and chat bubble background color
 
 ### 🛠️ Admin Panel
-- **DeepSeek API Key Configuration** — Securely set and manage the AI provider key (never exposed to clients)
+- **DeepSeek API Key Configuration** — Set or replace the AI provider key; the stored key is never sent back to the browser (only a masked form)
 - **LLM Parameters** — Configure temperature, max tokens, frequency/presence penalties
 - **Response Token Limits** — Set short/medium/long response token caps
 - **Memory Management** — Configure memory send interval, generation interval, word count, and max retention
 - **Site Branding** — Custom site name displayed throughout the app
-- **User Management** — View, create, edit, and delete users with role assignment
+- **Rate Limit & Sign-ups** — Set the general API rate limit and turn new registrations on or off
+- **User Management** — View, create, edit, and delete users with role assignment (the last admin cannot be demoted)
 
 ### 🔒 Security
 - **Server-Side API Key** — DeepSeek API key is stored server-side, proxied through backend endpoints, never sent to the browser
-- **Helmet CSP** — Content Security Policy prevents XSS and data injection attacks
-- **Rate Limiting** — General API (200/15min) and auth-specific (20/15min) rate limiting
+- **AI Request Validation** — The server picks the model, caps reply length and clamps sampling settings; each user has their own AI request limit
+- **Helmet CSP** — Content Security Policy without inline or eval script; scenario introductions are sanitized on save and on display
+- **Rate Limiting** — General API (1000/15min, admin-configurable), failed logins (20/15min), AI requests (120/15min per user)
+- **Upload Safety** — Image paths are validated, image types are checked from the file bytes (no SVG), large request bodies are only accepted after login
 - **SQL Injection Protection** — All queries use parameterized statements (better-sqlite3)
-- **Input Validation** — Password length enforcement, user settings key allowlist
+- **Input Validation** — Username and password rules, user settings key allowlist
 - **UUIDv4 Generation** — Cryptographically random user IDs
 - **CORS Configuration** — Restrictable to specific origins in production
 - **bcrypt Password Hashing** — 10 salt rounds for all stored passwords
@@ -80,7 +82,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 
 ## 📋 Prerequisites
 
-- **Node.js** v18 or later
+- **Node.js** v20 or later
 - **npm** (comes with Node.js)
 - A **DeepSeek API key** ([get one here](https://platform.deepseek.com/)) — required for AI chat and scenario generation
 
@@ -116,8 +118,17 @@ You can also set these via `.env` file in the project root:
 
 ```env
 PORT=3000                          # Server port (default: 3000)
-JWT_SECRET=your-secret-here        # JWT signing secret (auto-generated if omitted)
+JWT_SECRET=your-secret-here        # JWT signing secret (generated once and stored in the database if omitted)
 CORS_ORIGIN=https://yourdomain.com # Restrict CORS in production
+TRUST_PROXY=1                      # Set when running behind a reverse proxy (number of proxies, or "loopback")
+TRASH_RETENTION_DAYS=30            # Days before trashed items are permanently deleted (0 = never)
+MAX_JSON_BODY_SIZE=250mb           # Largest scenario save/import (only accepted after login)
+MEDIUM_JSON_BODY_SIZE=10mb         # Largest chat, persona or AI request
+MAX_IMAGE_BYTES=15728640           # Largest single uploaded image, in bytes
+LLM_RATE_LIMIT=120                 # AI requests per user per window (admins exempt)
+LLM_RATE_WINDOW_MIN=15             # Length of that window in minutes
+DB_PATH=./database.sqlite          # Database file location
+UPLOADS_DIR=./uploads              # Uploaded images folder
 ```
 
 ---
@@ -148,6 +159,20 @@ For testing on mobile devices or network:
 npm run dev:host
 ```
 
+### Tests
+```bash
+npm test
+```
+Runs the unit and end-to-end tests with Node's built-in test runner. End-to-end tests start the server on a throwaway database and uploads folder, and use a fake DeepSeek server, so they never touch real data or call the real API.
+
+### Migrating old base64 images
+Databases from before v1.0.8 may still hold images as base64 text. Preview, then run:
+```bash
+node scripts/migrate-images.js --dry-run
+node scripts/migrate-images.js
+```
+A live run writes a backup copy of the database first.
+
 ---
 
 ## 📁 Project Structure
@@ -155,12 +180,23 @@ npm run dev:host
 ```
 AI-Roleplay/
 ├── database/
-│   └── index.js              # SQLite schema, CRUD operations, seed data
+│   ├── index.js              # SQLite schema, migrations, CRUD operations, seed data
+│   └── images.js             # Image file storage (validated paths, save/copy/delete/read)
+├── lib/
+│   ├── deepseek.js           # Server-side AI request validation and streaming relay
+│   ├── imageType.js          # Detects image type from file bytes
+│   ├── safeImageFetch.js     # SSRF-safe remote image download (import flow)
+│   └── sanitizeHtml.js       # Server-side rich text sanitizing
+├── scripts/
+│   └── migrate-images.js     # One-time base64 → file migration
+├── tests/                    # node:test unit and end-to-end tests
+├── uploads/                  # Uploaded images (created at startup, not in git)
 ├── src/
 │   ├── components/
 │   │   ├── AIGeneratorModal.tsx  # AI scenario generation dialog
 │   │   ├── Navbar.tsx            # Responsive bottom/top navigation
 │   │   ├── PersonaManager.tsx    # User persona CRUD
+│   │   ├── RichtextEditor.tsx    # Tiptap editor for scenario introductions
 │   │   └── UserEditor.tsx        # Admin user management UI
 │   ├── pages/
 │   │   ├── AdminPage.tsx         # Admin panel (System, LLM Config, Users)
@@ -168,7 +204,8 @@ AI-Roleplay/
 │   │   ├── ChatPage.tsx          # Active chat session with streaming AI
 │   │   ├── ChatsList.tsx         # Chat history list
 │   │   ├── CreateScenario.tsx    # Scenario editor
-│   │   ├── Home.tsx              # Scenario discovery / landing page
+│   │   ├── Home.tsx              # Scenario discovery
+│   │   ├── LandingPage.tsx       # Public landing page
 │   │   ├── ScenarioDetail.tsx    # Scenario detail view
 │   │   ├── SettingsPage.tsx      # User settings & personas
 │   │   └── TrashPage.tsx         # Trash / recycle bin (restore, permanent delete)
@@ -179,8 +216,9 @@ AI-Roleplay/
 │   │   └── index.ts             # TypeScript interfaces
 │   ├── utils/
 │   │   ├── cn.ts                # Tailwind classname utility
-│   │   ├── image.ts             # Image handling (camera/file, resize)
-│   │   └── notifications.tsx    # Toast & confirm dialog system
+│   │   ├── image.ts             # Image handling (camera/file, resize, import download)
+│   │   ├── notifications.tsx    # Toast & confirm dialog system
+│   │   └── sanitize.ts          # Browser-side rich text sanitizing
 │   ├── App.tsx                  # Root component, routing, auth guard
 │   ├── index.css                # Tailwind entry point + global styles
 │   └── main.tsx                 # React entry point
@@ -212,7 +250,7 @@ AI-Roleplay/
 ### Scenarios
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
-| GET | `/api/scenarios` | Auth | List accessible scenarios |
+| GET | `/api/scenarios` | Auth | List accessible scenarios (`?page`, `?limit`, `?tab=explore\|mine-public\|mine-private`, `?q=` search) |
 | GET | `/api/scenarios/:id` | Auth | Get scenario with characters + lore |
 | POST | `/api/scenarios` | Auth | Create/update scenario |
 | DELETE | `/api/scenarios/:id` | Auth | Delete own scenario (or admin) |
@@ -220,7 +258,7 @@ AI-Roleplay/
 ### Chats
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
-| GET | `/api/chats` | Auth | List chats (own or all for admin) |
+| GET | `/api/chats` | Auth | List chats (own or all for admin), each with its scenario's name and cover |
 | GET | `/api/chats/:id` | Auth | Get chat with messages + memories |
 | POST | `/api/chats` | Auth | Create/update chat |
 | DELETE | `/api/chats/:id` | Auth | Delete own chat (or admin) |
@@ -229,10 +267,10 @@ AI-Roleplay/
 ### System (Admin)
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
-| GET | `/api/system/settings` | Admin | Get all system settings |
+| GET | `/api/system/settings` | Admin | Get all system settings (API key masked) |
 | POST | `/api/system/settings` | Admin | Update system settings |
-| GET | `/api/system/deepseek-key` | Admin | Get API key (masked in response) |
 | GET | `/api/system/llm-settings` | Auth | Get LLM configuration |
+| GET | `/api/deepseek/models` | Admin | List models available to the configured key |
 
 ### User Settings
 | Method | Path | Access | Description |
@@ -254,6 +292,12 @@ AI-Roleplay/
 | POST | `/api/deepseek/chat` | Auth | Non-streaming AI chat |
 | POST | `/api/deepseek/chat/stream` | Auth | SSE streaming AI chat |
 | POST | `/api/deepseek/generate` | Auth | AI scenario generation |
+
+### Images
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| GET | `/api/images/{type}/{prefix}/{id}.{ext}` | Public | Serve an uploaded image (ETag revalidation) |
+| GET | `/api/proxy-image?url=` | Auth | Download a public image for the import flow (SSRF-protected) |
 
 ### User Account
 | Method | Path | Access | Description |
