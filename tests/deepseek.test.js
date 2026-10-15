@@ -292,3 +292,57 @@ test('admin thinking setting and token cap reach DeepSeek', async () => {
   assert.equal(s.json.deepseekThinking, 'low');
   await srv.request('POST', '/api/system/settings', { token: admin.token, body: { deepseekThinking: '', maxTokens: 8192 } });
 });
+
+test('hide prompts: other users do not see hidden text, the AI still gets it', async () => {
+  const owner = await srv.register();
+  const viewer = await srv.register();
+  const mk = async (settings) => {
+    const id = randomUUID();
+    await srv.request('POST', '/api/scenarios', {
+      token: owner.token,
+      body: {
+        id, name: 'Secretive', description: 'd', tags: [], backstory: 'SECRET BACKSTORY', customInstructions: 'SECRET RULES',
+        characters: [], settings: { isPublic: true, ...settings },
+        lorePieces: [
+          { id: randomUUID(), type: 'other', title: 'Open lore', content: 'visible', triggers: [], pinned: true },
+          { id: randomUUID(), type: 'other', title: 'Hidden lore', content: 'HIDDEN LORE', triggers: [], pinned: true, hidden: true },
+        ],
+      },
+    });
+    return id;
+  };
+
+  // hide prompts on, copying not allowed: withheld from others
+  const hiddenId = await mk({ hidePrompts: true, allowCustomization: false });
+  const asViewer = (await srv.request('GET', `/api/scenarios/${hiddenId}`, { token: viewer.token })).json;
+  assert.equal(asViewer.promptsHidden, true);
+  assert.ok(!JSON.stringify(asViewer).match(/SECRET|HIDDEN LORE/), JSON.stringify(asViewer));
+  const asOwner = (await srv.request('GET', `/api/scenarios/${hiddenId}`, { token: owner.token })).json;
+  assert.equal(asOwner.backstory, 'SECRET BACKSTORY');
+  assert.equal(asOwner.lorePieces.length, 2);
+
+  // The viewer can still play it, and the AI receives the full scenario
+  const chatId = randomUUID();
+  await srv.request('POST', '/api/chats', {
+    token: viewer.token,
+    body: { id: chatId, scenarioId: hiddenId, title: 't', memories: [], createdAt: Date.now(), settings: { responseLength: 'short' },
+      messages: [{ id: randomUUID(), role: 'user', content: 'hi', timestamp: Date.now() }] },
+  });
+  assert.equal((await reply(viewer.token, chatId)).status, 200);
+  const sys = seen.last.messages[0].content;
+  assert.match(sys, /SECRET BACKSTORY/);
+  assert.match(sys, /SECRET RULES/);
+  assert.match(sys, /HIDDEN LORE/);
+
+  // Hidden lore pieces alone are withheld when copying is not allowed
+  const loreOnly = await mk({ hidePrompts: false, allowCustomization: false });
+  const lo = (await srv.request('GET', `/api/scenarios/${loreOnly}`, { token: viewer.token })).json;
+  assert.equal(lo.backstory, 'SECRET BACKSTORY');
+  assert.deepEqual(lo.lorePieces.map(p => p.title), ['Open lore']);
+
+  // Copying allowed: nothing withheld, so copies stay complete
+  const copyable = await mk({ hidePrompts: true, allowCustomization: true });
+  const cp = (await srv.request('GET', `/api/scenarios/${copyable}`, { token: viewer.token })).json;
+  assert.equal(cp.backstory, 'SECRET BACKSTORY');
+  assert.equal(cp.lorePieces.length, 2);
+});

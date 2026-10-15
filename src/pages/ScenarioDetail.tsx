@@ -258,9 +258,13 @@ export const ScenarioDetail: React.FC = () => {
               <Book className="text-green-500" size={24} />
               <h2 className="text-xl font-bold text-white uppercase tracking-widest">The Backstory</h2>
             </div>
-            <p className="text-zinc-300 leading-relaxed whitespace-pre-wrap">
-              {scenario.backstory}
-            </p>
+            {scenario.promptsHidden ? (
+              <p className="text-zinc-500 italic">The creator keeps the backstory and lore private.</p>
+            ) : (
+              <p className="text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                {scenario.backstory}
+              </p>
+            )}
           </div>
 
           {/* Key Characters & Lore */}

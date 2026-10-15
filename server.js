@@ -574,8 +574,28 @@ app.get('/api/scenarios/:id', auth, (req, res) => {
     return res.status(403).json({ error: 'Unauthorized to view this scenario' });
   }
 
-  res.json(scenario);
+  res.json(isOwner || isAdmin ? scenario : scenarioForViewer(scenario));
 });
+
+/**
+ * What other users may see of a scenario. The AI always gets everything
+ * (prompts are built on the server); this only limits what is shown.
+ * - If the owner allows customization, nothing is withheld, so copies of
+ *   the scenario stay complete.
+ * - Otherwise lore pieces marked hidden are withheld, and with "hide
+ *   prompts" on, the backstory, custom instructions and all lore too.
+ */
+function scenarioForViewer(scenario) {
+  if (scenario.settings?.allowCustomization) return scenario;
+  const visible = { ...scenario, lorePieces: (scenario.lorePieces || []).filter(p => !p.hidden) };
+  if (scenario.settings?.hidePrompts) {
+    visible.backstory = '';
+    visible.customInstructions = '';
+    visible.lorePieces = [];
+    visible.promptsHidden = true;
+  }
+  return visible;
+}
 
 /**
  * POST /api/scenarios

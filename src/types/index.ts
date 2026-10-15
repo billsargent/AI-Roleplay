@@ -30,6 +30,8 @@ export interface Scenario {
   characters: StoryCharacter[];
   settings: ScenarioSettings;
   createdAt: number;
+  /** Set by the server when the creator hides the backstory and lore from other users */
+  promptsHidden?: boolean;
 }
 
 /** An NPC or major character within a scenario */

@@ -764,7 +764,9 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
         /* Lore pieces from the scenario */
         <div className="space-y-3">
           {scenario.lorePieces.length === 0 && (
-            <p className="text-zinc-600 text-sm italic text-center py-8">No lore pieces defined for this scenario.</p>
+            <p className="text-zinc-600 text-sm italic text-center py-8">
+              {scenario.promptsHidden ? 'The creator keeps the lore private.' : 'No lore pieces defined for this scenario.'}
+            </p>
           )}
           {scenario.lorePieces.map(piece => {
             const isExpanded = expandedLoreIds.has(piece.id);
@@ -1287,7 +1289,9 @@ const ScenarioInfoView: React.FC<{ scenario: Scenario }> = ({ scenario }) => {
           Backstory
         </h4>
         <div className="bg-zinc-800/30 backdrop-blur-sm rounded-xl p-4 max-h-[220px] overflow-y-auto border border-zinc-700/50">
-          <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">{scenario.backstory}</p>
+          <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
+            {scenario.promptsHidden ? <span className="text-zinc-500 italic">The creator keeps the backstory private.</span> : scenario.backstory}
+          </p>
         </div>
       </div>
 
