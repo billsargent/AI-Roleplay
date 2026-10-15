@@ -1,7 +1,7 @@
 {
   "name": "ai-roleplay",
   "private": true,
-  "version": "1.0.9",
+  "version": "2.0.0",
   "type": "module",
   "engines": {
     "node": ">=20"

@@ -1,8 +1,22 @@
 # Changelog
 
-## [Unreleased]
+## [v2.0.0] - 2026-10-15
 
-Security, data-loss and robustness fixes from a code audit (GitHub issues #1–#10).
+A major release: security and data-loss fixes from a code audit (GitHub issues #1–#10), a rebuilt roleplay engine with prompts assembled on the server (#11–#17), and a new chat and editor layout (#30–#33).
+
+### Upgrading from 1.x
+- **Back up `database.sqlite` and `uploads/` first.** The schema is migrated automatically on start (new columns and indexes only).
+- **Node.js 20 or later** is required. Run `npm install` (the lock file is now committed) and `npm run build`.
+- **Admin › LLM Config:** pick a current model (`deepseek-flash` or `deepseek-v4-pro`; DeepSeek scheduled `deepseek-chat` and `deepseek-reasoner` for retirement on 2026-07-24), set **Thinking mode** (Off uses temperature and penalties; On ignores them), and check **temperature** (about 1.0–1.2 for roleplay; 1.5 produced nonsense in testing). Negative frequency/presence penalties now take effect and encourage repetition; 0 is the safe value.
+- **New Context & Lore settings** (context budget, lore scan depth and caps) default to sensible values; review them once.
+- Optional environment variables are listed in the README (`TRUST_PROXY` matters behind a reverse proxy).
+- Trash older than `TRASH_RETENTION_DAYS` (default 30) is purged on the first start.
+
+### Breaking
+- The generic AI endpoints `/api/deepseek/chat` and `/api/deepseek/chat/stream` are removed. Clients ask for a reply to a saved chat with `POST /api/chats/:id/reply` and the server builds the prompt; memories use `POST /api/chats/:id/memory`.
+- `/api/system/deepseek-key` is removed; the key is only ever returned masked.
+- The "Chat Padding" and "Memory Send Interval" admin settings are removed (the chat lays itself out, and memories are sent every turn).
+- Only the chat owner can ask the AI to reply in a chat (admins viewing another user's chat are read-only).
 
 ### Security
 - **Image paths** — Image reads, writes and deletes only accept the `{type}/{prefix}/{id}.{ext}` layout inside the uploads folder. Previously a crafted path could read files such as the database, and a crafted avatar path could delete arbitrary files. Image URLs pointing at another entity's file are copied, never shared.
@@ -28,6 +42,14 @@ Security, data-loss and robustness fixes from a code audit (GitHub issues #1–#
 - `.env` files are now loaded (they were documented but ignored).
 - The admin "API Rate Limit" field now takes effect.
 - Imported introductions keep their centred/right alignment.
+
+### Roleplay engine
+- **Prompts are built on the server** (`lib/prompt.js`) from the saved chat and scenario. Players can no longer send arbitrary prompts through the site's API key, and "Hide prompts" and hidden lore are enforced for other users.
+- **Long chats work:** the newest history that fits a configurable token budget is sent; older turns are covered by memories instead of eventually failing with a context-length error.
+- **Rolling memories:** each memory summarises everything since the previous one (it used to cover only the last 10 messages), all memories are sent with every reply (unpinned ones used to be sent only every 25th turn), and `*continue*` turns no longer count toward the interval.
+- **Lore triggers** match whole words only ("art" no longer fires on "party"), look only at recent messages, are ordered by priority, and the caps are configurable. One "Sent to the AI" selector (When triggered / Always / Never) replaces three conflicting checkboxes; lore can be hidden from players.
+- **Prompt cleanups:** concrete length targets, no doubled punctuation, chat notices are not sent to the AI, character lore that repeats a cast member is skipped, and two new per-scenario switches: *Action* / "Dialogue" formatting rule and sending the introduction to the AI.
+- **Current DeepSeek models** with a Thinking mode setting; the reply-length cap works (thinking gets extra headroom).
 
 ### Added
 - Admin switch to close new sign-ups.

@@ -2,6 +2,8 @@
 
 An immersive, AI-powered roleplay platform where you create stories, build worlds, and chat with intelligent AI characters. Built with a modern React frontend and an Express + SQLite backend, powered by the DeepSeek language model.
 
+**Current version: 2.0.0.** See [CHANGELOG.md](CHANGELOG.md) for what changed, and its *Upgrading from 1.x* section before updating an existing install.
+
 ---
 
 ## ✨ Features
@@ -17,12 +19,13 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 
 ### 🤖 AI Chat & Roleplay
 - **Real-Time Streaming** — AI responses stream character-by-character via Server-Sent Events (SSE) for instant feedback
-- **Context-Aware Responses** — The AI has full knowledge of the world setting, characters, lore pieces, and conversation history
-- **Smart Lore Activation** — Lore pieces with keyword triggers are included when a trigger word appears in the conversation (up to 3 at a time)
-- **Memory System** — The AI generates concise memory cards at configurable intervals to retain long-term context
+- **Context-Aware Responses** — The server builds each prompt from the world setting, characters, lore, memories and as much recent conversation as fits a token budget, so long chats keep working
+- **Smart Lore Activation** — Triggered lore is included when a trigger word appears as a whole word in the last few messages (5 at a time by default, highest priority first)
+- **Rolling Memories** — Every few user messages the AI writes a memory card summarising everything since the previous one; all memories are sent with every reply and pinned ones are never trimmed
 - **Response Length Control** — Choose short, medium, or long AI responses
 - **Stop & Retry** — Stop a reply while it is being written (the text so far is kept), and retry a reply that failed
 - **Message Editing** — Edit, delete, or rewind messages (regenerating and switching between alternative replies is planned)
+- **Reading Layout** — Centred reading column that fits any screen; the view follows new text while you are at the bottom and leaves you in place when you scroll up
 
 ### 🧩 Characters & Personas
 - **Multi-Character Casts** — Scenarios can have any number of NPCs with names, descriptions, and personality profiles
@@ -31,9 +34,10 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 
 ### 🧠 Lore System
 - **Lore Pieces** — Define locations, events, objects, and other world-building elements
-- **Pinned Lore** — Always included in the AI context for essential world knowledge (up to 10)
-- **Smart Activation** — Lore pieces auto-activate when trigger keywords appear in the conversation
-- Linked pieces and weight-based priority are stored by the editor but not used by the AI yet (planned)
+- **Sent to the AI** — Each piece is sent *Always* (up to 10 by default), *When a trigger word comes up*, or *Never* (draft)
+- **Priority** — Higher-priority pieces win when more pieces qualify than the caps allow
+- **Hidden from Players** — The AI uses the piece but other players cannot read it (also enforced by the scenario's *Hide Prompts* switch)
+- Linked pieces are stored by the editor but not used by the AI yet (planned)
 
 ### 👤 User System
 - **JWT Authentication** — Secure token-based auth with 7-day session expiry; sessions survive server restarts
@@ -44,16 +48,18 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 
 ### 🛠️ Admin Panel
 - **DeepSeek API Key Configuration** — Set or replace the AI provider key; the stored key is never sent back to the browser (only a masked form)
+- **Model & Thinking Mode** — Pick the DeepSeek model and whether it reasons before replying
 - **LLM Parameters** — Configure temperature, max tokens, frequency/presence penalties
 - **Response Token Limits** — Set short/medium/long response token caps
-- **Memory Management** — Configure memory send interval, generation interval, word count, and max retention
+- **Memory Management** — Configure how often memories are written, their length, and how many are kept
+- **Context & Lore** — Context token budget, how many recent messages trigger lore, and the lore caps
 - **Site Branding** — Custom site name displayed throughout the app
 - **Rate Limit & Sign-ups** — Set the general API rate limit and turn new registrations on or off
 - **User Management** — View, create, edit, and delete users with role assignment (the last admin cannot be demoted)
 
 ### 🔒 Security
-- **Server-Side API Key** — DeepSeek API key is stored server-side, proxied through backend endpoints, never sent to the browser
-- **AI Request Validation** — The server picks the model, caps reply length and clamps sampling settings; each user has their own AI request limit
+- **Server-Side API Key** — DeepSeek API key is stored server-side and never sent to the browser
+- **Server-Built Prompts** — The browser only says which chat to answer; the server assembles the prompt, picks the model, caps reply length and clamps sampling settings, so the key cannot be used for arbitrary prompts. Each user has their own AI request limit
 - **Helmet CSP** — Content Security Policy without inline or eval script; scenario introductions are sanitized on save and on display
 - **Rate Limiting** — General API (1000/15min, admin-configurable), failed logins (20/15min), AI requests (120/15min per user)
 - **Upload Safety** — Image paths are validated, image types are checked from the file bytes (no SVG), large request bodies are only accepted after login
@@ -110,7 +116,7 @@ All configuration is done through the **Admin Panel** in the app after your firs
 2. Register a new account — **the first account automatically becomes admin**
 3. Log in and click the **Admin (Shield icon)** button in the nav bar
 4. Go to the **System** tab and paste your DeepSeek API key
-5. Configure LLM parameters on the **LLM Config** tab (optional)
+5. On the **LLM Config** tab, check the model (`deepseek-flash` is a good default), Thinking mode (Off for normal roleplay) and temperature (about 1.0–1.2; higher values drift into nonsense)
 6. Set your **Site Name** for branding (optional)
 
 ### Optional: Environment Variables
@@ -184,6 +190,7 @@ AI-Roleplay/
 │   └── images.js             # Image file storage (validated paths, save/copy/delete/read)
 ├── lib/
 │   ├── deepseek.js           # Server-side AI request validation and streaming relay
+│   ├── prompt.js             # Prompt builder: history budget, lore selection, memories
 │   ├── imageType.js          # Detects image type from file bytes
 │   ├── safeImageFetch.js     # SSRF-safe remote image download (import flow)
 │   └── sanitizeHtml.js       # Server-side rich text sanitizing
@@ -211,7 +218,7 @@ AI-Roleplay/
 │   │   └── TrashPage.tsx         # Trash / recycle bin (restore, permanent delete)
 │   ├── services/
 │   │   ├── api.ts               # Axios client + API service methods
-│   │   └── deepseek.ts          # AI prompt assembly + proxy calls
+│   │   └── deepseek.ts          # Client for reply, memory and scenario generation endpoints
 │   ├── types/
 │   │   └── index.ts             # TypeScript interfaces
 │   ├── utils/
@@ -219,6 +226,7 @@ AI-Roleplay/
 │   │   ├── image.ts             # Image handling (camera/file, resize, import download)
 │   │   ├── notifications.tsx    # Toast & confirm dialog system
 │   │   └── sanitize.ts          # Browser-side rich text sanitizing
+│   ├── vite-env.d.ts            # Build-time constants (app version)
 │   ├── App.tsx                  # Root component, routing, auth guard
 │   ├── index.css                # Tailwind entry point + global styles
 │   └── main.tsx                 # React entry point
@@ -263,6 +271,8 @@ AI-Roleplay/
 | POST | `/api/chats` | Auth | Create/update chat |
 | DELETE | `/api/chats/:id` | Auth | Delete own chat (or admin) |
 | DELETE | `/api/chats/all` | Auth | Delete all own chats |
+| POST | `/api/chats/:id/reply` | Owner | AI reply to a saved chat (`{ stream: true }` for SSE) |
+| POST | `/api/chats/:id/memory` | Owner | Write a memory card (`{ auto: true }` only when one is due) |
 
 ### System (Admin)
 | Method | Path | Access | Description |
@@ -286,12 +296,12 @@ AI-Roleplay/
 | PUT | `/api/admin/users/:id` | Admin | Update user |
 | DELETE | `/api/admin/users/:id` | Admin | Delete user |
 
-### AI Proxy (Server-Side)
+### AI Generation
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
-| POST | `/api/deepseek/chat` | Auth | Non-streaming AI chat |
-| POST | `/api/deepseek/chat/stream` | Auth | SSE streaming AI chat |
-| POST | `/api/deepseek/generate` | Auth | AI scenario generation |
+| POST | `/api/deepseek/generate` | Auth | AI scenario generation from a description |
+
+Chat replies and memories use the chat endpoints above; the server builds every prompt.
 
 ### Images
 | Method | Path | Access | Description |
