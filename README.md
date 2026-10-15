@@ -213,7 +213,11 @@ AI-Roleplay/
 │   ├── components/
 │   │   ├── AIEnhanceButton.tsx   # AI Enhance for editor fields (word diff, undo)
 │   │   ├── AIGeneratorModal.tsx  # AI scenario generation dialog
+│   │   ├── LoreFixModal.tsx      # Check & Fix lore dialog
+│   │   ├── LoreHealth.tsx        # Admin lore health
+│   │   ├── FictionlabReimport.tsx # Admin bulk re-import
 │   │   ├── LoreSuggestModal.tsx  # AI lore card suggestions for the editor
+│   │   ├── Traits.tsx            # Trait chips and editor input
 │   │   ├── MemoryPanel.tsx       # Chat memories: key facts, chapters, edit/pin/write
 │   │   ├── Navbar.tsx            # Responsive bottom/top navigation
 │   │   ├── PersonaManager.tsx    # User persona CRUD

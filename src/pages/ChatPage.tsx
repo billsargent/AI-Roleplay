@@ -32,6 +32,7 @@ import { Chat, Message, Scenario, Persona, Memory, ReplyContext } from '../types
 import { MemoryPanel } from '../components/MemoryPanel';
 import { chapters, messagesSinceLastMemory } from '../utils/memories';
 import { parseSceneHeader, latestScene } from '../utils/scene';
+import { TraitChips } from '../components/Traits';
 import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
 import { useNotifications } from '../utils/notifications';
@@ -1131,7 +1132,14 @@ const MemoryMatrixView: React.FC<{
                     {piece.pinned ? 'Always sent' : piece.smartActivation ? `Sent when: ${(piece.triggers || []).join(', ') || '—'}` : 'Not sent'}
                   </span>
                 </div>
-                <h4 className="font-bold text-white mb-1 text-sm">{piece.title}</h4>
+                <div className="flex items-center gap-3 mb-1">
+                  {piece.avatar && <img src={piece.avatar} alt="" className="w-10 h-10 rounded-lg object-cover flex-shrink-0" />}
+                  <div className="min-w-0">
+                    <h4 className="font-bold text-white text-sm">{piece.title}</h4>
+                    <TraitChips traits={piece.traits} className="mt-1" />
+                  </div>
+                </div>
+                {piece.description && <p className="text-xs text-zinc-300 mb-1">{piece.description}</p>}
                 <p className={`text-xs text-zinc-400 leading-relaxed ${isExpanded ? '' : 'line-clamp-3'}`}>{piece.content}</p>
                 {piece.content.length > 200 && (
                   <button
@@ -1586,6 +1594,28 @@ const ScenarioInfoView: React.FC<{ scenario: Scenario }> = ({ scenario }) => {
           </p>
         </div>
       </div>
+
+      {/* Characters */}
+      {scenario.characters.length > 0 && (
+        <div>
+          <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-3 flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />
+            Characters
+          </h4>
+          <div className="space-y-2">
+            {scenario.characters.map(c => (
+              <div key={c.id} className="flex gap-3 rounded-xl bg-zinc-800/30 border border-zinc-700/50 p-3">
+                <Avatar image={c.avatar} name={c.name} accent />
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-white">{c.name}</p>
+                  <TraitChips traits={c.traits} className="mt-1" />
+                  {!scenario.promptsHidden && c.description && <p className="text-xs text-zinc-400 mt-1 line-clamp-3">{c.description}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Scenario Instructions */}
       {scenario.customInstructions && (

@@ -34,6 +34,7 @@ import { Scenario, Persona, Message } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
 import { useNotifications } from '../utils/notifications';
+import { TraitChips } from '../components/Traits';
 
 export const ScenarioDetail: React.FC = () => {
   const { showToast, showConfirm } = useNotifications();
@@ -278,12 +279,14 @@ export const ScenarioDetail: React.FC = () => {
                   const isExpanded = expandedLoreIds.has(piece.id);
                   return (
                     <div key={piece.id} className="bg-zinc-900/50 border border-zinc-800 p-4 rounded-2xl flex gap-4">
-                      <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center flex-shrink-0">
-                         <User size={24} className="text-zinc-600" />
+                      <div className="w-12 h-12 rounded-full bg-zinc-800 flex items-center justify-center flex-shrink-0 overflow-hidden">
+                        {piece.avatar ? <img src={piece.avatar} alt="" className="w-full h-full object-cover" /> : <User size={24} className="text-zinc-600" />}
                       </div>
                       <div className="min-w-0">
                         <h4 className="font-bold text-white">{piece.title}</h4>
                         <p className="text-xs text-zinc-500 uppercase font-black">{piece.type}</p>
+                        <TraitChips traits={piece.traits} className="mt-1.5" />
+                        {piece.description && <p className="text-xs text-zinc-300 mt-2">{piece.description}</p>}
                         <p className={`text-sm text-zinc-400 mt-2 ${isExpanded ? '' : 'line-clamp-2'}`}>{piece.content}</p>
                         {piece.content.length > 150 && (
                           <button

@@ -29,6 +29,7 @@ import { AIGeneratorModal } from '../components/AIGeneratorModal';
 import { LoreSuggestModal } from '../components/LoreSuggestModal';
 import { AIEnhanceButton } from '../components/AIEnhanceButton';
 import { LoreFixModal } from '../components/LoreFixModal';
+import { TraitsInput } from '../components/Traits';
 import { RichtextEditor } from '../components/RichtextEditor';
 
 
@@ -718,6 +719,12 @@ export const CreateScenario: React.FC = () => {
                   {labelRow('Personality & Mannerisms', <AIEnhanceButton field="characterPersonality" label={`${char.name || 'Character'}: Personality`} value={char.personality || ''} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, personality: v } : c) })} context={enhanceContext} />, undefined, true)}
                   <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="How they think, speak and behave" value={char.personality} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, personality: v } : c) })} />
                 </div>
+                <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3 items-end">
+                  <TraitsInput traits={char.traits} onChange={traits => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, traits } : c) })} />
+                  <label className="flex items-center gap-2 text-[10px] font-black text-zinc-500 uppercase cursor-pointer pb-2" title="The AI still plays them; other players do not see them unless you allow customization">
+                    <input type="checkbox" checked={!!char.hidden} onChange={e => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, hidden: e.target.checked } : c) })} /> Hidden from players
+                  </label>
+                </div>
               </div>
             ))}
             {scenario.characters.length === 0 && (
@@ -766,6 +773,18 @@ export const CreateScenario: React.FC = () => {
                     ))}
                   </div>
                 )}
+                <div className="flex items-end gap-3">
+                  <div className="w-14 h-14 flex-shrink-0 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center relative overflow-hidden group/lore">
+                    {piece.avatar ? <img src={piece.avatar} className="w-full h-full object-cover" alt="" /> : <ImageIcon size={18} className="text-zinc-700" />}
+                    <label className="absolute inset-0 bg-black/60 opacity-0 group-hover/lore:opacity-100 group-focus-within/lore:opacity-100 pointer-coarse:opacity-100 flex items-center justify-center cursor-pointer transition-opacity" title="Picture">
+                      <Upload size={14} className="text-white" />
+                      <input type="file" accept="image/*" className="hidden" aria-label="Lore picture" onChange={async (e) => { const file = e.target.files?.[0]; if (file) { const base64 = await fileToBase64(file); updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, avatar: base64 } : p) }); } }} />
+                    </label>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <TraitsInput traits={piece.traits} onChange={traits => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, traits } : p) })} />
+                  </div>
+                </div>
                 {labelRow('Content', <AIEnhanceButton field="loreContent" label={piece.title || 'Lore'} value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} context={enhanceContext} />, undefined, true)}
                 <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Describe this location, object, or event..." value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} />
                 {/* How this lore reaches the AI: one mode instead of three checkboxes */}
