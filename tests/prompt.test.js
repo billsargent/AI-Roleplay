@@ -182,6 +182,30 @@ test('selectHistory always keeps the last message', () => {
   assert.equal(history.length, 1);
 });
 
+// ── Reply modes (#18, #19) ──
+test('continue with prefix ends with the unfinished reply', () => {
+  const messages = [msg('user', 'Tell {{user}} a tale'), msg('assistant', 'Once, {{user}} sailed')];
+  const { messages: out } = buildChatPrompt({ messages, scenario: scenario(), chat: chat(), llm, mode: 'continue', prefix: true });
+  assert.deepEqual(out[out.length - 1], { role: 'assistant', content: 'Once, Rin sailed', prefix: true });
+  assert.match(out[out.length - 2].content, /^--- GLOBAL LLM INSTRUCTIONS/);
+  assert.equal(out[out.length - 3].content, 'Tell Rin a tale');
+});
+
+test('continue without prefix asks the model to carry on', () => {
+  const messages = [msg('user', 'Go on'), msg('assistant', 'The door')];
+  const { messages: out } = buildChatPrompt({ messages, scenario: scenario(), chat: chat(), llm, mode: 'continue' });
+  assert.equal(out[out.length - 2].content, 'The door');
+  assert.match(out[out.length - 1].content, /GLOBAL LLM INSTRUCTIONS[\s\S]*CONTINUATION/);
+  assert.ok(!out.some(m => m.prefix));
+});
+
+test('opening sends a request for the first scene and no history', () => {
+  const { messages: out } = buildChatPrompt({ messages: [], scenario: scenario(), chat: chat(), llm, mode: 'opening' });
+  assert.equal(out.length, 3);
+  assert.equal(out[1].role, 'user');
+  assert.match(out[1].content, /The story begins now/);
+});
+
 test('scenario generation prompt', () => {
   const g = buildScenarioGenerationPrompt('Pirates');
   assert.equal(g.messages[1].content, 'Pirates');
