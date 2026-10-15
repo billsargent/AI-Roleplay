@@ -15,7 +15,7 @@
  */
 
 import { api } from './api';
-import { Memory, ReplyContext } from '../types';
+import { Memory, ReplyContext, LorePiece } from '../types';
 
 /**
  * Interface for the JSON structure returned by the LLM during scenario generation.
@@ -78,6 +78,40 @@ function parseReplyContext(header: string | null | undefined): ReplyContext | un
   } catch {
     return undefined;
   }
+}
+
+/** What the lore check and AI fixes read from the editor (no images) */
+export interface LoreFixDraft {
+  name: string;
+  backstory: string;
+  customInstructions: string;
+  characters: Array<{ name: string }>;
+  lorePieces: Array<Pick<LorePiece, 'id' | 'type' | 'title' | 'content' | 'description' | 'weight' | 'pinned' | 'smartActivation' | 'hidden' | 'triggers' | 'linkedPieces'>>;
+}
+
+/** One problem the lore check found */
+export interface LoreIssue {
+  kind: 'brokenLinks' | 'neverSent' | 'ruleCard' | 'weightScale' | 'castDuplicate' | 'empty' | 'tooLong' | 'overAlwaysCap' | 'badTriggers' | 'charPlaceholder';
+  pieceId?: string;
+  title?: string;
+  message: string;
+  /** Repaired by the automatic fixes */
+  safe: boolean;
+}
+
+export interface LoreCheckResult {
+  issues: LoreIssue[];
+  /** The draft's lore with the automatic fixes applied */
+  fixed: { lorePieces: LoreFixDraft['lorePieces']; customInstructions: string; changes: string[] };
+}
+
+/** An AI suggestion for a card that is never sent */
+export interface LoreFix {
+  id: string;
+  triggers: string[];
+  mode: 'triggered' | 'always';
+  linkedPieces: string[];
+  description: string;
 }
 
 /** Editor fields AI Enhance works on (the server keeps the same list) */
@@ -304,12 +338,32 @@ export const deepseek = {
    * author to accept or not ("fix" = spelling, grammar, clarity only).
    * @throws With the server's message on failure
    */
-  async enhanceText(field: EnhanceField, text: string, context: { name?: string; description?: string }, mode: 'fix' | 'vivid' = 'fix'): Promise<string> {
+  async enhanceText(field: EnhanceField, text: string, context: { name?: string; description?: string }, mode: 'fix' | 'vivid' | 'condense' = 'fix'): Promise<string> {
     try {
       const response = await api.post('/deepseek/enhance', { field, text, context, mode });
       return String(response.data?.text || '');
     } catch (error: any) {
       throw new Error(errorMessage(error, 'Could not enhance the text'));
+    }
+  },
+
+  /** Lore health of a draft: issues and the safely fixed lore (nothing saved) */
+  async checkLore(draft: LoreFixDraft): Promise<LoreCheckResult> {
+    try {
+      const response = await api.post('/lore/check', { draft });
+      return response.data;
+    } catch (error: any) {
+      throw new Error(errorMessage(error, 'Could not check the lore'));
+    }
+  },
+
+  /** AI suggestions for cards that are never sent (at most 15 ids per call) */
+  async loreFix(draft: LoreFixDraft, ids: string[]): Promise<LoreFix[]> {
+    try {
+      const response = await api.post('/deepseek/lore-fix', { draft, ids });
+      return Array.isArray(response.data?.fixes) ? response.data.fixes : [];
+    } catch (error: any) {
+      throw new Error(errorMessage(error, 'Could not get suggestions'));
     }
   },
 

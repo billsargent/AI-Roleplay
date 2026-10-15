@@ -19,12 +19,13 @@ import { useNavigate } from 'react-router-dom';
 import {
   Key, Shield, BookOpen, Thermometer, Save, CheckCircle,
   ExternalLink, AlignLeft, Brain, ChevronLeft, Users,
-  Settings, Cpu, RefreshCw, Loader, Bug, Terminal, FileJson
+  Settings, Cpu, RefreshCw, Loader, Bug, Terminal, FileJson, Stethoscope
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useNotifications } from '../utils/notifications';
 import { UserEditor } from '../components/UserEditor';
 import { FictionlabReimport } from '../components/FictionlabReimport';
+import { LoreHealth } from '../components/LoreHealth';
 
 /** Fallback instructions template used if nothing is saved */
 const DEFAULT_GLOBAL_INSTRUCTIONS = `Maintain immersive roleplay, focusing on sensory details and character consistency. Always write in the style of literary fiction, balancing dialogue, action, and internal monologue.`;
@@ -438,6 +439,17 @@ export const AdminPage: React.FC = () => {
               <h2 className="text-xl font-bold text-white">Fictionlab Re-import</h2>
             </div>
             <FictionlabReimport />
+          </section>
+
+          {/* Lore health across all scenarios */}
+          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-emerald-600/20 text-emerald-500 rounded-lg">
+                <Stethoscope size={20} />
+              </div>
+              <h2 className="text-xl font-bold text-white">Lore Health</h2>
+            </div>
+            <LoreHealth />
           </section>
         </div>
       )}

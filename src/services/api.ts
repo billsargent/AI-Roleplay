@@ -346,6 +346,18 @@ export const apiService = {
     }
   },
 
+  /** Admin: lore health of every scenario (dry run) */
+  getLoreHealth: async (): Promise<{ totals: Record<string, number>; rows: Array<{ id: string; name: string; counts: Record<string, number>; safeChanges: string[] }> }> => {
+    const response = await api.get('/admin/lore-health');
+    return response.data;
+  },
+
+  /** Admin: applies the safe lore fixes to every scenario (backs up first) */
+  applyLoreHealth: async (): Promise<{ backup: string; changed: number; failed: Array<{ id: string; name: string; error: string }> }> => {
+    const response = await api.post('/admin/lore-health/apply');
+    return response.data;
+  },
+
   /** Admin: matches export files to scenarios (dry run) */
   matchFictionlabFiles: async (files: Array<{ name: string; file: unknown }>): Promise<{ rows: ReimportRow[] }> => {
     const response = await api.post('/admin/fictionlab/match', { files });

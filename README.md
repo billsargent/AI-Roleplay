@@ -43,6 +43,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Hidden from Players** — The AI uses the piece but other players cannot read it (also enforced by the scenario's *Hide Prompts* switch)
 - **Linked Pieces** — Pieces linked to another are sent right after it (a draft piece can exist just to be linked)
 - **Lore Overview** — Every reply lists the other lore by title and a one-line summary; pieces named in the scenario instructions are always sent
+- **Check & Fix Lore** — Finds lore that never reaches the AI, repairs imported quirks, and asks the AI for trigger words; admin bulk "Lore Health"
 
 ### 👤 User System
 - **JWT Authentication** — Secure token-based auth with 7-day session expiry; sessions survive server restarts
@@ -199,6 +200,7 @@ AI-Roleplay/
 │   ├── prompt.js             # Prompt builder: history budget, lore selection, memories
 │   ├── fictionlab.js         # Fictionlab export parser (all export shapes)
 │   ├── fictionlabReimport.js # Match export files to scenarios; merge in place
+│   ├── loreDoctor.js         # Lore health checks and safe fixes
 │   ├── imageType.js          # Detects image type from file bytes
 │   ├── safeImageFetch.js     # SSRF-safe remote image download (import flow)
 │   └── sanitizeHtml.js       # Server-side rich text sanitizing
@@ -312,13 +314,17 @@ AI-Roleplay/
 | DELETE | `/api/admin/users/:id` | Admin | Delete user |
 | POST | `/api/admin/fictionlab/match` | Admin | Bulk re-import dry run: match files to scenarios |
 | POST | `/api/admin/fictionlab/apply` | Admin | Bulk re-import selected files (backs up the database first) |
+| GET | `/api/admin/lore-health` | Admin | Lore health of every scenario (dry run) |
+| POST | `/api/admin/lore-health/apply` | Admin | Apply the safe lore fixes everywhere (backs up first) |
 
 ### AI Generation
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
 | POST | `/api/deepseek/generate` | Auth | AI scenario generation from a description |
 | POST | `/api/deepseek/lore-suggest` | Auth | Lore card suggestions for a scenario draft |
-| POST | `/api/deepseek/enhance` | Auth | AI Enhance: fixed text for one editor field |
+| POST | `/api/deepseek/enhance` | Auth | AI Enhance: fixed text for one editor field (`mode`: fix, vivid, condense) |
+| POST | `/api/lore/check` | Auth | Lore health of a draft and the safely fixed lore |
+| POST | `/api/deepseek/lore-fix` | Auth | AI trigger words, links and summaries for never-sent cards (15 per call) |
 
 Chat replies and memories use the chat endpoints above; the server builds every prompt.
 

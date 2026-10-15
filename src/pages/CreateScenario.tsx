@@ -15,7 +15,7 @@ import {
   X, Image as ImageIcon, Info, BookOpen, Brain, 
   Settings as SettingsIcon, Save, Plus, Trash2, 
   UserPlus, ChevronLeft, Globe, Lock, Upload,
-  FileJson, Sparkles, FileText, RefreshCw
+  FileJson, Sparkles, FileText, RefreshCw, Stethoscope
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { AiGeneratedScenarioData, LoreSuggestDraft, LoreSuggestion } from '../services/deepseek';
@@ -28,6 +28,7 @@ import { useNotifications } from '../utils/notifications';
 import { AIGeneratorModal } from '../components/AIGeneratorModal';
 import { LoreSuggestModal } from '../components/LoreSuggestModal';
 import { AIEnhanceButton } from '../components/AIEnhanceButton';
+import { LoreFixModal } from '../components/LoreFixModal';
 import { RichtextEditor } from '../components/RichtextEditor';
 
 
@@ -100,6 +101,7 @@ export const CreateScenario: React.FC = () => {
   const [newTag, setNewTag] = useState('');
   const [showAiGenerator, setShowAiGenerator] = useState(false);
   const [showLoreSuggest, setShowLoreSuggest] = useState(false);
+  const [showLoreFix, setShowLoreFix] = useState(false);
   const [triggerInputs, setTriggerInputs] = useState<Record<string, string>>({});
   const [rteKey, setRteKey] = useState(0);
   /** Problems found when saving, shown under the fields (cleared as they are edited) */
@@ -515,6 +517,15 @@ export const CreateScenario: React.FC = () => {
   const inputClass = 'w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500';
   const labelClass = 'block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2';
   const enhanceContext = { name: scenario.name, description: scenario.description };
+  /** Problems shown on each lore card (the full check is in "Check & fix lore") */
+  const loreIds = new Set(scenario.lorePieces.map(p => p.id));
+  const linkedTo = new Set(scenario.lorePieces.flatMap(p => p.linkedPieces || []));
+  const castNames = new Set(scenario.characters.map(c => (c.name || '').trim().toLowerCase()));
+  const loreBadges = (p: LorePiece): string[] => [
+    ...(!p.pinned && !(p.smartActivation && (p.triggers || []).length) && !linkedTo.has(p.id) ? ['Never sent'] : []),
+    ...((p.linkedPieces || []).some(id => !loreIds.has(id)) ? ['Broken link'] : []),
+    ...(p.type === 'character' && castNames.has((p.title || '').trim().toLowerCase()) ? ['Same as a cast member'] : []),
+  ];
   /** A field label with the Enhance button on the right */
   const labelRow = (label: React.ReactNode, enhance: React.ReactNode, htmlFor?: string, small = false) => (
     <div className={`flex items-center justify-between gap-2 ${small ? 'mb-1' : 'mb-2'}`}>
@@ -722,6 +733,11 @@ export const CreateScenario: React.FC = () => {
           <div className="flex items-center justify-between gap-4">
             <h2 className="text-xl font-bold flex items-center gap-3"><Brain className="text-indigo-400" /> World Lore</h2>
             <div className="flex flex-wrap justify-end gap-2">
+              {scenario.lorePieces.length > 0 && (
+                <button onClick={() => setShowLoreFix(true)} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors" title="Find and fix lore that never reaches the AI">
+                  <Stethoscope size={16} /> Check &amp; Fix
+                </button>
+              )}
               <button onClick={() => setShowLoreSuggest(true)} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors" title="Let the AI propose lore cards from your story">
                 <Sparkles size={16} /> Suggest Lore
               </button>
@@ -741,6 +757,15 @@ export const CreateScenario: React.FC = () => {
                   <input aria-label="Lore title" placeholder="Lore title" className="bg-transparent text-lg font-bold text-white outline-none focus:border-b border-indigo-500 flex-1 min-w-0" value={piece.title} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, title: e.target.value } : p) }); }} />
                   <button onClick={() => removeLorePiece(piece.id)} className="text-zinc-600 hover:text-red-500 p-2" title="Remove lore" aria-label="Remove lore"><Trash2 size={16} /></button>
                 </div>
+                {loreBadges(piece).length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 -mt-2">
+                    {loreBadges(piece).map(b => (
+                      <button key={b} onClick={() => setShowLoreFix(true)} className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/30 hover:bg-amber-500/20" title="Open Check & Fix">
+                        {b}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {labelRow('Content', <AIEnhanceButton field="loreContent" label={piece.title || 'Lore'} value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} context={enhanceContext} />, undefined, true)}
                 <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Describe this location, object, or event..." value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} />
                 {/* How this lore reaches the AI: one mode instead of three checkboxes */}
@@ -905,6 +930,14 @@ export const CreateScenario: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Lore health for this draft */}
+      <LoreFixModal
+        isOpen={showLoreFix}
+        onClose={() => setShowLoreFix(false)}
+        scenario={scenario}
+        onChange={changes => updateScenario(changes)}
+      />
 
       {/* AI lore suggestions for this draft */}
       <LoreSuggestModal
