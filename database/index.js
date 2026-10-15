@@ -173,6 +173,8 @@ function initTables() {
   addColumnIfMissing('users', 'password_changed_at', 'INTEGER DEFAULT 0');
   // Which of a message's alternative versions is shown
   addColumnIfMissing('messages', 'current_version_index', 'INTEGER DEFAULT 0');
+  // Time of the last message a memory summarises (rolling memories)
+  addColumnIfMissing('memories', 'covered_until', 'INTEGER DEFAULT NULL');
 
   // ── Indexes for the lookups every page makes ──
   db.exec(`
@@ -817,6 +819,7 @@ function enrichChat(chat) {
       content: m.content,
       pinned: !!m.pinned,
       timestamp: m.timestamp,
+      coveredUntil: m.covered_until || undefined,
     })),
   };
 }
@@ -870,9 +873,10 @@ export function saveChatTransaction(chat) {
     // Replace all memories for this chat
     if (chat.memories) {
       db.prepare(`DELETE FROM memories WHERE chat_id = ?`).run(chat.id);
-      const insertMem = db.prepare(`INSERT INTO memories (id, chat_id, content, pinned, timestamp) VALUES (?, ?, ?, ?, ?)`);
+      const insertMem = db.prepare(`INSERT INTO memories (id, chat_id, content, pinned, timestamp, covered_until) VALUES (?, ?, ?, ?, ?, ?)`);
       for (const m of chat.memories) {
-        insertMem.run(m.id, chat.id, m.content || '', m.pinned ? 1 : 0, m.timestamp || Date.now());
+        insertMem.run(m.id, chat.id, m.content || '', m.pinned ? 1 : 0, m.timestamp || Date.now(),
+          Number.isFinite(Number(m.coveredUntil)) ? Number(m.coveredUntil) : null);
       }
     }
   });

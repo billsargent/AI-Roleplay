@@ -113,6 +113,10 @@ export interface ScenarioSettings {
   hidePrompts: boolean;
   /** Allow users to leave comments on the scenario */
   allowCommenting: boolean;
+  /** Ask the AI for *actions* and "dialogue" formatting (default on) */
+  asteriskFormatting?: boolean;
+  /** Also send the introduction text to the AI (default off) */
+  sendIntroduction?: boolean;
 }
 
 /** A single chat session tied to a scenario */
@@ -158,6 +162,8 @@ export interface Memory {
   /** Pinned memories are never trimmed */
   pinned: boolean;
   timestamp: number;
+  /** Time of the last message this memory summarises; the next memory starts after it */
+  coveredUntil?: number;
 }
 
 /** The persona the user chose to play as in a chat session */

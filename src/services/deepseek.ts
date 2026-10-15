@@ -15,6 +15,7 @@
  */
 
 import { api } from './api';
+import { Memory } from '../types';
 
 /**
  * Interface for the JSON structure returned by the LLM during scenario generation.
@@ -189,19 +190,21 @@ export const deepseek = {
   },
 
   /**
-   * Generates a concise memory card from the recent messages of a saved chat.
-   * The target length comes from the admin settings.
+   * Asks the server for a memory card covering everything since the previous
+   * memory of a saved chat. With auto, the server only writes one when enough
+   * new user messages arrived (admin setting) and otherwise returns nothing.
    *
    * @param chatId - The chat to summarise
-   * @returns The generated memory text, or empty string on failure
+   * @param auto - Only if due (after a reply), instead of on request
+   * @returns The new memory (not yet added to the chat), or null
    */
-  async generateMemory(chatId: string): Promise<string> {
+  async generateMemory(chatId: string, auto = false): Promise<Memory | null> {
     try {
-      const response = await api.post(`/chats/${chatId}/memory`, {});
-      return response.data.choices[0].message.content;
+      const response = await api.post(`/chats/${chatId}/memory`, { auto });
+      return response.data?.memory || null;
     } catch (error) {
       console.error('Failed to generate memory:', error);
-      return ''; // Silently fail - memory generation is non-critical
+      return null; // Memory generation is non-critical
     }
   },
 };

@@ -58,7 +58,11 @@ export const AdminPage: React.FC = () => {
   const [tokenLong, setTokenLong] = useState('2000');
   const [chatPaddingLeft, setChatPaddingLeft] = useState('16');
   const [chatPaddingRight, setChatPaddingRight] = useState('16');
-  const [memorySendInterval, setMemorySendInterval] = useState('25');
+  // Context and lore engine (server-side prompt builder)
+  const [contextTokenBudget, setContextTokenBudget] = useState('32000');
+  const [loreScanDepth, setLoreScanDepth] = useState('10');
+  const [loreActiveMax, setLoreActiveMax] = useState('5');
+  const [lorePinnedMax, setLorePinnedMax] = useState('10');
   const [memoryGenerateInterval, setMemoryGenerateInterval] = useState('25');
   const [memoryWordCount, setMemoryWordCount] = useState('100');
   const [memoryMaxCount, setMemoryMaxCount] = useState('50');
@@ -95,7 +99,10 @@ export const AdminPage: React.FC = () => {
         setFrequencyPenalty(settings.frequencyPenalty || '0');
         setPresencePenalty(settings.presencePenalty || '0');
         setSiteName(settings.siteName || '');
-        setMemorySendInterval(settings.memorySendInterval || '25');
+        setContextTokenBudget(settings.contextTokenBudget || '32000');
+        setLoreScanDepth(settings.loreScanDepth || '10');
+        setLoreActiveMax(settings.loreActiveMax || '5');
+        setLorePinnedMax(settings.lorePinnedMax || '10');
         setMemoryGenerateInterval(settings.memoryGenerateInterval || '25');
         setMemoryWordCount(settings.memoryWordCount || '100');
         setMemoryMaxCount(settings.memoryMaxCount || '50');
@@ -189,7 +196,8 @@ export const AdminPage: React.FC = () => {
       await apiService.updateSystemSettings({
         globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong,
         chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName,
-        memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount,
+        memoryGenerateInterval, memoryWordCount, memoryMaxCount,
+        contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax,
         deepseekModel,
         deepseekThinking,
       });
@@ -611,13 +619,11 @@ export const AdminPage: React.FC = () => {
                 </div>
                 <h3 className="text-lg font-bold text-white">Memory Management</h3>
               </div>
+              <p className="text-xs text-zinc-500 mb-4">
+                A memory card is written after every "Generate Interval" user messages and summarises everything since the
+                previous one. All memories (pinned first, then the newest up to "Max Memories") are sent with every reply.
+              </p>
               <div className="grid grid-cols-2 gap-4 mb-4">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider">Send Interval</label>
-                  <input type="number" min="1" max="500" value={memorySendInterval}
-                    onChange={(e) => setMemorySendInterval(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-                </div>
                 <div>
                   <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider">Generate Interval</label>
                   <input type="number" min="1" max="500" value={memoryGenerateInterval}
@@ -637,6 +643,42 @@ export const AdminPage: React.FC = () => {
                   <input type="number" min="1" max="500" value={memoryMaxCount}
                     onChange={(e) => setMemoryMaxCount(e.target.value)}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+              </div>
+            </div>
+
+            {/* Context & lore engine */}
+            <div className="border-t border-zinc-800 pt-4 mb-6">
+              <div className="flex items-center gap-2 mb-4">
+                <div className="p-1.5 bg-emerald-600/20 text-emerald-500 rounded-lg">
+                  <Cpu size={18} />
+                </div>
+                <h3 className="text-lg font-bold text-white">Context &amp; Lore</h3>
+              </div>
+              <p className="text-xs text-zinc-500 mb-4">
+                Each reply sends the scenario, lore, memories and as much recent conversation as fits the context budget;
+                older messages are covered by memories. A lower budget costs less per message.
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="context-budget">Context Budget (tokens)</label>
+                  <input id="context-budget" type="number" min="4000" max="1000000" step="1000" value={contextTokenBudget}
+                    onChange={(e) => setContextTokenBudget(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="lore-scan">Lore Trigger Scan (messages)</label>
+                  <input id="lore-scan" type="number" min="1" max="200" value={loreScanDepth}
+                    onChange={(e) => setLoreScanDepth(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="lore-active">Max Triggered Lore</label>
+                  <input id="lore-active" type="number" min="0" max="50" value={loreActiveMax}
+                    onChange={(e) => setLoreActiveMax(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="lore-pinned">Max Always-on Lore</label>
+                  <input id="lore-pinned" type="number" min="0" max="100" value={lorePinnedMax}
+                    onChange={(e) => setLorePinnedMax(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                 </div>
               </div>
             </div>

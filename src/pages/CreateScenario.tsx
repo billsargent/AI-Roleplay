@@ -611,22 +611,53 @@ export const CreateScenario: React.FC = () => {
                       <button onClick={() => updateScenario({ lorePieces: scenario.lorePieces.filter(p => p.id !== piece.id) })} className="text-zinc-700 hover:text-red-500"><Trash2 size={16}/></button>
                     </div>
                     <textarea className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-400 h-24" placeholder="Describe this location, object, or event..." value={piece.content} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: e.target.value } : p) }); }} />
-                    {/* Lore type toggles: Draft / Pinned / Smart Activation */}
-                    <div className="flex items-center gap-4">
-                      <label className="flex items-center gap-2 text-[10px] font-black text-zinc-500 uppercase cursor-pointer">
-                        <input type="checkbox" checked={!piece.pinned && !piece.smartActivation} onChange={e => { if (e.target.checked) { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, pinned: false, smartActivation: false } : p) }); } }} /> Draft Lore
+                    {/* How this lore reaches the AI: one mode instead of three checkboxes */}
+                    <div className="flex flex-wrap items-end gap-4">
+                      <label className="text-[10px] font-black text-zinc-500 uppercase">
+                        <span className="block mb-1">Sent to the AI</span>
+                        <select
+                          className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-300 normal-case font-normal"
+                          value={piece.pinned ? 'pinned' : piece.smartActivation ? 'triggered' : 'off'}
+                          onChange={e => {
+                            const mode = e.target.value;
+                            updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, pinned: mode === 'pinned', smartActivation: mode === 'triggered' } : p) });
+                          }}
+                        >
+                          <option value="triggered">When a trigger word comes up</option>
+                          <option value="pinned">Always</option>
+                          <option value="off">Never (draft)</option>
+                        </select>
                       </label>
-                      <label className="flex items-center gap-2 text-[10px] font-black text-zinc-500 uppercase cursor-pointer">
-                        <input type="checkbox" checked={piece.pinned} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, pinned: e.target.checked } : p) }); }} /> Pinned
+                      <label className="text-[10px] font-black text-zinc-500 uppercase">
+                        <span className="block mb-1">Priority</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={1000}
+                          className="w-20 bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-300"
+                          value={piece.weight ?? 100}
+                          onChange={e => {
+                            const weight = Math.max(0, Math.min(1000, Number(e.target.value) || 0));
+                            updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, weight } : p) });
+                          }}
+                        />
                       </label>
-                      <label className="flex items-center gap-2 text-[10px] font-black text-zinc-500 uppercase cursor-pointer">
-                        <input type="checkbox" checked={piece.smartActivation} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, smartActivation: e.target.checked } : p) }); }} /> Smart
+                      <label className="flex items-center gap-2 text-[10px] font-black text-zinc-500 uppercase cursor-pointer pb-1.5" title="The AI still uses it; other players cannot read it unless you allow customization">
+                        <input
+                          type="checkbox"
+                          checked={!!piece.hidden}
+                          onChange={e => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, hidden: e.target.checked } : p) })}
+                        /> Hidden from players
                       </label>
                     </div>
+                    <p className="text-[10px] text-zinc-600">
+                      "Always" pieces are sent every turn (up to 10). Triggered pieces are sent when a trigger word appears as a
+                      whole word in the last few messages (up to 5 at a time). Higher priority wins when there are too many.
+                    </p>
                     {/* Trigger words input (only shown for smart-activated lore) */}
                     {piece.smartActivation && (
                       <div>
-                        <label className="text-[10px] font-black text-zinc-600 uppercase mb-1 block">Trigger Words (comma-separated)</label>
+                        <label className="text-[10px] font-black text-zinc-600 uppercase mb-1 block">Trigger Words (comma-separated, press Enter to add)</label>
                         <div className="flex flex-wrap gap-1 mb-2">
                           {(piece.triggers || []).map(t => (
                             <span key={t} className="bg-amber-600/10 text-amber-400 border border-amber-600/20 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1">
@@ -666,30 +697,16 @@ export const CreateScenario: React.FC = () => {
           <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-6">
             <h2 className="text-lg font-bold flex items-center gap-2 text-white"><SettingsIcon size={18} className="text-zinc-500" /> Logic & Privacy</h2>
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div><h4 className="text-sm font-bold text-zinc-300">Public Scenario</h4><p className="text-[10px] text-zinc-600 uppercase font-black">Visible in Explore</p></div>
-                <button onClick={() => updateSettings({ isPublic: !scenario.settings.isPublic })} className={`w-10 h-5 rounded-full relative transition-colors ${scenario.settings.isPublic ? 'bg-indigo-600' : 'bg-zinc-800'}`}>
-                  <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${scenario.settings.isPublic ? 'right-1' : 'left-1'}`} />
-                </button>
-              </div>
-              <div className="flex items-center justify-between">
-                <div><h4 className="text-sm font-bold text-zinc-300">Allow Customization</h4><p className="text-[10px] text-zinc-600 uppercase font-black">Others can remix</p></div>
-                <button onClick={() => updateSettings({ allowCustomization: !scenario.settings.allowCustomization })} className={`w-10 h-5 rounded-full relative transition-colors ${scenario.settings.allowCustomization ? 'bg-indigo-600' : 'bg-zinc-800'}`}>
-                  <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${scenario.settings.allowCustomization ? 'right-1' : 'left-1'}`} />
-                </button>
-              </div>
-              <div className="flex items-center justify-between">
-                <div><h4 className="text-sm font-bold text-zinc-300">Mature Content</h4><p className="text-[10px] text-zinc-600 uppercase font-black">18+ Only</p></div>
-                <button onClick={() => updateSettings({ sensitiveContent: !scenario.settings.sensitiveContent })} className={`w-10 h-5 rounded-full relative transition-colors ${scenario.settings.sensitiveContent ? 'bg-red-600' : 'bg-zinc-800'}`}>
-                  <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${scenario.settings.sensitiveContent ? 'right-1' : 'left-1'}`} />
-                </button>
-              </div>
-              <div className="flex items-center justify-between">
-                <div><h4 className="text-sm font-bold text-zinc-300">Separate Persona</h4><p className="text-[10px] text-zinc-600 uppercase font-black">User is distinct</p></div>
-                <button onClick={() => updateSettings({ separateUserCharacter: !scenario.settings.separateUserCharacter })} className={`w-10 h-5 rounded-full relative transition-colors ${scenario.settings.separateUserCharacter ? 'bg-indigo-600' : 'bg-zinc-800'}`}>
-                  <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${scenario.settings.separateUserCharacter ? 'right-1' : 'left-1'}`} />
-                </button>
-              </div>
+              <SettingToggle label="Public Scenario" hint="Visible in Explore" checked={!!scenario.settings.isPublic} onChange={v => updateSettings({ isPublic: v })} />
+              <SettingToggle label="Allow Customization" hint="Others can remix" checked={!!scenario.settings.allowCustomization} onChange={v => updateSettings({ allowCustomization: v })} />
+              <SettingToggle label="Hide Prompts" hint="Others can't read backstory or lore" checked={!!scenario.settings.hidePrompts} onChange={v => updateSettings({ hidePrompts: v })} />
+              <SettingToggle label="Mature Content" hint="18+ label" color="bg-red-600" checked={!!scenario.settings.sensitiveContent} onChange={v => updateSettings({ sensitiveContent: v })} />
+              <SettingToggle label="Separate Persona" hint="User is distinct" checked={!!scenario.settings.separateUserCharacter} onChange={v => updateSettings({ separateUserCharacter: v })} />
+            </div>
+            <h3 className="text-xs font-black text-zinc-500 uppercase tracking-widest pt-2">AI Instructions</h3>
+            <div className="space-y-4">
+              <SettingToggle label="*Action* / &quot;Dialogue&quot; Style" hint="Ask the AI for this formatting" checked={scenario.settings.asteriskFormatting !== false} onChange={v => updateSettings({ asteriskFormatting: v })} />
+              <SettingToggle label="Send Introduction to AI" hint="Otherwise only players see it" checked={!!scenario.settings.sendIntroduction} onChange={v => updateSettings({ sendIntroduction: v })} />
             </div>
           </section>
 
@@ -729,3 +746,28 @@ export const CreateScenario: React.FC = () => {
   );
 };
 
+/** On/off switch for the editor's settings sidebar */
+const SettingToggle: React.FC<{
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  color?: string;
+}> = ({ label, hint, checked, onChange, color = 'bg-indigo-600' }) => (
+  <div className="flex items-center justify-between gap-3">
+    <div>
+      <h4 className="text-sm font-bold text-zinc-300">{label}</h4>
+      <p className="text-[10px] text-zinc-600 uppercase font-black">{hint}</p>
+    </div>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={`w-10 h-5 flex-shrink-0 rounded-full relative transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${checked ? color : 'bg-zinc-800'}`}
+    >
+      <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${checked ? 'right-1' : 'left-1'}`} />
+    </button>
+  </div>
+);

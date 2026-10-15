@@ -346,3 +346,34 @@ test('hide prompts: other users do not see hidden text, the AI still gets it', a
   assert.equal(cp.backstory, 'SECRET BACKSTORY');
   assert.equal(cp.lorePieces.length, 2);
 });
+
+test('automatic memories: skipped until due, then cover the new messages', async () => {
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { memoryGenerateInterval: 2 } });
+  const user = await srv.register(); // fresh AI allowance
+  const chatId = await makeChat(user.token, 'one');
+  seen.last = null;
+  const skip = await srv.request('POST', `/api/chats/${chatId}/memory`, { token: user.token, body: { auto: true } });
+  assert.equal(skip.status, 200);
+  assert.equal(skip.json.skipped, true);
+  assert.equal(seen.last, null, 'no AI call when not due');
+
+  // Add a second user message (saved by the client as usual)
+  const chat = (await srv.request('GET', `/api/chats/${chatId}`, { token: user.token })).json;
+  chat.messages.push({ id: randomUUID(), role: 'assistant', content: 'reply', timestamp: Date.now() + 1 });
+  chat.messages.push({ id: randomUUID(), role: 'user', content: 'two', timestamp: Date.now() + 2 });
+  await srv.request('POST', '/api/chats', { token: user.token, body: chat });
+
+  const due = await srv.request('POST', `/api/chats/${chatId}/memory`, { token: user.token, body: { auto: true } });
+  assert.equal(due.status, 200, due.text);
+  assert.equal(due.json.memory.content, 'hello');
+  assert.equal(due.json.memory.coveredUntil, chat.messages[chat.messages.length - 1].timestamp);
+  assert.match(seen.last.messages[1].content, /user: one\nassistant: reply\nuser: two/);
+
+  // Saved with the chat, the next automatic request is not due again
+  chat.memories = [due.json.memory];
+  await srv.request('POST', '/api/chats', { token: user.token, body: chat });
+  const after = await srv.request('POST', `/api/chats/${chatId}/memory`, { token: user.token, body: { auto: true } });
+  assert.equal(after.json.skipped, true);
+  const stored = (await srv.request('GET', `/api/chats/${chatId}`, { token: user.token })).json;
+  assert.equal(stored.memories[0].coveredUntil, due.json.memory.coveredUntil);
+});

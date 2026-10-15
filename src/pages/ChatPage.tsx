@@ -37,15 +37,10 @@ import { jsPDF } from 'jspdf';
  */
 declare global {
   interface Window {
-    __memorySendInterval: number;      // How often (in user messages) memories are sent to the AI
-    __memoryGenerateInterval: number;   // How often new memories are auto-generated
-    __memoryWordCount: number;          // Target word count for generated memories
     __memoryMaxCount: number;           // Maximum number of stored memories before trimming
   }
 }
 
-/** Messages the app sends on the user's behalf; not counted as user turns */
-const SYNTHETIC_USER_MESSAGES = new Set(['*continue*']);
 
 /**
  * Keeps all pinned memories plus the newest unpinned ones, up to maxCount.
@@ -149,15 +144,9 @@ export const ChatPage: React.FC = () => {
         const llmSettings = await apiService.getLlmSettings();
         if (llmSettings.chatPaddingLeft) setChatPaddingLeft(parseInt(llmSettings.chatPaddingLeft));
         if (llmSettings.chatPaddingRight) setChatPaddingRight(parseInt(llmSettings.chatPaddingRight));
-        window.__memorySendInterval = llmSettings.memorySendInterval ? parseInt(llmSettings.memorySendInterval) : 25;
-        window.__memoryGenerateInterval = llmSettings.memoryGenerateInterval ? parseInt(llmSettings.memoryGenerateInterval) : 25;
-        window.__memoryWordCount = llmSettings.memoryWordCount ? parseInt(llmSettings.memoryWordCount) : 100;
         window.__memoryMaxCount = llmSettings.memoryMaxCount ? parseInt(llmSettings.memoryMaxCount) : 50;
       } catch {
         // Use defaults
-        window.__memorySendInterval = 25;
-        window.__memoryGenerateInterval = 25;
-        window.__memoryWordCount = 100;
         window.__memoryMaxCount = 50;
       }
     };
@@ -378,28 +367,19 @@ export const ChatPage: React.FC = () => {
   };
 
   /**
-   * Adds an AI-written memory when the number of real user messages reaches
-   * the configured interval, then trims old unpinned memories. Runs in the
-   * background after a reply and merges into the latest chat state.
+   * After each reply, lets the server add a memory if one is due (it counts
+   * the real user messages since the last memory). Runs in the background,
+   * merges into the latest chat state and trims old unpinned memories.
    */
   const maybeGenerateMemory = async (snapshot: Chat) => {
-    const userMsgCount = snapshot.messages.filter(
-      m => m.role === 'user' && !SYNTHETIC_USER_MESSAGES.has(m.content.trim())
-    ).length;
-    const genInterval = window.__memoryGenerateInterval || 25;
-    if (userMsgCount === 0 || userMsgCount % genInterval !== 0) return;
-
-    const memoryContent = await deepseek.generateMemory(snapshot.id);
-    if (!memoryContent) return;
+    const memory = await deepseek.generateMemory(snapshot.id, true);
+    if (!memory) return;
 
     const isCurrent = activeChatIdRef.current === snapshot.id;
     const latest = isCurrent && chatRef.current ? chatRef.current : snapshot;
     const next: Chat = {
       ...latest,
-      memories: trimMemories(
-        [...latest.memories, { id: uuidv4(), content: memoryContent, pinned: false, timestamp: Date.now() }],
-        window.__memoryMaxCount || 50
-      ),
+      memories: trimMemories([...latest.memories, memory], window.__memoryMaxCount || 50),
     };
     if (isCurrent) commitChat(next);
     try {
@@ -729,7 +709,7 @@ export const ChatPage: React.FC = () => {
  * - **AI Memories**: Generated memories with pin/delete controls and manual generation
  */
 const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (chat: Chat) => void }> = ({ chat, scenario, setChat }) => {
-  const { showConfirm } = useNotifications();
+  const { showConfirm, showToast } = useNotifications();
   const [activeTab, setActiveTab] = useState<'lore' | 'memories'>('lore');
   const [expandedLoreIds, setExpandedLoreIds] = useState<Set<string>>(new Set());
 
@@ -799,9 +779,11 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
             <h4 className="text-xs uppercase font-bold text-zinc-600 tracking-wider">Memories ({chat.memories.length})</h4>
             <button
               onClick={async () => {
-                const memoryContent = await deepseek.generateMemory(chat.id);
-                if (memoryContent && await showConfirm(`Add this memory?\n\n"${memoryContent}"`)) {
-                  const newMemories = [...chat.memories, { id: uuidv4(), content: memoryContent, pinned: false, timestamp: Date.now() }];
+                const memory = await deepseek.generateMemory(chat.id);
+                if (!memory) {
+                  showToast('Could not generate a memory', 'error');
+                } else if (await showConfirm(`Add this memory?\n\n"${memory.content}"`)) {
+                  const newMemories = [...chat.memories, memory];
                   const newChat = { ...chat, memories: newMemories };
                   setChat(newChat);
                   await apiService.saveChat(newChat);

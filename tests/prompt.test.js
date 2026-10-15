@@ -1,20 +1,25 @@
 /**
- * Unit tests for the server-side prompt builder (lib/prompt.js).
+ * Unit tests for the server-side prompt builder (lib/prompt.js):
+ * lore selection (#14), rolling memories (#13), history budget (#12),
+ * prompt cleanups (#15).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, readLlmSettings, responseTokensFor } from '../lib/prompt.js';
+import {
+  buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, readLlmSettings, responseTokensFor,
+  triggerMatches, selectLore, selectHistory, estimateTokens, memoryDue, messagesSinceLastMemory, htmlToText,
+} from '../lib/prompt.js';
 
 const llm = readLlmSettings(() => '');
-const scenario = {
+const lore = (title, over = {}) => ({ title, content: `${title} lore.`, pinned: false, smartActivation: true, triggers: [], weight: 100, ...over });
+const scenario = (over = {}) => ({
   backstory: 'A harbour town where {{user}} arrives.',
   customInstructions: '',
-  characters: [{ name: 'Mara', description: 'Ferry keeper', personality: 'Dry wit' }],
-  lorePieces: [
-    { title: 'Lighthouse', content: 'Always lit.', pinned: true, smartActivation: false, triggers: [] },
-    { title: 'Curse', content: 'Bound to the tide.', pinned: false, smartActivation: true, triggers: ['tide'] },
-  ],
-};
+  characters: [{ name: 'Mara', description: 'Ferry keeper.', personality: 'Dry wit.' }],
+  lorePieces: [lore('Lighthouse', { pinned: true, smartActivation: false }), lore('Curse', { triggers: ['tide'] })],
+  settings: {},
+  ...over,
+});
 const chat = (over = {}) => ({
   settings: { responseLength: 'short', customInstructions: '' },
   userCharacter: { name: 'Rin', description: 'A wanderer' },
@@ -22,38 +27,162 @@ const chat = (over = {}) => ({
   messages: [],
   ...over,
 });
+const msg = (role, content, timestamp = 0) => ({ role, content, timestamp });
 
 test('defaults when nothing is configured', () => {
   assert.equal(llm.temperature, 1.3);
-  assert.equal(llm.memorySendInterval, 25);
+  assert.equal(llm.memoryGenerateInterval, 25);
+  assert.equal(llm.contextTokenBudget, 32000);
+  assert.equal(llm.loreActiveMax, 5);
   assert.equal(responseTokensFor('long', llm), 2000);
   assert.equal(responseTokensFor(undefined, llm), 800);
 });
 
-test('chat prompt: system prompt, history, then global rules last', () => {
-  const messages = [{ role: 'user', content: 'I watch the tide, says {{user}}' }];
-  const { messages: out, maxTokens } = buildChatPrompt({ messages, scenario, chat: chat({ messages }), llm });
+// ── Prompt layout and cleanups (#15) ──
+test('system prompt, history, then global rules last', () => {
+  const messages = [msg('user', 'I watch the tide, says {{user}}')];
+  const { messages: out, maxTokens } = buildChatPrompt({ messages, scenario: scenario(), chat: chat(), llm });
   assert.equal(maxTokens, 300);
   assert.equal(out.length, 3);
   assert.match(out[0].content, /A harbour town where Rin arrives\./);
-  assert.match(out[0].content, /- Lighthouse: Always lit\./);
-  assert.match(out[0].content, /- Curse: Bound to the tide\./, 'triggered lore is included');
   assert.equal(out[1].content, 'I watch the tide, says Rin');
   assert.match(out[2].content, /^--- GLOBAL LLM INSTRUCTIONS/);
   assert.match(out[2].content, /Never speak for or act as Rin\./);
 });
 
-test('untriggered smart lore is left out', () => {
-  const messages = [{ role: 'user', content: 'Hello' }];
-  const { messages: out } = buildChatPrompt({ messages, scenario, chat: chat({ messages }), llm });
-  assert.ok(!out[0].content.includes('Curse'));
+test('cast lines have no doubled punctuation', () => {
+  const { messages: out } = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario(), chat: chat(), llm });
+  assert.match(out[0].content, /- Mara: Ferry keeper\. Personality: Dry wit\./);
+  assert.ok(!out[0].content.includes('..'));
 });
 
-test('memory and scenario generation prompts', () => {
-  const m = buildMemoryPrompt([{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }], 80);
+test('length guidance is concrete', () => {
+  const { messages: out } = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario(), chat: chat(), llm });
+  assert.match(out[2].content, /Length: about 210 words or fewer \(short\)/);
+});
+
+test('the asterisk formatting rule can be turned off per scenario', () => {
+  const on = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario(), chat: chat(), llm }).messages[2].content;
+  const off = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario({ settings: { asteriskFormatting: false } }), chat: chat(), llm }).messages[2].content;
+  assert.match(on, /\*asterisks\*/);
+  assert.ok(!off.includes('*asterisks*'));
+});
+
+test('system notices in the chat are not sent to the AI', () => {
+  const messages = [msg('assistant', 'Hello'), msg('system', '[System: Persona changed]'), msg('user', 'Hi')];
+  const { messages: out } = buildChatPrompt({ messages, scenario: scenario(), chat: chat(), llm });
+  assert.ok(!out.some(m => m.content.includes('Persona changed')));
+  assert.equal(out.length, 4);
+});
+
+test('the introduction is sent only when the author opts in', () => {
+  const s = { introduction: '<h1>Welcome</h1><p>The &quot;fog&quot; rolls in.</p>' };
+  const off = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario(s), chat: chat(), llm }).messages[0].content;
+  const on = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario({ ...s, settings: { sendIntroduction: true } }), chat: chat(), llm }).messages[0].content;
+  assert.ok(!off.includes('fog'));
+  assert.match(on, /SCENARIO INTRODUCTION[\s\S]*Welcome\nThe "fog" rolls in\./);
+  assert.equal(htmlToText('<p>a</p><p>b&amp;c</p>'), 'a\nb&c');
+});
+
+// ── Lore (#14) ──
+test('triggers match whole words only, case-insensitive, any script', () => {
+  assert.equal(triggerMatches('Art is long', 'art'), true);
+  assert.equal(triggerMatches('what a party', 'art'), false);
+  assert.equal(triggerMatches('the Dark Forest looms', 'dark forest'), true);
+  assert.equal(triggerMatches('a café opens', 'café'), true);
+  assert.equal(triggerMatches('cafés', 'café'), false);
+  assert.equal(triggerMatches('price (5$)', '5$'), true, 'regex characters are literal');
+  assert.equal(triggerMatches('anything', ''), false);
+});
+
+test('only recent messages trigger lore', () => {
+  const pieces = [lore('Curse', { triggers: ['tide'] })];
+  const old = [msg('user', 'the tide rises'), ...Array.from({ length: 10 }, () => msg('assistant', 'quiet'))];
+  assert.equal(selectLore(pieces, old, [], llm).triggered.length, 0, 'mentioned 11 messages ago');
+  assert.equal(selectLore(pieces, old.slice(-5).concat(msg('user', 'tide!')), [], llm).triggered.length, 1);
+});
+
+test('lore is ordered by weight and capped', () => {
+  const pieces = Array.from({ length: 8 }, (_, i) => lore(`L${i}`, { triggers: ['go'], weight: i * 10 }));
+  const { triggered } = selectLore(pieces, [msg('user', 'go')], [], llm);
+  assert.deepEqual(triggered.map(p => p.title), ['L7', 'L6', 'L5', 'L4', 'L3']);
+  const pinned = Array.from({ length: 12 }, (_, i) => lore(`P${i}`, { pinned: true }));
+  assert.equal(selectLore(pinned, [], [], llm).pinned.length, 10);
+});
+
+test('character lore that repeats a cast member is skipped', () => {
+  const pieces = [lore('Mara', { type: 'character', pinned: true }), lore('Harbour', { pinned: true })];
+  const { pinned } = selectLore(pieces, [], [{ name: 'Mara' }], llm);
+  assert.deepEqual(pinned.map(p => p.title), ['Harbour']);
+});
+
+// ── Memories (#13) ──
+test('all memories are sent every turn, oldest first', () => {
+  const memories = [
+    { content: 'Second', pinned: false, timestamp: 2 },
+    { content: 'Key fact', pinned: true, timestamp: 0 },
+    { content: 'First', pinned: false, timestamp: 1 },
+  ];
+  const sys = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario(), chat: chat({ memories }), llm }).messages[0].content;
+  assert.match(sys, /- \[PINNED\] Key fact\n- First\n- Second/);
+  assert.ok(!sys.includes('memories available'));
+});
+
+test('a memory covers everything since the previous one', () => {
+  const messages = [
+    msg('user', 'a', 1), msg('assistant', 'b', 2), msg('user', 'c', 3), msg('system', 'notice', 4),
+    msg('user', '*continue*', 5), msg('assistant', 'd', 6),
+  ];
+  const c = chat({ messages, memories: [{ content: 'm', pinned: false, timestamp: 99, coveredUntil: 2 }] });
+  assert.deepEqual(messagesSinceLastMemory(c).map(m => m.content), ['c', 'd']);
+  // Older memories without coveredUntil count from when they were made
+  assert.deepEqual(messagesSinceLastMemory(chat({ messages, memories: [{ content: 'm', timestamp: 5 }] })).map(m => m.content), ['d']);
+});
+
+test('a memory is due after enough real user messages since the last one', () => {
+  const few = { ...llm, memoryGenerateInterval: 3 };
+  const messages = [msg('user', 'a', 1), msg('user', '*continue*', 2), msg('user', 'b', 3)];
+  assert.equal(memoryDue(chat({ messages }), few), false, '*continue* does not count');
+  assert.equal(memoryDue(chat({ messages: [...messages, msg('user', 'c', 4)] }), few), true);
+  assert.equal(memoryDue(chat({ messages: [...messages, msg('user', 'c', 4)], memories: [{ timestamp: 9, coveredUntil: 4 }] }), few), false);
+});
+
+test('memory prompt summarises the given messages', () => {
+  const m = buildMemoryPrompt([msg('user', 'a'), msg('assistant', 'b')], 80);
   assert.match(m.messages[0].content, /max 80 words/);
   assert.equal(m.messages[1].content, 'user: a\nassistant: b');
   assert.equal(m.maxTokens, 160);
+});
+
+// ── History budget (#12) ──
+test('token estimate is conservative for English and other scripts', () => {
+  assert.ok(estimateTokens('hello world') >= 3);
+  assert.ok(estimateTokens('こんにちは') >= 5);
+});
+
+test('the newest history that fits the budget is sent, the rest is noted', () => {
+  const long = 'word '.repeat(400); // ~ 570 tokens each
+  const messages = Array.from({ length: 200 }, (_, i) => msg(i % 2 ? 'assistant' : 'user', `${i}: ${long}`));
+  const small = { ...llm, contextTokenBudget: 12000 };
+  const { messages: out, omitted } = buildChatPrompt({ messages, scenario: scenario(), chat: chat(), llm: small });
+  assert.ok(omitted > 150, `omitted ${omitted}`);
+  assert.ok(out[1].content.startsWith(`${omitted}: `), 'history starts right after the omitted part');
+  assert.ok(out[out.length - 2].content.startsWith('199: '), 'the newest message is always sent');
+  assert.match(out[0].content, new RegExp(`NOTE: The ${omitted} earliest messages`));
+  const total = out.reduce((n, m) => n + estimateTokens(m.content), 0) + 300;
+  assert.ok(total <= 12000, `prompt ~${total} tokens`);
+  // A short chat sends everything and no note
+  const short = buildChatPrompt({ messages: messages.slice(-4), scenario: scenario(), chat: chat(), llm });
+  assert.equal(short.omitted, 0);
+  assert.ok(!short.messages[0].content.includes('NOTE:'));
+});
+
+test('selectHistory always keeps the last message', () => {
+  const { history } = selectHistory([msg('user', 'x'.repeat(100000))], 10);
+  assert.equal(history.length, 1);
+});
+
+test('scenario generation prompt', () => {
   const g = buildScenarioGenerationPrompt('Pirates');
   assert.equal(g.messages[1].content, 'Pirates');
   assert.equal(g.maxTokens, 4000);

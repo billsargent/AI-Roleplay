@@ -67,8 +67,8 @@ import {
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
-import { validateCompletionRequest, relayCompletion, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
-import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt } from './lib/prompt.js';
+import { validateCompletionRequest, relayCompletion, completeOnce, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
+import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -951,7 +951,11 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const registrationOpen = getSystemSetting('registrationOpen') !== 'false';
   const rateLimitMax = getSystemSetting('rateLimitMax') || '1000';
   const deepseekThinking = getSystemSetting('deepseekThinking') || '';
-  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking });
+  const contextTokenBudget = getSystemSetting('contextTokenBudget');
+  const loreScanDepth = getSystemSetting('loreScanDepth');
+  const loreActiveMax = getSystemSetting('loreActiveMax');
+  const lorePinnedMax = getSystemSetting('lorePinnedMax');
+  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax });
 
 
 
@@ -960,6 +964,12 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
 /** POST /api/system/settings — Updates system settings (admin only) */
 app.post('/api/system/settings', adminAuth, (req, res) => {
   const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking } = req.body;
+  // Engine limits: whole numbers within sensible ranges
+  for (const [key, min, max] of [['contextTokenBudget', 4000, 1000000], ['loreScanDepth', 1, 200], ['loreActiveMax', 0, 50], ['lorePinnedMax', 0, 100]]) {
+    if (req.body[key] === undefined) continue;
+    const n = Math.round(Number(req.body[key]));
+    if (Number.isFinite(n) && n >= min && n <= max) setSystemSetting(key, String(n));
+  }
   // Ignore an echoed masked key so it can never overwrite the real one
   if (typeof deepseekKey === 'string' && deepseekKey.trim() && !deepseekKey.includes('…')) {
     setSystemSetting('deepseekKey', deepseekKey.trim());
@@ -1162,16 +1172,53 @@ app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
 });
 
 /**
- * POST /api/chats/:id/memory — Summarises recent messages into a memory
- * card. Returns the DeepSeek completion; the client adds it to the chat.
+ * POST /api/chats/:id/memory — Writes a memory card covering everything
+ * since the previous memory (rolling memories).
+ * Body: { auto?: boolean }. With auto, a memory is only made once enough
+ * real user messages arrived (memoryGenerateInterval); otherwise the
+ * response is { skipped: true } and no AI call is made.
+ * Returns { memory: { id, content, pinned, timestamp, coveredUntil } };
+ * the client adds it to the chat and saves.
  */
-app.post('/api/chats/:id/memory', auth, llmLimiter, async (req, res) => {
+app.post('/api/chats/:id/memory', auth, async (req, res, next) => {
   const chat = loadOwnChatForAi(req, res);
   if (!chat) return;
-  if (chat.messages.length === 0) return res.status(400).json({ error: 'Nothing to summarise yet' });
   const llm = readLlmSettings(getSystemSetting);
-  const { messages, maxTokens, temperature } = buildMemoryPrompt(chat.messages, llm.memoryWordCount);
-  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Memory' });
+  if (req.body?.auto && !memoryDue(chat, llm)) return res.json({ skipped: true });
+
+  let source = messagesSinceLastMemory(chat);
+  // Manual request with nothing new: summarise the most recent part instead
+  if (source.length === 0) source = chat.messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-10);
+  if (source.length === 0) return res.status(400).json({ error: 'Nothing to summarise yet' });
+
+  // Only now count it against the AI limit
+  llmLimiter(req, res, async () => {
+    const deepseekKey = getSystemSetting('deepseekKey');
+    if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+    try {
+      const { messages, maxTokens, temperature } = buildMemoryPrompt(source, llm.memoryWordCount);
+      const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature }, {
+        model: getSystemSetting('deepseekModel') || DEFAULT_MODEL,
+        maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
+        thinking: getSystemSetting('deepseekThinking') || '',
+      });
+      debugLogLlmPrompt(req.userId, params, 'Memory');
+      const content = (await completeOnce(params, { apiKey: deepseekKey })).trim();
+      if (!content) return res.status(502).json({ error: 'The AI returned an empty memory' });
+      res.json({
+        memory: {
+          id: crypto.randomUUID(),
+          content,
+          pinned: false,
+          timestamp: Date.now(),
+          coveredUntil: Math.max(...source.map(m => Number(m.timestamp) || 0)),
+        },
+      });
+    } catch (err) {
+      if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+      next(err);
+    }
+  });
 });
 
 /**
