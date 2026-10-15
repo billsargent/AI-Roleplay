@@ -171,6 +171,8 @@ function initTables() {
   addColumnIfMissing('personas', 'avatar_path', "TEXT DEFAULT ''");
   // Session revocation: tokens issued before this time (ms) are rejected
   addColumnIfMissing('users', 'password_changed_at', 'INTEGER DEFAULT 0');
+  // Which of a message's alternative versions is shown
+  addColumnIfMissing('messages', 'current_version_index', 'INTEGER DEFAULT 0');
 
   // ── Indexes for the lookups every page makes ──
   db.exec(`
@@ -800,9 +802,36 @@ function enrichChat(chat) {
     userCharacter,
     settings,
     createdAt: chat.created_at,
-    messages,
-    memories,
+    // Shapes match the Message / Memory types in src/types/index.ts
+    messages: messages.map(m => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      timestamp: m.timestamp,
+      characterName: m.character_name || undefined,
+      versions: parseVersions(m.versions),
+      currentVersionIndex: m.current_version_index ?? 0,
+    })),
+    memories: memories.map(m => ({
+      id: m.id,
+      content: m.content,
+      pinned: !!m.pinned,
+      timestamp: m.timestamp,
+    })),
   };
+}
+
+/**
+ * Message versions as an array of strings. Older saves double-encoded the
+ * JSON (the raw string was sent back and stringified again), so unwrap
+ * until an array appears.
+ */
+function parseVersions(value) {
+  let v = value;
+  for (let i = 0; i < 5 && typeof v === 'string'; i++) {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  return Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
 }
 
 /**
@@ -826,11 +855,14 @@ export function saveChatTransaction(chat) {
     // Replace all messages for this chat
     if (chat.messages) {
       db.prepare(`DELETE FROM messages WHERE chat_id = ?`).run(chat.id);
-      const insertMsg = db.prepare(`INSERT INTO messages (id, chat_id, role, content, timestamp, character_name, versions) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      const insertMsg = db.prepare(`INSERT INTO messages (id, chat_id, role, content, timestamp, character_name, versions, current_version_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const m of chat.messages) {
+        const versions = parseVersions(m.versions);
+        const index = Number.isInteger(m.currentVersionIndex) ? m.currentVersionIndex : 0;
         insertMsg.run(
           m.id, chat.id, m.role, m.content || '', m.timestamp || Date.now(),
-          m.characterName || '', JSON.stringify(m.versions || [])
+          m.characterName || '', JSON.stringify(versions),
+          Math.min(Math.max(index, 0), Math.max(versions.length - 1, 0))
         );
       }
     }

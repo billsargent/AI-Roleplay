@@ -15,8 +15,10 @@ export interface Scenario {
   creatorName?: string;
   name: string;
   description: string;
-  /** Base64 or URL scenario image */
+  /** Image URL: "/api/images/..." for uploaded files, a web URL, or a base64 data URL before saving */
   image?: string;
+  /** Relative file path of the uploaded image (set by the server) */
+  imagePath?: string;
   tags: string[];
   backstory: string;
   /** Rich text HTML content for the scenario introduction */
@@ -36,8 +38,10 @@ export interface StoryCharacter {
   name: string;
   description: string;
   personality: string;
-  /** Base64 or URL character avatar */
+  /** Image URL: "/api/images/..." for uploaded files, a web URL, or a base64 data URL before saving */
   avatar?: string;
+  /** Relative file path of the uploaded avatar (set by the server) */
+  avatarPath?: string;
 }
 
 /** A registered user (returned by the API, includes personas) */
@@ -46,6 +50,7 @@ export interface User {
   username: string;
   role: 'admin' | 'user';
   personas: Persona[];
+  createdAt?: number;
 }
 
 /** A user-created persona used when roleplaying as a character in a scenario */
@@ -53,8 +58,10 @@ export interface Persona {
   id: string;
   name: string;
   description: string;
-  /** Base64 or URL persona avatar */
+  /** Image URL: "/api/images/..." for uploaded files, a web URL, or a base64 data URL before saving */
   avatar?: string;
+  /** Relative file path of the uploaded avatar (set by the server) */
+  avatarPath?: string;
 }
 
 /** Thematic category for a lore piece */
@@ -65,7 +72,8 @@ export interface LorePiece {
   id: string;
   type: LorePieceType;
   title: string;
-  description: string;
+  /** Not stored by the server; kept for imported files */
+  description?: string;
   content: string;
   /** Priority weight (higher = more important) */
   weight: number;
@@ -81,8 +89,10 @@ export interface LorePiece {
   triggers: string[];
   /** IDs of other lore pieces linked to this one (e.g., a location linked to an event) */
   linkedPieces: string[];
-  /** Base64 or URL lore image */
+  /** Image URL: "/api/images/..." for uploaded files */
   avatar?: string;
+  /** Relative file path of the uploaded image (set by the server) */
+  avatarPath?: string;
 }
 
 /** Toggleable scenario behavior flags */
@@ -107,7 +117,8 @@ export interface ScenarioSettings {
 export interface Chat {
   id: string;
   userId?: string;
-  scenarioId: string;
+  /** null once the scenario has been permanently deleted (the chat stays readable) */
+  scenarioId: string | null;
   title: string;
   messages: Message[];
   memories: Memory[];
@@ -134,7 +145,7 @@ export interface Message {
   characterName?: string;
   /** Alternative message versions (for undo/edit) */
   versions?: string[];
-  /** Index of the currently active version */
+  /** Index of the currently active version (stored by the server) */
   currentVersionIndex?: number;
 }
 

@@ -146,3 +146,33 @@ test('migration dry run changes nothing; live run backs up, extracts and clears 
   assert.equal(db.prepare('SELECT image FROM scenarios WHERE id = ?').get(leftover.id).image, '');
   assert.ok(fs.readdirSync(dir).some(f => f.startsWith('test.sqlite.backup-')), 'no backup written');
 });
+
+test('chats round-trip with the shapes the frontend types describe', () => {
+  const chatId = randomUUID();
+  const s = scenario();
+  dbm.saveScenarioTransaction(s);
+  const chat = {
+    id: chatId, userId, scenarioId: s.id, title: 't', settings: {}, createdAt: Date.now(),
+    messages: [
+      { id: randomUUID(), role: 'user', content: 'hi', timestamp: 1 },
+      { id: randomUUID(), role: 'assistant', content: 'b', timestamp: 2, characterName: 'Oracle', versions: ['a', 'b'], currentVersionIndex: 1 },
+    ],
+    memories: [{ id: randomUUID(), content: 'm', pinned: true, timestamp: 3 }],
+  };
+  dbm.saveChatTransaction(chat);
+  const got = dbm.getChatById(chatId);
+  assert.deepEqual(got.messages[1].versions, ['a', 'b']);
+  assert.equal(got.messages[1].currentVersionIndex, 1);
+  assert.equal(got.messages[1].characterName, 'Oracle');
+  assert.equal(got.messages[1].character_name, undefined, 'raw column names leaked');
+  assert.equal(got.memories[0].pinned, true);
+
+  // Saving what was loaded must not re-encode versions (it used to grow on every save)
+  dbm.saveChatTransaction(got);
+  dbm.saveChatTransaction(dbm.getChatById(chatId));
+  assert.equal(db.prepare('SELECT versions FROM messages WHERE chat_id = ? AND role = ?').get(chatId, 'assistant').versions, '["a","b"]');
+
+  // Rows already double-encoded by older saves are repaired when read
+  db.prepare(`UPDATE messages SET versions = ? WHERE chat_id = ? AND role = 'user'`).run(JSON.stringify(JSON.stringify(['x'])), chatId);
+  assert.deepEqual(dbm.getChatById(chatId).messages[0].versions, ['x']);
+});
