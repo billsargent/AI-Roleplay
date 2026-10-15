@@ -68,6 +68,7 @@ import {
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
+import { parseFictionlab } from './lib/fictionlab.js';
 import { validateCompletionRequest, relayCompletion, completeOnce, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
 import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, buildLoreSuggestPrompt, parseLoreSuggestions, buildEnhancePrompt, cleanEnhanced, ENHANCE_FIELDS, MAX_ENHANCE_CHARS, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
 
@@ -218,6 +219,7 @@ const largeBody = express.json({ limit: MAX_JSON_BODY_SIZE });
 const mediumBody = express.json({ limit: MEDIUM_JSON_BODY_SIZE });
 const ROUTE_PARSED_BODIES = new Set([
   'POST /api/scenarios',
+  'POST /api/import/fictionlab',
   'POST /api/chats',
   'POST /api/personas',
 ]);
@@ -588,7 +590,11 @@ app.get('/api/scenarios/:id', auth, (req, res) => {
  */
 function scenarioForViewer(scenario) {
   if (scenario.settings?.allowCustomization) return scenario;
-  const visible = { ...scenario, lorePieces: (scenario.lorePieces || []).filter(p => !p.hidden) };
+  const visible = {
+    ...scenario,
+    lorePieces: (scenario.lorePieces || []).filter(p => !p.hidden),
+    characters: (scenario.characters || []).filter(c => !c.hidden),
+  };
   if (scenario.settings?.hidePrompts) {
     visible.backstory = '';
     visible.customInstructions = '';
@@ -597,6 +603,26 @@ function scenarioForViewer(scenario) {
   }
   return visible;
 }
+
+/**
+ * POST /api/import/fictionlab — Turns a Fictionlab export into a scenario draft.
+ * Body: { file: <the parsed export file> }. Nothing is saved; the editor shows
+ * the draft, downloads the listed images and saves as usual.
+ * Returns { draft, report, imageUrls } (see lib/fictionlab.js).
+ */
+app.post('/api/import/fictionlab', auth, mediumBody, (req, res) => {
+  const file = req.body?.file;
+  const result = parseFictionlab(file);
+  if (!result) {
+    const chatExport = file && typeof file === 'object' && Array.isArray(file.messages) && file.scenario && !file.scenario.lorePieces;
+    return res.status(400).json({
+      error: chatExport
+        ? 'This file is a chat export, not a scenario. Export the scenario itself from Fictionlab.'
+        : 'This file does not look like a Fictionlab scenario export.',
+    });
+  }
+  res.json(result);
+});
 
 /**
  * POST /api/scenarios

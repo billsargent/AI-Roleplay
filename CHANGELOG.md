@@ -16,6 +16,9 @@
 
 - **AI Enhance** (#37): an Enhance button beside the editor's text fields fixes spelling, grammar and clarity while keeping your wording, facts, names and `{{user}}`; "Also make it more vivid" is opt-in. You see every change word by word and nothing is replaced until you accept; Undo puts the old text back for a minute.
 
+- **Fictionlab import rewritten** (#42): one server-side parser reads every export shape (top level, wrapped in `scenario`/`data`, and saved sessions) and both old and new field names. Lore keeps its type, one-line description, traits, start location, pictures and working links; Fictionlab weights 1-5 become 20-100; `{{char}}` is replaced with the character name; very old story cards become lore; rule cards that could never trigger move into Custom AI Instructions; character sub-pieces ("Name: ...") stay lore instead of becoming always-sent cast members. Chat exports are recognised and refused with a clear message.
+- Scenarios remember the Fictionlab id they came from (for re-imports); characters can be hidden from other players like lore.
+
 ### Changed
 - The default temperature is 1.0 (was 1.3); the help text recommends 0.8–1.2 for roleplay.
 

@@ -17,7 +17,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Copy & Customize** — Fork any public scenario and make it your own
 - **Tag-Based Discovery** — Search and browse community scenarios by name, tags, or creator
 - **Scenario Detail View** — Inspect full backstory, character profiles, and lore before playing
-- **Scenario Import** — Import scenarios from external sources (currently supports Fictionlab format)
+- **Scenario Import** — Import Fictionlab exports (every known export shape), keeping lore types, descriptions, traits, pictures and links
 
 ### 🤖 AI Chat & Roleplay
 - **Real-Time Streaming** — AI responses stream character-by-character via Server-Sent Events (SSE) for instant feedback
@@ -196,6 +196,7 @@ AI-Roleplay/
 ├── lib/
 │   ├── deepseek.js           # Server-side AI request validation and streaming relay
 │   ├── prompt.js             # Prompt builder: history budget, lore selection, memories
+│   ├── fictionlab.js         # Fictionlab export parser (all export shapes)
 │   ├── imageType.js          # Detects image type from file bytes
 │   ├── safeImageFetch.js     # SSRF-safe remote image download (import flow)
 │   └── sanitizeHtml.js       # Server-side rich text sanitizing
@@ -271,6 +272,7 @@ AI-Roleplay/
 | GET | `/api/scenarios` | Auth | List accessible scenarios (`?page`, `?limit`, `?tab=explore\|mine-public\|mine-private`, `?q=` search) |
 | GET | `/api/scenarios/:id` | Auth | Get scenario with characters + lore |
 | POST | `/api/scenarios` | Auth | Create/update scenario |
+| POST | `/api/import/fictionlab` | Auth | Turn a Fictionlab export into a scenario draft (nothing saved) |
 | DELETE | `/api/scenarios/:id` | Auth | Delete own scenario (or admin) |
 
 ### Chats

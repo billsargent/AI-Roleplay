@@ -62,6 +62,7 @@ export const CreateScenario: React.FC = () => {
           ...initialScenario,
           id: uuidv4(),
           name: `${initialScenario.name} (Copy)`,
+          sourceId: undefined,
           userId: user?.id,
           creatorName: user?.username,
           createdAt: Date.now(),
@@ -201,120 +202,46 @@ export const CreateScenario: React.FC = () => {
 
     showToast('📥 Importing scenario with images...', 'info');
 
-    // Imported files are untrusted: coerce every field to the expected type
-    const str = (v: unknown): string => (typeof v === 'string' ? v : '');
-    const strArr = (v: unknown): string[] =>
-      Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-    const arr = (v: unknown): any[] => (Array.isArray(v) ? v.filter(x => x && typeof x === 'object') : []);
-
     const reader = new FileReader();
     reader.onload = async (ev) => {
+      let json: unknown;
       try {
-        const data = JSON.parse(ev.target?.result as string);
-        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Not a scenario object');
+        json = JSON.parse(ev.target?.result as string);
+      } catch {
+        showToast('Import failed: the file is not valid JSON', 'error');
+        return;
+      }
+      try {
+        // The server reads every Fictionlab export shape (see lib/fictionlab.js)
+        const { draft, report, imageUrls } = await apiService.parseFictionlab(json);
+        const download = async (url?: string) => (url ? urlToBase64(flImageUrl(url)).catch(() => '') : '');
         const imported: Scenario = {
+          ...draft,
           id: uuidv4(),
           userId: user?.id,
           creatorName: user?.username,
-          name: str(data.displayName) || str(data.name) || 'Imported Scenario',
-          description: str(data.description),
-          tags: strArr(data.genres).length ? strArr(data.genres) : strArr(data.tags),
-          backstory: str(data.backStory),
-          greetingMessage: str(data.customGreeting),
-          customInstructions: str(data.customInstructions),
-          lorePieces: [],
-          characters: [],
-          settings: {
-            separateUserCharacter: data.separateUser !== undefined ? !!data.separateUser : true,
-            sensitiveContent: !!data.sensitiveContent,
-            isPublic: data.isPublic !== undefined ? !!data.isPublic : true,
-            allowCustomization: data.allowEditing !== undefined ? !!data.allowEditing : true,
-            hidePrompts: !!data.hidePrompts,
-            allowCommenting: data.allowComments !== undefined ? !!data.allowComments : true,
-          },
           createdAt: Date.now(),
+          image: await download(imageUrls.cover),
+          introduction: draft.introduction ? await embedImagesInHtml(draft.introduction) : '',
+          characters: await Promise.all(draft.characters.map(async c => ({ ...c, avatar: await download(imageUrls.characters[c.id]) }))),
+          lorePieces: await Promise.all(draft.lorePieces.map(async p => ({ ...p, avatar: await download(imageUrls.lore[p.id]) }))),
         };
-
-        // ── 1. Download scenario cover image ──
-        if (str(data.mainImage)) {
-          imported.image = await urlToBase64(flImageUrl(data.mainImage));
-        }
-        if (!imported.image && str(data.avatarURL)) {
-          imported.image = await urlToBase64(flImageUrl(data.avatarURL));
-        }
-
-        // ── 2. Download and embed introduction images ──
-        if (str(data.customIntroduction)) {
-          imported.introduction = await embedImagesInHtml(data.customIntroduction);
-        }
-
-        // ── 3. Import lore pieces ──
-        const loreTypes = ['character', 'location', 'object', 'event', 'other'];
-        const loreData = arr(data.lorePieces);
-        // Pieces get new ids; links in the file point at the old ones
-        const newLoreId = new Map<string, string>(loreData.map((lp: any) => [str(lp.id), uuidv4()]));
-        imported.lorePieces = loreData.map((lp: any) => ({
-          id: newLoreId.get(str(lp.id)) || uuidv4(),
-          type: loreTypes.includes(lp.type) ? lp.type : 'other',
-          title: str(lp.title),
-          description: str(lp.description),
-          content: str(lp.content),
-          weight: typeof lp.weight === 'number' && Number.isFinite(lp.weight) ? lp.weight : 100,
-          pinned: !!lp.pinned,
-          smartActivation: lp.smartActivation !== undefined ? !!lp.smartActivation : true,
-          triggers: strArr(lp.triggers),
-          linkedPieces: strArr(lp.linkedPieces).map(id => newLoreId.get(id)).filter((id): id is string => !!id),
-        }));
-
-        // ── 4. Import characters from "characters" array ──
-        const charData = arr(data.characters);
-        if (charData.length > 0) {
-          imported.characters = await Promise.all(
-            charData.map(async (c: any) => {
-              let avatar = '';
-              if (str(c.avatarURL)) {
-                avatar = await urlToBase64(flImageUrl(c.avatarURL));
-              }
-              return {
-                id: uuidv4(),
-                name: str(c.displayName) || str(c.name) || 'Unknown',
-                description: str(c.description),
-                personality: str(c.personality) || strArr(c.traits).join(', '),
-                avatar,
-              };
-            })
-          );
-        }
-
-        // ── 5. Create character entries from lore pieces of type 'character' ──
-        const charLorePieces = loreData.filter((lp: any) => lp.type === 'character');
-        for (const lp of charLorePieces) {
-          if (!imported.characters.find(c => c.name === lp.title)) {
-            let avatar = '';
-            if (str(lp.avatarURL)) {
-              avatar = await urlToBase64(flImageUrl(lp.avatarURL));
-            }
-            imported.characters.push({
-              id: uuidv4(),
-              name: str(lp.title) || 'Unknown',
-              description: str(lp.content),
-              personality: strArr(lp.traits).join(', '),
-              avatar,
-            });
-          }
-        }
 
         setScenario(imported);
         setRteKey(prev => prev + 1);
         setDirty(true);
-        showToast('✅ Import successful! All images downloaded and embedded.', 'success');
-      } catch (err) {
-        showToast('Import failed: Invalid JSON file', 'error');
+        const notes = [
+          `${imported.lorePieces.length} lore cards, ${imported.characters.length} characters`,
+          report.mergedRules.length ? `${report.mergedRules.length} rule card(s) moved into Custom AI Instructions` : '',
+          report.noTriggers.length ? `${report.noTriggers.length} card(s) have no trigger words yet` : '',
+        ].filter(Boolean);
+        showToast(`✅ Imported: ${notes.join('; ')}. Review, then save.`, 'success');
+      } catch (err: any) {
+        showToast(`Import failed: ${err?.message || 'unknown error'}`, 'error');
         console.error('Import error:', err);
       }
     };
     reader.readAsText(file);
-    e.target.value = '';
   };
 
   /** Updates a subset of scenario fields. */

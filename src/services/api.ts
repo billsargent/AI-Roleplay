@@ -12,6 +12,24 @@
  */
 
 import axios from 'axios';
+import { Scenario } from '../types';
+
+/** What the server makes of a Fictionlab export (see lib/fictionlab.js) */
+export interface FictionlabImport {
+  draft: Omit<Scenario, 'id' | 'createdAt' | 'image'> & { sourceId?: string };
+  report: {
+    pieces: number;
+    rescaledWeights: boolean;
+    mergedRules: string[];
+    noTriggers: string[];
+    subPieces: string[];
+    storyCards: number;
+    charReplaced: number;
+    droppedLinks: number;
+  };
+  /** Remote images to download: cover, avatars by character/lore id, introduction images */
+  imageUrls: { cover: string; characters: Record<string, string>; lore: Record<string, string>; introduction: string[] };
+}
 
 /**
  * Pre-configured Axios instance with base URL pointing to the server API.
@@ -279,6 +297,20 @@ export const apiService = {
   saveScenario: async (scenario: any) => {
     const response = await api.post('/scenarios', scenario);
     return response.data;
+  },
+
+  /**
+   * Turns a Fictionlab export (the parsed file) into a scenario draft on the
+   * server. Nothing is saved. Throws with the server's message if the file is
+   * not a scenario.
+   */
+  parseFictionlab: async (file: unknown): Promise<FictionlabImport> => {
+    try {
+      const response = await api.post('/import/fictionlab', { file });
+      return response.data;
+    } catch (e: any) {
+      throw new Error(e?.response?.data?.error || 'Could not read this file');
+    }
   },
 
   /**
