@@ -578,13 +578,13 @@ export const ChatPage: React.FC = () => {
             ) : (
               <div key={m.id} className={`group flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
                 {/* Message header: avatar, name, timestamp, actions */}
-                <div className={`flex items-center gap-2 mb-1 px-1 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
-                  {m.role === 'assistant' && (
-                    <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold">
-                      AI
-                    </div>
-                  )}
-                  <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">
+                <div className={`flex items-center gap-2 mb-1.5 px-1 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                  <Avatar
+                    image={m.role === 'assistant' ? scenario?.image : chat.userCharacter?.avatar}
+                    name={m.role === 'assistant' ? (m.characterName || scenario?.name || 'AI') : (chat.userCharacter?.name || 'You')}
+                    accent={m.role === 'assistant'}
+                  />
+                  <span className="text-[11px] uppercase font-bold tracking-widest text-zinc-400">
                     {m.role === 'assistant' ? (m.characterName || scenario?.name || 'AI') : (chat.userCharacter?.name || 'YOU')}
                   </span>
                   <span className="text-[10px] text-zinc-600">
@@ -595,15 +595,15 @@ export const ChatPage: React.FC = () => {
 
                 {/* Message bubble with dialog/narration color highlighting */}
                 <div
-                  className={`rounded-2xl p-4 shadow-sm ${
+                  className={`rounded-2xl px-4 py-3 sm:px-5 sm:py-4 ${
                     m.role === 'user'
-                      ? 'max-w-[85%] text-white rounded-tr-none'
-                      : 'w-full bg-zinc-900 border border-zinc-800 rounded-tl-none'
+                      ? 'max-w-[85%] text-white rounded-tr-md shadow-sm'
+                      : 'w-full bg-zinc-900/60 ring-1 ring-white/5 text-zinc-200 rounded-tl-md'
                   }`}
                   style={m.role === 'user' ? { backgroundColor: chatBubbleColor } : narrationColor ? { color: narrationColor } : {}}
                 >
                   {/* Parse *italic* and "dialogue" markers for color styling */}
-                  <div className="whitespace-pre-wrap break-words leading-relaxed message-content">
+                  <div className="whitespace-pre-wrap break-words text-[15px] sm:text-base leading-7 message-content">
                     {m.content.split(/(\*[^*]+\*|"[^"]*")/g).map((part, i) => {
                       if (part.startsWith('*') && part.endsWith('*')) {
                         return <em key={i} style={{ color: narrationColor || undefined }}>{part.slice(1, -1)}</em>;
@@ -636,7 +636,7 @@ export const ChatPage: React.FC = () => {
               <div className="flex justify-center">
                 <button
                   onClick={() => sendMessage('*continue*')}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-purple-500/30 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:border-purple-500/50 hover:text-purple-300 transition-all text-xs font-bold"
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-indigo-500/30 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 hover:border-indigo-500/50 hover:text-indigo-200 transition-all text-xs font-bold"
                 >
                   <Play size={12} fill="currentColor" />
                   Continue
@@ -738,18 +738,18 @@ export const ChatPage: React.FC = () => {
           {/* Overlay header with tab navigation */}
           <div className="flex items-center justify-between p-4 border-b border-zinc-800">
             <div className="flex items-center gap-2">
-              {overlayTab === 'matrix' && <><Brain size={20} className="text-indigo-500" /> <span className="text-lg font-bold text-white">Memory Matrix</span></>}
-              {overlayTab === 'settings' && <><SettingsIcon size={20} className="text-zinc-400" /> <span className="text-lg font-bold text-white">Chat Settings</span></>}
-              {overlayTab === 'info' && <><Info size={20} className="text-blue-500" /> <span className="text-lg font-bold text-white">Scenario Info</span></>}
+              {overlayTab === 'matrix' && <><Brain size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Memory Matrix</span></>}
+              {overlayTab === 'settings' && <><SettingsIcon size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Chat Settings</span></>}
+              {overlayTab === 'info' && <><Info size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Scenario Info</span></>}
             </div>
             <div className="flex items-center gap-1">
-              <button onClick={() => setOverlayTab('info')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'info' ? 'bg-zinc-800 text-blue-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Scenario Info">
+              <button onClick={() => setOverlayTab('info')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'info' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Scenario Info">
                 <Info size={18} />
               </button>
               <button onClick={() => setOverlayTab('matrix')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'matrix' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Memory Matrix">
                 <Brain size={18} />
               </button>
-              <button onClick={() => setOverlayTab('settings')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'settings' ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Chat Settings">
+              <button onClick={() => setOverlayTab('settings')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'settings' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Chat Settings">
                 <SettingsIcon size={18} />
               </button>
               <button onClick={() => setOverlay('none')} className="p-2 hover:bg-zinc-800 rounded-full transition-colors">
@@ -1382,3 +1382,14 @@ const ScenarioInfoView: React.FC<{ scenario: Scenario }> = ({ scenario }) => {
     </div>
   );
 };
+
+/** Round avatar: an image when there is one, otherwise the first letter of the name */
+const Avatar: React.FC<{ image?: string; name: string; accent?: boolean }> = ({ image, name, accent }) => (
+  image ? (
+    <img src={image} alt="" className="w-7 h-7 rounded-full object-cover ring-1 ring-white/10 flex-shrink-0" />
+  ) : (
+    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 ${accent ? 'bg-indigo-600 text-white' : 'bg-zinc-700 text-zinc-200'}`}>
+      {(name.trim()[0] || '?').toUpperCase()}
+    </div>
+  )
+);

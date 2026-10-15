@@ -12,6 +12,8 @@
  */
 
 @import "tailwindcss";
+/* Styles headings, lists and quotes in rich text (introduction and its editor) */
+@plugin "@tailwindcss/typography";
 
 @layer base {
   body {

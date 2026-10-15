@@ -36,6 +36,11 @@ Security, data-loss and robustness fixes from a code audit (GitHub issues #1–#
 
 ### Changed
 - Requires Node.js 20 or later. `package-lock.json` is committed.
+- **Chat layout** — The chat fits the space under the navbar, the input box is part of the page and can no longer cover messages (or hide behind the navbar on phones), and messages sit in a centred reading column. The admin "Chat Padding" setting is removed. Scrolling follows new text only while you are at the bottom; a "New messages" button appears when you have scrolled up. The input grows with its text. New chat header with scenario info, memories and settings.
+- **Scenario editor** — One wide column with all switches in a "Settings & Publishing" section at the end; fields grow with their text; sticky section navigation and save bar with an unsaved-changes marker; leaving with unsaved edits asks first.
+- New characters and lore cards start empty (placeholder text such as "Role/Brief bio" was saved as real prompt content).
+- Chat messages show the scenario image and persona avatar; one accent colour; larger reading text.
+- Rich text (introductions and their editor) now gets heading, list and quote styles (`@tailwindcss/typography` was never installed).
 
 ## [v1.0.9] - 2026-07-27
 
