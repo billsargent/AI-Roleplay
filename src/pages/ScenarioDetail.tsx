@@ -13,21 +13,20 @@
  * When starting a chat:
  *   1. User selects a persona in the modal
  *   2. If the scenario has a greetingMessage, it becomes the first AI message
- *   3. If no greeting, the chat is saved with a "*continue*" message and the server writes the opening
+ *   3. If no greeting, the chat starts empty and the chat page streams an AI-written opening
  *   4. The new chat is saved server-side, then the user is navigated to /chat/:id
  *
  * Import/Export uses a custom JSON format (Risuprompt-compatible) triggered manually.
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
   Play, ChevronLeft, Calendar, User, 
   Book, Info, Settings as SettingsIcon,
   Globe, Lock, ShieldAlert, Heart, X, Check, Trash2, Download,
-  FileText
+  FileText, ArrowDown
 } from 'lucide-react';
 import { apiService } from '../services/api';
-import { deepseek } from '../services/deepseek';
 import { sanitizeRichText } from '../utils/sanitize';
 import { useDialog } from '../utils/useDialog';
 import { Scenario, Persona, Message } from '../types';
@@ -52,6 +51,18 @@ export const ScenarioDetail: React.FC = () => {
   const [generating, setGenerating] = useState(false);
   const [expandedLoreIds, setExpandedLoreIds] = useState<Set<string>>(new Set());
   const personaDialogRef = useDialog(showPersonaSelect, () => setShowPersonaSelect(false));
+  /** The rendered introduction; long ones get a "Skip introduction" button */
+  const introRef = useRef<HTMLDivElement>(null);
+  const [introIsLong, setIntroIsLong] = useState(false);
+
+  // Measure the introduction once it (and its images) have laid out
+  useEffect(() => {
+    const el = introRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => setIntroIsLong(el.offsetHeight > 600));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [scenario?.introduction]);
 
   const toggleLoreExpand = (id: string) => {
     setExpandedLoreIds(prev => {
@@ -150,26 +161,8 @@ export const ScenarioDetail: React.FC = () => {
     };
 
     try {
-      if (greeting) {
-        await apiService.saveChat(newChat);
-      } else {
-        // No greeting: save the chat with a "*continue*" prompt and let the
-        // server (which builds the prompt from the saved chat) write the opening
-        showToast('Generating story opening...', 'info');
-        newChat.messages = [{ id: uuidv4(), role: 'user' as const, content: '*continue*', timestamp: Date.now() }];
-        await apiService.saveChat(newChat);
-        try {
-          const response = await deepseek.chat(newChatId);
-          newChat.messages = [
-            ...newChat.messages,
-            { id: uuidv4(), role: 'assistant' as const, content: response, timestamp: Date.now() },
-          ];
-          await apiService.saveChat(newChat);
-        } catch (err: any) {
-          // The chat exists; it opens with a Retry button
-          showToast(err?.message || 'Could not generate the opening; use Retry in the chat', 'error');
-        }
-      }
+      // Without a greeting the chat starts empty; the chat page streams the opening
+      await apiService.saveChat(newChat);
       navigate(`/chat/${newChatId}`);
     } catch (err) {
       showToast('Failed to start chat', 'error');
@@ -182,7 +175,7 @@ export const ScenarioDetail: React.FC = () => {
   if (!scenario) return <div className="p-8 text-white">Scenario not found.</div>;
 
   return (
-    <div className="pb-24 pt-4 px-4 max-w-7xl mx-auto">
+    <div className="pb-44 lg:pb-24 pt-4 px-4 max-w-7xl mx-auto">
       {/* Back navigation */}
       <button 
         onClick={() => navigate('/')}
@@ -244,8 +237,17 @@ export const ScenarioDetail: React.FC = () => {
               <div className="flex items-center gap-3 border-b border-zinc-800 pb-4">
                 <FileText className="text-amber-500" size={24} />
                 <h2 className="text-xl font-bold text-white uppercase tracking-widest">Introduction</h2>
+                {introIsLong && (
+                  <button
+                    onClick={() => document.getElementById('scenario-after-intro')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                    className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 hover:bg-indigo-500/20 transition-colors"
+                  >
+                    <ArrowDown size={14} /> Skip introduction
+                  </button>
+                )}
               </div>
               <div
+                ref={introRef}
                 className="prose prose-invert max-w-none [&_img]:rounded-xl [&_img]:max-h-96 [&_img]:w-auto"
                 dangerouslySetInnerHTML={{ __html: sanitizeRichText(scenario.introduction) }}
               />
@@ -253,7 +255,7 @@ export const ScenarioDetail: React.FC = () => {
           )}
 
           {/* The Backstory */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
+          <div id="scenario-after-intro" className="scroll-mt-24 bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
             <div className="flex items-center gap-3 border-b border-zinc-800 pb-4">
               <Book className="text-green-500" size={24} />
               <h2 className="text-xl font-bold text-white uppercase tracking-widest">The Backstory</h2>
@@ -428,7 +430,7 @@ export const ScenarioDetail: React.FC = () => {
                           type: lp.type,
                           triggers: lp.triggers || [],
                           linkedPieces: lp.linkedPieces || [],
-                          weight: lp.weight || 100,
+                          weight: lp.weight ?? 100,
                           pinned: !!lp.pinned,
                           hidden: !!lp.hidden,
                           smartActivation: !!lp.smartActivation,
@@ -489,12 +491,12 @@ export const ScenarioDetail: React.FC = () => {
              {/* Scenario metadata details */}
              <div className="pt-4 border-t border-zinc-800 space-y-4">
                 <div className="flex items-center justify-between text-sm">
-                   <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">User Character</span>
-                   <span className="text-white font-bold">Selectable</span>
+                   <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Characters</span>
+                   <span className="text-white font-bold">{scenario.characters.length}</span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
-                   <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Model Support</span>
-                   <span className="text-white font-bold">DeepSeek V3</span>
+                   <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Lore Pieces</span>
+                   <span className="text-white font-bold">{scenario.lorePieces.length}</span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
                    <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">Safety</span>
@@ -518,6 +520,19 @@ export const ScenarioDetail: React.FC = () => {
                 </p>
              </div>
           </div>
+        </div>
+      </div>
+
+      {/* Narrow screens: the sidebar is below all the content, so Start Chat stays at the bottom of the screen */}
+      <div className="lg:hidden fixed left-0 right-0 bottom-16 md:bottom-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3">
+          <p className="flex-1 min-w-0 text-sm font-bold text-white truncate">{scenario.name}</p>
+          <button
+            onClick={() => setShowPersonaSelect(true)}
+            className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl font-black flex items-center gap-2 shadow-lg shadow-indigo-900/30 transition-colors"
+          >
+            <Play fill="currentColor" size={16} /> Start Chat
+          </button>
         </div>
       </div>
     </div>

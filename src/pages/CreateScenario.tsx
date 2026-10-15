@@ -29,6 +29,16 @@ import { AIGeneratorModal } from '../components/AIGeneratorModal';
 import { RichtextEditor } from '../components/RichtextEditor';
 
 
+/** Copies lore pieces with new ids, keeping their links pointing at the copies */
+function remapLoreIds(pieces: LorePiece[]): LorePiece[] {
+  const newId = new Map(pieces.map(p => [p.id, uuidv4()]));
+  return pieces.map(p => ({
+    ...p,
+    id: newId.get(p.id)!,
+    linkedPieces: (p.linkedPieces || []).map(id => newId.get(id)).filter((id): id is string => !!id),
+  }));
+}
+
 export const CreateScenario: React.FC = () => {
   const { showToast, showConfirm } = useNotifications();
   const navigate = useNavigate();
@@ -55,7 +65,7 @@ export const CreateScenario: React.FC = () => {
           createdAt: Date.now(),
           settings: { ...initialScenario.settings, isPublic: false },
           characters: initialScenario.characters?.map((c: StoryCharacter) => ({ ...c, id: uuidv4() })) || [],
-          lorePieces: initialScenario.lorePieces?.map((p: LorePiece) => ({ ...p, id: uuidv4() })) || [],
+          lorePieces: remapLoreIds(initialScenario.lorePieces || []),
         };
       }
       return initialScenario;
@@ -88,6 +98,8 @@ export const CreateScenario: React.FC = () => {
   const [showAiGenerator, setShowAiGenerator] = useState(false);
   const [triggerInputs, setTriggerInputs] = useState<Record<string, string>>({});
   const [rteKey, setRteKey] = useState(0);
+  /** Problems found when saving, shown under the fields (cleared as they are edited) */
+  const [errors, setErrors] = useState<{ name?: string; description?: string; backstory?: string }>({});
   /** True when there are edits that have not been saved */
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -178,7 +190,11 @@ export const CreateScenario: React.FC = () => {
    */
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = ''; // the same file can be picked again later
     if (!file) return;
+    const hasContent = scenario.name || scenario.description || scenario.backstory ||
+      scenario.characters.length > 0 || scenario.lorePieces.length > 0;
+    if (hasContent && !(await showConfirm('Importing replaces everything in this editor, including characters and lore. Continue?'))) return;
 
     showToast('📥 Importing scenario with images...', 'info');
 
@@ -232,8 +248,10 @@ export const CreateScenario: React.FC = () => {
         // ── 3. Import lore pieces ──
         const loreTypes = ['character', 'location', 'object', 'event', 'other'];
         const loreData = arr(data.lorePieces);
+        // Pieces get new ids; links in the file point at the old ones
+        const newLoreId = new Map<string, string>(loreData.map((lp: any) => [str(lp.id), uuidv4()]));
         imported.lorePieces = loreData.map((lp: any) => ({
-          id: uuidv4(),
+          id: newLoreId.get(str(lp.id)) || uuidv4(),
           type: loreTypes.includes(lp.type) ? lp.type : 'other',
           title: str(lp.title),
           description: str(lp.description),
@@ -242,7 +260,7 @@ export const CreateScenario: React.FC = () => {
           pinned: !!lp.pinned,
           smartActivation: lp.smartActivation !== undefined ? !!lp.smartActivation : true,
           triggers: strArr(lp.triggers),
-          linkedPieces: strArr(lp.linkedPieces),
+          linkedPieces: strArr(lp.linkedPieces).map(id => newLoreId.get(id)).filter((id): id is string => !!id),
         }));
 
         // ── 4. Import characters from "characters" array ──
@@ -306,6 +324,27 @@ export const CreateScenario: React.FC = () => {
     });
   };
 
+  /** Trigger words typed into a piece's box but not added yet */
+  const pendingTriggers = (id: string) => (triggerInputs[id] || '').split(',').map(w => w.trim()).filter(Boolean);
+
+  /** Adds the typed trigger words to a piece (Enter, leaving the box, or saving) */
+  const commitTriggers = (id: string) => {
+    const words = pendingTriggers(id);
+    if (words.length > 0) {
+      updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === id ? { ...p, triggers: [...new Set([...(p.triggers || []), ...words])] } : p) });
+    }
+    setTriggerInputs(prev => ({ ...prev, [id]: '' }));
+  };
+
+  /** Removes a lore piece and any links to it */
+  const removeLorePiece = (id: string) => {
+    updateScenario({
+      lorePieces: scenario.lorePieces
+        .filter(p => p.id !== id)
+        .map(p => (p.linkedPieces || []).includes(id) ? { ...p, linkedPieces: p.linkedPieces.filter(x => x !== id) } : p),
+    });
+  };
+
   /** Updates scenario settings (privacy/customization toggles). */
   const updateSettings = (updates: any) => {
     updateScenario({ settings: { ...scenario.settings, ...updates } });
@@ -320,19 +359,25 @@ export const CreateScenario: React.FC = () => {
    */
   const handleSave = async () => {
     if (saving) return;
+    // Words still typed in a trigger box count as added
+    const withPending = scenario.lorePieces.map(p => {
+      const words = pendingTriggers(p.id);
+      return words.length && p.smartActivation ? { ...p, triggers: [...new Set([...(p.triggers || []), ...words])] } : p;
+    });
+    setTriggerInputs({});
     // Remove blank lore cards (no meaningful content)
-    const nonBlankLore = scenario.lorePieces.filter(
+    const nonBlankLore = withPending.filter(
       p => p.content.trim() || (p.title.trim() && p.title !== 'New Lore Piece')
     );
-    if (nonBlankLore.length < scenario.lorePieces.length) {
-      showToast(`${scenario.lorePieces.length - nonBlankLore.length} blank lore card(s) will be removed before saving.`, 'info');
+    if (nonBlankLore.length < withPending.length) {
+      showToast(`${withPending.length - nonBlankLore.length} blank lore card(s) will be removed before saving.`, 'info');
     }
-    // Downgrade smart-activated lore with no triggers to draft
-    const cleanedLore = nonBlankLore.map(p =>
-      p.smartActivation && (!p.triggers || p.triggers.length === 0)
-        ? { ...p, smartActivation: false, pinned: false }
-        : p
-    );
+    // Triggered lore with no trigger words could never be sent: save it as "Never" and say so
+    const noTriggers = nonBlankLore.filter(p => !p.pinned && p.smartActivation && (!p.triggers || p.triggers.length === 0));
+    if (noTriggers.length > 0) {
+      showToast(`${noTriggers.map(p => `"${p.title || 'Untitled lore'}"`).join(', ')} ${noTriggers.length === 1 ? 'has' : 'have'} no trigger words and will be saved as "Never (draft)".`, 'info');
+    }
+    const cleanedLore = nonBlankLore.map(p => noTriggers.includes(p) ? { ...p, smartActivation: false, pinned: false } : p);
 
     // Drop characters that were added but never filled in; a described character needs a name
     const characters = scenario.characters.filter(c => (c.name || '').trim() || (c.description || '').trim() || (c.personality || '').trim() || c.avatar);
@@ -342,9 +387,18 @@ export const CreateScenario: React.FC = () => {
       return;
     }
 
-    // Validate required fields
-    if (!scenario.name || !scenario.description || !scenario.backstory) {
-      showToast('Name, Description, and Backstory are required.', 'error');
+    // Required fields (whitespace does not count)
+    const found: typeof errors = {};
+    if (!scenario.name.trim()) found.name = 'Give the scenario a name.';
+    if (!scenario.description.trim()) found.description = 'Add a short summary for the scenario card.';
+    if (!scenario.backstory.trim()) found.backstory = 'The backstory is required: it is what the AI knows about the world.';
+    setErrors(found);
+    const firstProblem = (['name', 'description', 'backstory'] as const).find(k => found[k]);
+    if (firstProblem) {
+      showToast('Please fill in the highlighted fields.', 'error');
+      const id = { name: 'scenario-name', description: 'scenario-summary', backstory: 'scenario-backstory' }[firstProblem];
+      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      document.getElementById(id)?.focus({ preventScroll: true });
       return;
     }
     // Enforce image requirement for public scenarios
@@ -522,7 +576,8 @@ export const CreateScenario: React.FC = () => {
             <div className="flex-1 space-y-4 min-w-0">
               <div>
                 <label className={labelClass} htmlFor="scenario-name">Scenario Name</label>
-                <input id="scenario-name" className={inputClass} placeholder="Give your story a title..." value={scenario.name} onChange={e => updateScenario({ name: e.target.value })} />
+                <input id="scenario-name" className={`${inputClass} ${errors.name ? 'ring-1 ring-red-500 border-red-500/60' : ''}`} aria-invalid={!!errors.name} aria-describedby={errors.name ? 'scenario-name-error' : undefined} placeholder="Give your story a title..." value={scenario.name} onChange={e => { updateScenario({ name: e.target.value }); if (errors.name) setErrors(p => ({ ...p, name: undefined })); }} />
+                {errors.name && <p id="scenario-name-error" className="text-xs text-red-400 mt-1">{errors.name}</p>}
               </div>
               <div>
                 <label className={labelClass} htmlFor="scenario-tag">Tags</label>
@@ -537,13 +592,18 @@ export const CreateScenario: React.FC = () => {
                   </div>
                 )}
                 <input id="scenario-tag" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Add tag (press Enter)" value={newTag} onChange={e => setNewTag(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newTag.trim()) { if (!scenario.tags.includes(newTag.trim())) updateScenario({ tags: [...scenario.tags, newTag.trim()] }); setNewTag(''); } }} />
+                <p className="text-[11px] text-zinc-600 mt-1">Help players find the scenario in search. Not sent to the AI.</p>
               </div>
             </div>
           </div>
           <div>
             <label className={labelClass} htmlFor="scenario-summary">Brief Summary</label>
-            <AutoTextarea id="scenario-summary" minRows={3} className={inputClass} placeholder="A short hook to grab players' attention..." value={scenario.description} onChange={v => updateScenario({ description: v })} />
-            <p className="text-[11px] text-zinc-600 mt-1">Shown on the scenario card. Not sent to the AI.</p>
+            <AutoTextarea id="scenario-summary" minRows={3} className={`${inputClass} ${errors.description ? 'ring-1 ring-red-500 border-red-500/60' : ''}`} placeholder="A short hook to grab players' attention..." value={scenario.description} onChange={v => { updateScenario({ description: v }); if (errors.description) setErrors(p => ({ ...p, description: undefined })); }} />
+            {errors.description && <p className="text-xs text-red-400 mt-1">{errors.description}</p>}
+            <p className="text-[11px] text-zinc-600 mt-1 flex justify-between gap-4">
+              <span>Shown on the scenario card. Not sent to the AI.</span>
+              <span className={scenario.description.length > 300 ? 'text-amber-400' : ''}>{scenario.description.length} / 300 suggested</span>
+            </p>
           </div>
         </section>
 
@@ -567,7 +627,8 @@ export const CreateScenario: React.FC = () => {
           <h2 className="text-xl font-bold flex items-center gap-3"><BookOpen className="text-emerald-400" /> Story Foundation</h2>
           <div>
             <label className={labelClass} htmlFor="scenario-backstory">Main Backstory & World Details</label>
-            <AutoTextarea id="scenario-backstory" minRows={10} className={`${inputClass} font-serif text-lg leading-relaxed`} placeholder="Describe the environment, the history, and the current situation. Use {{user}} to refer to the player's character." value={scenario.backstory} onChange={v => updateScenario({ backstory: v })} />
+            <AutoTextarea id="scenario-backstory" minRows={10} className={`${inputClass} font-serif text-lg leading-relaxed ${errors.backstory ? 'ring-1 ring-red-500 border-red-500/60' : ''}`} placeholder="Describe the environment, the history, and the current situation. Use {{user}} to refer to the player's character." value={scenario.backstory} onChange={v => { updateScenario({ backstory: v }); if (errors.backstory) setErrors(p => ({ ...p, backstory: undefined })); }} />
+            {errors.backstory && <p className="text-xs text-red-400 mt-1">{errors.backstory}</p>}
             <p className="text-[11px] text-zinc-600 mt-1">Sent to the AI with every reply. Use <strong className="text-zinc-400">{'{{user}}'}</strong> for the player's persona name.</p>
           </div>
           <div>
@@ -578,6 +639,7 @@ export const CreateScenario: React.FC = () => {
           <div>
             <label className={labelClass} htmlFor="scenario-instructions">Custom AI Instructions</label>
             <AutoTextarea id="scenario-instructions" minRows={4} className={`${inputClass} text-sm text-zinc-300`} placeholder="Special rules for the AI (e.g., 'Joe always speaks in rhymes')" value={scenario.customInstructions} onChange={v => updateScenario({ customInstructions: v })} />
+            <p className="text-[11px] text-zinc-600 mt-1">Sent to the AI with every reply. The site's global rules still take priority.</p>
           </div>
         </section>
 
@@ -589,6 +651,7 @@ export const CreateScenario: React.FC = () => {
               <Plus size={16} /> Add NPC
             </button>
           </div>
+          <p className="text-xs text-zinc-500">Every character's name, role and personality are sent to the AI with every reply. The AI plays all of them; it never plays the player's persona.</p>
           <div className="space-y-4">
             {scenario.characters.map(char => (
               <div key={char.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 sm:p-6 space-y-4">
@@ -648,7 +711,7 @@ export const CreateScenario: React.FC = () => {
               <div key={piece.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 sm:p-6 space-y-4">
                 <div className="flex items-center justify-between gap-4">
                   <input aria-label="Lore title" placeholder="Lore title" className="bg-transparent text-lg font-bold text-white outline-none focus:border-b border-indigo-500 flex-1 min-w-0" value={piece.title} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, title: e.target.value } : p) }); }} />
-                  <button onClick={() => updateScenario({ lorePieces: scenario.lorePieces.filter(p => p.id !== piece.id) })} className="text-zinc-600 hover:text-red-500 p-2" title="Remove lore" aria-label="Remove lore"><Trash2 size={16} /></button>
+                  <button onClick={() => removeLorePiece(piece.id)} className="text-zinc-600 hover:text-red-500 p-2" title="Remove lore" aria-label="Remove lore"><Trash2 size={16} /></button>
                 </div>
                 <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Describe this location, object, or event..." value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} />
                 {/* How this lore reaches the AI: one mode instead of three checkboxes */}
@@ -709,16 +772,44 @@ export const CreateScenario: React.FC = () => {
                       placeholder="e.g. forest, dark, shadows"
                       value={triggerInputs[piece.id] || ''}
                       onChange={e => setTriggerInputs(prev => ({ ...prev, [piece.id]: e.target.value }))}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter') {
-                          const words = (triggerInputs[piece.id] || '').split(',').map(s => s.trim()).filter(Boolean);
-                          if (words.length > 0) {
-                            updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, triggers: [...new Set([...(p.triggers || []), ...words])] } : p) });
-                          }
-                          setTriggerInputs(prev => ({ ...prev, [piece.id]: '' }));
-                        }
-                      }}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitTriggers(piece.id); } }}
+                      onBlur={() => commitTriggers(piece.id)}
                     />
+                  </div>
+                )}
+                {/* Linked lore: sent along whenever this piece is sent */}
+                {scenario.lorePieces.length > 1 && (
+                  <div>
+                    <label className="text-[10px] font-black text-zinc-500 uppercase mb-1 block" htmlFor={`link-${piece.id}`}>Also send with this piece</label>
+                    {(piece.linkedPieces || []).length > 0 && (
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {piece.linkedPieces.map(id => {
+                          const linked = scenario.lorePieces.find(p => p.id === id);
+                          if (!linked) return null;
+                          return (
+                            <span key={id} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1">
+                              {linked.title || 'Untitled lore'}
+                              <button onClick={() => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, linkedPieces: p.linkedPieces.filter(x => x !== id) } : p) })} aria-label={`Unlink ${linked.title || 'lore'}`}><X size={10} /></button>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <select
+                      id={`link-${piece.id}`}
+                      className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-300"
+                      value=""
+                      onChange={e => {
+                        const id = e.target.value;
+                        if (id) updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, linkedPieces: [...new Set([...(p.linkedPieces || []), id])] } : p) });
+                      }}
+                    >
+                      <option value="">Add a linked piece…</option>
+                      {scenario.lorePieces.filter(p => p.id !== piece.id && !(piece.linkedPieces || []).includes(p.id)).map(p => (
+                        <option key={p.id} value={p.id}>{p.title || 'Untitled lore'}</option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-zinc-600 mt-1">Linked pieces go to the AI right after this one (a "Never" piece can exist just to be linked). They count toward the same limit.</p>
                   </div>
                 )}
               </div>
@@ -741,7 +832,6 @@ export const CreateScenario: React.FC = () => {
               <SettingToggle label="Allow Customization" hint="Others can remix" checked={!!scenario.settings.allowCustomization} onChange={v => updateSettings({ allowCustomization: v })} />
               <SettingToggle label="Hide Prompts" hint="Others can't read backstory or lore" checked={!!scenario.settings.hidePrompts} onChange={v => updateSettings({ hidePrompts: v })} />
               <SettingToggle label="Mature Content" hint="18+ label" color="bg-red-600" checked={!!scenario.settings.sensitiveContent} onChange={v => updateSettings({ sensitiveContent: v })} />
-              <SettingToggle label="Separate Persona" hint="User is distinct" checked={!!scenario.settings.separateUserCharacter} onChange={v => updateSettings({ separateUserCharacter: v })} />
             </div>
             <div className="space-y-4">
               <h3 className="text-xs font-black text-zinc-500 uppercase tracking-widest">AI Instructions</h3>

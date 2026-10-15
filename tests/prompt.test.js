@@ -110,6 +110,20 @@ test('lore is ordered by weight and capped', () => {
   assert.equal(selectLore(pinned, [], [], llm).pinned.length, 10);
 });
 
+test('linked lore is sent right after the piece that brought it in', () => {
+  const pieces = [
+    lore('Ship', { id: 's', triggers: ['ship'], linkedPieces: ['c', 'gone'] }),
+    lore('Captain', { id: 'c', smartActivation: false }), // draft: only sent through the link
+    lore('Port', { id: 'p', pinned: true, smartActivation: false, linkedPieces: ['c'] }),
+  ];
+  const { pinned, triggered } = selectLore(pieces, [msg('user', 'board the ship')], [], llm);
+  assert.deepEqual(pinned.map(p => p.title), ['Port', 'Captain']);
+  assert.deepEqual(triggered.map(p => p.title), ['Ship'], 'Captain already sent; unknown ids ignored');
+  // Links count toward the cap
+  const capped = selectLore(pieces.slice(0, 2), [msg('user', 'ship')], [], { ...llm, loreActiveMax: 1 });
+  assert.deepEqual(capped.triggered.map(p => p.title), ['Ship']);
+});
+
 test('character lore that repeats a cast member is skipped', () => {
   const pieces = [lore('Mara', { type: 'character', pinned: true }), lore('Harbour', { pinned: true })];
   const { pinned } = selectLore(pieces, [], [{ name: 'Mara' }], llm);
@@ -180,6 +194,30 @@ test('the newest history that fits the budget is sent, the rest is noted', () =>
 test('selectHistory always keeps the last message', () => {
   const { history } = selectHistory([msg('user', 'x'.repeat(100000))], 10);
   assert.equal(history.length, 1);
+});
+
+// ── Reply modes (#18, #19) ──
+test('continue with prefix ends with the unfinished reply', () => {
+  const messages = [msg('user', 'Tell {{user}} a tale'), msg('assistant', 'Once, {{user}} sailed')];
+  const { messages: out } = buildChatPrompt({ messages, scenario: scenario(), chat: chat(), llm, mode: 'continue', prefix: true });
+  assert.deepEqual(out[out.length - 1], { role: 'assistant', content: 'Once, Rin sailed', prefix: true });
+  assert.match(out[out.length - 2].content, /^--- GLOBAL LLM INSTRUCTIONS/);
+  assert.equal(out[out.length - 3].content, 'Tell Rin a tale');
+});
+
+test('continue without prefix asks the model to carry on', () => {
+  const messages = [msg('user', 'Go on'), msg('assistant', 'The door')];
+  const { messages: out } = buildChatPrompt({ messages, scenario: scenario(), chat: chat(), llm, mode: 'continue' });
+  assert.equal(out[out.length - 2].content, 'The door');
+  assert.match(out[out.length - 1].content, /GLOBAL LLM INSTRUCTIONS[\s\S]*CONTINUATION/);
+  assert.ok(!out.some(m => m.prefix));
+});
+
+test('opening sends a request for the first scene and no history', () => {
+  const { messages: out } = buildChatPrompt({ messages: [], scenario: scenario(), chat: chat(), llm, mode: 'opening' });
+  assert.equal(out.length, 3);
+  assert.equal(out[1].role, 'user');
+  assert.match(out[1].content, /The story begins now/);
 });
 
 test('scenario generation prompt', () => {

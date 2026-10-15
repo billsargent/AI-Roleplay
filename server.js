@@ -1103,7 +1103,7 @@ const llmLimiter = rateLimit({
  * The model, thinking mode and token cap come from admin settings
  * (lib/deepseek.js); the browser never supplies prompt text.
  */
-async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, label, stream = false }) {
+async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, label, stream = false, beta = false }) {
   const deepseekKey = getSystemSetting('deepseekKey');
   if (!deepseekKey) {
     return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
@@ -1125,7 +1125,7 @@ async function runCompletion(req, res, { messages, maxTokens, temperature, frequ
   }
   // Debug logging for admin users
   debugLogLlmPrompt(req.userId, params, label);
-  await relayCompletion(req, res, params, { apiKey: deepseekKey, stream });
+  await relayCompletion(req, res, params, { apiKey: deepseekKey, stream, beta });
 }
 
 /**
@@ -1140,11 +1140,21 @@ function loadOwnChatForAi(req, res) {
   return chat;
 }
 
+/** What the reply route can be asked to do; see POST /api/chats/:id/reply */
+const REPLY_MODES = new Set(['reply', 'regenerate', 'continue', 'opening']);
+
 /**
- * POST /api/chats/:id/reply — AI reply to the chat's last user message.
- * Body: { stream?: boolean }. The prompt is built here from the stored
- * chat and scenario, so the global instructions cannot be bypassed.
- * The client saves the user message first and saves the reply afterwards.
+ * POST /api/chats/:id/reply — AI text for a saved chat.
+ * Body: { stream?: boolean, mode?: 'reply' | 'regenerate' | 'continue' | 'opening' }
+ *   - reply (default): answer the user's last message
+ *   - regenerate: a new version of the last AI message (it is left out of the prompt)
+ *   - continue: more of the last AI message; the response header
+ *     X-Continue-Mode says how to join it: "prefix" (append exactly) or
+ *     "instruct" (a new sentence; add a space if needed)
+ *   - opening: the first message of a chat that has no conversation yet
+ * The prompt is built here from the stored chat and scenario, so the
+ * global instructions cannot be bypassed. The client saves the chat before
+ * asking and saves the result afterwards.
  */
 app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
   const chat = loadOwnChatForAi(req, res);
@@ -1152,18 +1162,39 @@ app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
   if (!chat.scenarioId) return res.status(409).json({ error: 'This chat\'s scenario has been deleted' });
   const scenario = getScenarioById(chat.scenarioId);
   if (!scenario) return res.status(409).json({ error: 'This chat\'s scenario has been deleted' });
-  const last = chat.messages[chat.messages.length - 1];
-  if (!last || last.role !== 'user') {
+
+  const mode = REPLY_MODES.has(req.body?.mode) ? req.body.mode : 'reply';
+  const conversation = chat.messages.filter(m => m.role === 'user' || m.role === 'assistant');
+  const last = conversation[conversation.length - 1];
+  let history = chat.messages;
+  let promptMode = mode;
+  if (mode === 'reply' && last?.role !== 'user') {
     return res.status(400).json({ error: 'The last message must be from the user' });
+  }
+  if ((mode === 'regenerate' || mode === 'continue') && last?.role !== 'assistant') {
+    return res.status(400).json({ error: 'The last message must be from the AI' });
+  }
+  if (mode === 'opening' && conversation.length > 0) {
+    return res.status(400).json({ error: 'This chat has already started' });
+  }
+  if (mode === 'regenerate') {
+    // Answer what came before the message being replaced
+    history = chat.messages.slice(0, chat.messages.lastIndexOf(last));
+    const rest = history.filter(m => m.role === 'user' || m.role === 'assistant');
+    promptMode = rest.length === 0 ? 'opening' : 'reply';
   }
 
   const llm = readLlmSettings(getSystemSetting);
-  const { messages, maxTokens } = buildChatPrompt({ messages: chat.messages, scenario, chat, llm });
+  // Prefix completion continues the text exactly; it needs thinking off
+  const prefix = mode === 'continue' && getSystemSetting('deepseekThinking') === 'off';
+  const { messages, maxTokens } = buildChatPrompt({ messages: history, scenario, chat, llm, mode: promptMode, prefix });
+  if (mode === 'continue') res.setHeader('X-Continue-Mode', prefix ? 'prefix' : 'instruct');
   await runCompletion(req, res, {
     messages, maxTokens,
     temperature: llm.temperature, frequencyPenalty: llm.frequencyPenalty, presencePenalty: llm.presencePenalty,
-    label: req.body?.stream ? 'Chat Stream' : 'Chat',
+    label: `${req.body?.stream ? 'Chat Stream' : 'Chat'} (${mode})`,
     stream: !!req.body?.stream,
+    beta: prefix,
   });
 });
 

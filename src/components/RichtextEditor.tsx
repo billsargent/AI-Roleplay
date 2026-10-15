@@ -16,6 +16,7 @@ import Image from '@tiptap/extension-image';
 import Link from '@tiptap/extension-link';
 import Underline from '@tiptap/extension-underline';
 import TextAlign from '@tiptap/extension-text-align';
+import { Placeholder } from '@tiptap/extensions';
 import {
   Bold, Italic, Underline as UnderlineIcon, List, ListOrdered,
   Quote, Heading1, Heading2, Heading3, Link as LinkIcon,
@@ -28,7 +29,7 @@ interface RichtextEditorProps {
   placeholder?: string;
 }
 
-export const RichtextEditor: React.FC<RichtextEditorProps> = ({ content, onChange }) => {
+export const RichtextEditor: React.FC<RichtextEditorProps> = ({ content, onChange, placeholder }) => {
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -50,6 +51,8 @@ export const RichtextEditor: React.FC<RichtextEditorProps> = ({ content, onChang
       TextAlign.configure({
         types: ['heading', 'paragraph'],
       }),
+      // Shows the placeholder text while the editor is empty
+      Placeholder.configure({ placeholder: placeholder || '' }),
     ],
     content: content || '',
     onUpdate: ({ editor }) => {
@@ -112,6 +115,8 @@ export const RichtextEditor: React.FC<RichtextEditorProps> = ({ content, onChang
       type="button"
       onClick={onClick}
       title={title}
+      aria-label={title}
+      aria-pressed={active === undefined ? undefined : active}
       className={`p-1.5 rounded-lg transition-colors ${
         active
           ? 'bg-indigo-600/20 text-indigo-400'
@@ -125,7 +130,7 @@ export const RichtextEditor: React.FC<RichtextEditorProps> = ({ content, onChang
   return (
     <div className="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden">
       {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-0.5 px-3 py-2 border-b border-zinc-800 bg-zinc-900/50">
+      <div role="toolbar" aria-label="Formatting" className="flex flex-wrap items-center gap-0.5 px-3 py-2 border-b border-zinc-800 bg-zinc-900/50">
         <div className="flex items-center gap-0.5 pr-2 border-r border-zinc-800">
           <ToolbarButton onClick={() => editor.chain().focus().toggleBold().run()} active={editor.isActive('bold')} title="Bold"><Bold size={16} /></ToolbarButton>
           <ToolbarButton onClick={() => editor.chain().focus().toggleItalic().run()} active={editor.isActive('italic')} title="Italic"><Italic size={16} /></ToolbarButton>
@@ -169,24 +174,36 @@ export const RichtextEditor: React.FC<RichtextEditorProps> = ({ content, onChang
         <BubbleMenu editor={editor} className="flex items-center gap-0.5 bg-zinc-800 border border-zinc-700 rounded-xl p-1 shadow-xl">
           <div className="flex items-center gap-0.5">
             <button
+              type="button"
+              aria-label="Bold"
+              aria-pressed={editor.isActive('bold')}
               onClick={() => editor.chain().focus().toggleBold().run()}
               className={`p-1.5 rounded-lg ${editor.isActive('bold') ? 'bg-indigo-600/20 text-indigo-400' : 'text-zinc-300 hover:text-white'}`}
             >
               <Bold size={14} />
             </button>
             <button
+              type="button"
+              aria-label="Italic"
+              aria-pressed={editor.isActive('italic')}
               onClick={() => editor.chain().focus().toggleItalic().run()}
               className={`p-1.5 rounded-lg ${editor.isActive('italic') ? 'bg-indigo-600/20 text-indigo-400' : 'text-zinc-300 hover:text-white'}`}
             >
               <Italic size={14} />
             </button>
             <button
+              type="button"
+              aria-label="Underline"
+              aria-pressed={editor.isActive('underline')}
               onClick={() => editor.chain().focus().toggleUnderline().run()}
               className={`p-1.5 rounded-lg ${editor.isActive('underline') ? 'bg-indigo-600/20 text-indigo-400' : 'text-zinc-300 hover:text-white'}`}
             >
               <UnderlineIcon size={14} />
             </button>
             <button
+              type="button"
+              aria-label="Link"
+              aria-pressed={editor.isActive('link')}
               onClick={setLink}
               className={`p-1.5 rounded-lg ${editor.isActive('link') ? 'bg-indigo-600/20 text-indigo-400' : 'text-zinc-300 hover:text-white'}`}
             >

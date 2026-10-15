@@ -1,7 +1,7 @@
 {
   "name": "ai-roleplay",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -19,6 +19,7 @@
     "@tiptap/extension-link": "~3.31.4",
     "@tiptap/extension-text-align": "~3.31.4",
     "@tiptap/extension-underline": "~3.31.4",
+    "@tiptap/extensions": "~3.31.4",
     "@tiptap/react": "~3.31.4",
     "@tiptap/starter-kit": "~3.31.4",
     "axios": "^1.15.2",

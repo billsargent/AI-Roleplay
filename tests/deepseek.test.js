@@ -24,6 +24,7 @@ before(async () => {
     req.on('end', () => {
       const json = JSON.parse(body || '{}');
       seen.last = json;
+      seen.path = req.url;
       const text = (json.messages || []).map(m => m.content).join(' ');
       if (text.includes('FAIL401')) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -161,6 +162,71 @@ test('a reply needs a user message last', async () => {
   const chatId = await makeChat(user.token, 'I already answered', { lastRole: 'assistant' });
   assert.equal((await reply(user.token, chatId)).status, 400);
   assert.equal(seen.last, null);
+});
+
+test('validation keeps prefix only on a trailing assistant message', () => {
+  const p = validateCompletionRequest({ messages: [...msgs('hi'), { role: 'assistant', content: 'Once', prefix: true }] }, { model: 'm' });
+  assert.equal(p.messages[2].prefix, true);
+  const q = validateCompletionRequest({ messages: [{ role: 'assistant', content: 'x', prefix: true }, { role: 'user', content: 'y', prefix: true }] }, { model: 'm' });
+  assert.ok(q.messages.every(m => !('prefix' in m)));
+});
+
+// ── Reply modes: regenerate, continue, opening (#18, #19) ──
+/** Saves a chat with these messages ([role, content] pairs) and returns its id */
+async function chatWith(token, pairs) {
+  const chatId = await makeChat(token, 'x');
+  const chat = (await srv.request('GET', `/api/chats/${chatId}`, { token })).json;
+  chat.messages = pairs.map(([role, content], i) => ({ id: randomUUID(), role, content, timestamp: Date.now() + i }));
+  assert.equal((await srv.request('POST', '/api/chats', { token, body: chat })).status, 200);
+  return chatId;
+}
+
+test('regenerate leaves the replaced reply out of the prompt', async () => {
+  const u = await srv.register();
+  const chatId = await chatWith(u.token, [['assistant', 'Greeting'], ['user', 'Open the door'], ['assistant', 'OLD REPLY']]);
+  const r = await reply(u.token, chatId, { mode: 'regenerate' });
+  assert.equal(r.status, 200, r.text);
+  const sent = seen.last.messages.map(m => m.content).join('\n');
+  assert.ok(!sent.includes('OLD REPLY'));
+  assert.equal(seen.last.messages[seen.last.messages.length - 2].content, 'Open the door');
+  // Regenerating a chat's only (opening) message asks for an opening again
+  const only = await chatWith(u.token, [['assistant', 'OLD OPENING']]);
+  assert.equal((await reply(u.token, only, { mode: 'regenerate' })).status, 200);
+  assert.match(JSON.stringify(seen.last.messages), /The story begins now/);
+  // Needs an AI message last
+  const userLast = await chatWith(u.token, [['user', 'hi']]);
+  assert.equal((await reply(u.token, userLast, { mode: 'regenerate' })).status, 400);
+});
+
+test('continue uses prefix completion when thinking is off', async () => {
+  const u = await srv.register();
+  const chatId = await chatWith(u.token, [['user', 'Tell me'], ['assistant', 'The tide was']]);
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { deepseekThinking: 'off' } });
+  const r = await reply(u.token, chatId, { mode: 'continue' });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.headers.get('x-continue-mode'), 'prefix');
+  assert.equal(seen.path, '/beta/chat/completions');
+  const lastSent = seen.last.messages[seen.last.messages.length - 1];
+  assert.deepEqual(lastSent, { role: 'assistant', content: 'The tide was', prefix: true });
+
+  // Thinking left to the model: no prefix, an instruction instead
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { deepseekThinking: '' } });
+  const r2 = await reply(u.token, chatId, { mode: 'continue' });
+  assert.equal(r2.headers.get('x-continue-mode'), 'instruct');
+  assert.equal(seen.path, '/chat/completions');
+  assert.match(seen.last.messages[seen.last.messages.length - 1].content, /CONTINUATION/);
+  assert.equal(seen.last.messages[seen.last.messages.length - 2].content, 'The tide was');
+});
+
+test('opening writes the first message of an empty chat', async () => {
+  const u = await srv.register();
+  const empty = await chatWith(u.token, []);
+  const r = await reply(u.token, empty, { mode: 'opening' });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(seen.last.messages[1].role, 'user');
+  assert.match(seen.last.messages[1].content, /The story begins now/);
+  const started = await chatWith(u.token, [['assistant', 'Hi']]);
+  assert.equal((await reply(u.token, started, { mode: 'opening' })).status, 400);
 });
 
 test('memories are summarised on the server', async () => {

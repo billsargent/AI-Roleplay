@@ -81,15 +81,13 @@ export interface LorePiece {
   weight: number;
   /** Always include in the AI prompt (bypasses smart activation) */
   pinned: boolean;
-  /** Whether this piece can be roleplayed as a playable character */
-  playable?: boolean;
   /** If true, this lore is visible to the AI but hidden from users in the prompt viewer */
   hidden?: boolean;
   /** When true, lore is only included when certain trigger words appear in recent context */
   smartActivation: boolean;
   /** Keywords/phrases that activate this lore piece */
   triggers: string[];
-  /** IDs of other lore pieces linked to this one (e.g., a location linked to an event) */
+  /** IDs of other lore pieces sent along whenever this one is sent (e.g., a ship and its captain) */
   linkedPieces: string[];
   /** Image URL: "/api/images/..." for uploaded files */
   avatar?: string;

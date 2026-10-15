@@ -2,7 +2,7 @@
 
 An immersive, AI-powered roleplay platform where you create stories, build worlds, and chat with intelligent AI characters. Built with a modern React frontend and an Express + SQLite backend, powered by the DeepSeek language model.
 
-**Current version: 2.0.0.** See [CHANGELOG.md](CHANGELOG.md) for what changed, and its *Upgrading from 1.x* section before updating an existing install.
+**Current version: 2.1.0.** See [CHANGELOG.md](CHANGELOG.md) for what changed, and its *Upgrading from 1.x* section before updating an existing install.
 
 ---
 
@@ -24,7 +24,8 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Rolling Memories** — Every few user messages the AI writes a memory card summarising everything since the previous one; all memories are sent with every reply and pinned ones are never trimmed
 - **Response Length Control** — Choose short, medium, or long AI responses
 - **Stop & Retry** — Stop a reply while it is being written (the text so far is kept), and retry a reply that failed
-- **Message Editing** — Edit, delete, or rewind messages (regenerating and switching between alternative replies is planned)
+- **Regenerate & Continue** — Regenerate the last reply and flip between versions; Continue extends a reply, picking up exactly where it stopped
+- **Message Editing** — Edit, delete, or rewind messages
 - **Reading Layout** — Centred reading column that fits any screen; the view follows new text while you are at the bottom and leaves you in place when you scroll up
 
 ### 🧩 Characters & Personas
@@ -37,7 +38,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Sent to the AI** — Each piece is sent *Always* (up to 10 by default), *When a trigger word comes up*, or *Never* (draft)
 - **Priority** — Higher-priority pieces win when more pieces qualify than the caps allow
 - **Hidden from Players** — The AI uses the piece but other players cannot read it (also enforced by the scenario's *Hide Prompts* switch)
-- Linked pieces are stored by the editor but not used by the AI yet (planned)
+- **Linked Pieces** — Pieces linked to another are sent right after it (a draft piece can exist just to be linked)
 
 ### 👤 User System
 - **JWT Authentication** — Secure token-based auth with 7-day session expiry; sessions survive server restarts
@@ -271,7 +272,7 @@ AI-Roleplay/
 | POST | `/api/chats` | Auth | Create/update chat |
 | DELETE | `/api/chats/:id` | Auth | Delete own chat (or admin) |
 | DELETE | `/api/chats/all` | Auth | Delete all own chats |
-| POST | `/api/chats/:id/reply` | Owner | AI reply to a saved chat (`{ stream: true }` for SSE) |
+| POST | `/api/chats/:id/reply` | Owner | AI text for a saved chat: `mode` = `reply`, `regenerate`, `continue` or `opening`; `{ stream: true }` for SSE |
 | POST | `/api/chats/:id/memory` | Owner | Write a memory card (`{ auto: true }` only when one is due) |
 
 ### System (Admin)

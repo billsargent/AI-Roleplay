@@ -8,6 +8,9 @@
  * - Auto-generated AI memories at configurable intervals
  * - Memory trimming (oldest non-pinned removed when max count exceeded)
  * - Three overlay views: Scenario Info, Memory Matrix, Chat Settings
+ * - Regenerate the last AI reply and switch between its versions (‹ ›)
+ * - Continue extends the last AI reply (exactly, via prefix completion when available)
+ * - A scenario without a greeting starts with a streamed AI-written opening
  * - Message editing, rewinding, and deletion
  * - Read-only mode for admin viewing other users' chats
  * - Customizable dialog/narration/bubble colors from user settings
@@ -20,10 +23,11 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   Send, Settings as SettingsIcon, Brain, Info,
   ChevronLeft, MessageSquare, RefreshCw, Trash2,
-  X, Pin, User, Edit2, FileDown, Play, Square, RotateCcw, ArrowDown
+  X, Pin, User, Edit2, FileDown, Play, Square, RotateCcw, ArrowDown,
+  ChevronRight, RefreshCcw, Undo2
 } from 'lucide-react';
 import { apiService } from '../services/api';
-import { deepseek } from '../services/deepseek';
+import { deepseek, ReplyMode, ReplyResult } from '../services/deepseek';
 import { Chat, Message, Scenario, Persona } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
@@ -84,6 +88,14 @@ export const ChatPage: React.FC = () => {
   const [scenarioDeleted, setScenarioDeleted] = useState(false);
   /** Error from the last AI request, shown with a Retry button */
   const [lastError, setLastError] = useState<string | null>(null);
+  /** Id of the message the AI is writing into (shows the typing dots there) */
+  const [writingId, setWritingId] = useState<string | null>(null);
+  /** Id of the AI message that stopped at the length limit (offer Continue) */
+  const [cutOffId, setCutOffId] = useState<string | null>(null);
+  /** What the failed request was doing, so Retry repeats the same thing */
+  const failedModeRef = useRef<ReplyMode | null>(null);
+  /** Chat whose AI-written opening was already requested */
+  const openingStartedRef = useRef<string | null>(null);
 
   /** Cancels the in-flight AI request (Stop button, switching chats, leaving the page) */
   const abortRef = useRef<AbortController | null>(null);
@@ -170,6 +182,9 @@ export const ChatPage: React.FC = () => {
     setIsReadOnly(false);
     setScenarioDeleted(false);
     setLastError(null);
+    setCutOffId(null);
+    setWritingId(null);
+    failedModeRef.current = null;
     setOverlay('none');
     setIsTyping(false);
     try {
@@ -304,69 +319,103 @@ export const ChatPage: React.FC = () => {
   };
 
   /**
-   * Gets an AI reply for a chat whose last message is the user's.
+   * Gets AI text for a saved chat and puts it in the conversation.
    *
-   * - Streaming or not, depending on the chat setting.
-   * - Stop (or leaving the page) aborts the request. Text that already
-   *   arrived is kept and saved; an empty placeholder is removed.
-   * - On failure the error is shown with a Retry button.
-   * - The final save merges into the latest chat state, so a memory or
-   *   edit made while the reply was generating is not overwritten.
+   * - reply / opening: a new AI message is added.
+   * - regenerate: the last AI message gets a new version (older versions
+   *   stay available through the ‹ › arrows).
+   * - continue: the text is added to the end of the last AI message.
+   *
+   * Streaming or not, depending on the chat setting. Stop (or leaving the
+   * page) aborts the request; text that already arrived is kept and saved.
+   * On failure the error is shown with a Retry button, and the chat goes
+   * back to how it was. The final save merges into the latest chat state, so
+   * a memory or edit made while the reply was generating is not overwritten.
    */
-  const generateReply = async (base: Chat) => {
+  const generateReply = async (base: Chat, mode: ReplyMode = 'reply') => {
     if (!scenario) return;
     const forChat = base.id;
     const isCurrent = () => activeChatIdRef.current === forChat;
 
     setIsTyping(true);
     setLastError(null);
+    setCutOffId(null);
+    failedModeRef.current = null;
     const controller = new AbortController();
     abortRef.current = controller;
 
     const replyId = uuidv4();
+    const target = base.messages[base.messages.length - 1];
+    setWritingId(mode === 'regenerate' || mode === 'continue' ? target.id : replyId);
     let partial = '';
-    const withReply = (content: string): Chat => ({
-      ...(isCurrent() && chatRef.current ? chatRef.current : base),
-      messages: [...base.messages, { id: replyId, role: 'assistant', content, timestamp: Date.now() }],
-    });
+    let continueMode: ReplyResult['continueMode'];
+
+    /** The conversation with `text` applied for this mode */
+    const withText = (text: string): Chat => {
+      const latest = isCurrent() && chatRef.current ? chatRef.current : base;
+      let messages: Message[];
+      if (mode === 'regenerate') {
+        const versions = target.versions?.length ? target.versions : [target.content];
+        messages = base.messages.map(m => m.id === target.id
+          ? { ...m, content: text, versions: [...versions, text], currentVersionIndex: versions.length, timestamp: Date.now() }
+          : m);
+      } else if (mode === 'continue') {
+        const joined = joinContinuation(target.content, text, continueMode);
+        messages = base.messages.map(m => {
+          if (m.id !== target.id) return m;
+          const versions = m.versions?.length ? [...m.versions] : undefined;
+          if (versions) versions[Math.min(m.currentVersionIndex ?? 0, versions.length - 1)] = joined;
+          return { ...m, content: joined, ...(versions ? { versions } : {}) };
+        });
+      } else {
+        messages = [...base.messages, { id: replyId, role: 'assistant', content: text, timestamp: Date.now() }];
+      }
+      return { ...latest, messages };
+    };
 
     try {
-      let content: string;
+      let result: ReplyResult;
       if (base.settings.streamResponse) {
-        commitChat(withReply(''));
-        content = await deepseek.chatStream(base.id, (chunk) => {
+        if (mode !== 'continue') commitChat(withText(''));
+        result = await deepseek.chatStream(base.id, (chunk, cm) => {
+          continueMode = cm;
           partial += chunk;
-          if (!isCurrent()) return;
-          setChat(prev => prev && {
-            ...prev,
-            messages: prev.messages.map(m => (m.id === replyId ? { ...m, content: m.content + chunk } : m)),
-          });
-        }, controller.signal);
+          if (isCurrent()) commitChat(withText(partial));
+        }, controller.signal, mode);
       } else {
-        content = await deepseek.chat(base.id, controller.signal);
+        result = await deepseek.chat(base.id, controller.signal, mode);
       }
+      continueMode = result.continueMode;
 
-      const final = withReply(content);
-      if (isCurrent()) commitChat(final);
+      const final = withText(result.content);
+      if (isCurrent()) {
+        commitChat(final);
+        // A reply that hit the length limit can be continued
+        if (result.finishReason === 'length') setCutOffId(final.messages[final.messages.length - 1].id);
+      }
       await apiService.saveChat(final);
       // Memory generation is a separate AI call; do not make the user wait for it
       void maybeGenerateMemory(final);
     } catch (error: any) {
       const aborted = controller.signal.aborted;
-      // Keep whatever text already arrived; drop an empty placeholder
-      const kept = partial.trim() ? withReply(partial) : { ...(isCurrent() && chatRef.current ? chatRef.current : base), messages: base.messages };
+      // Keep whatever text already arrived; otherwise put the chat back as it was
+      const kept = partial.trim() ? withText(partial) : { ...(isCurrent() && chatRef.current ? chatRef.current : base), messages: base.messages };
       if (isCurrent()) commitChat(kept);
       if (partial.trim()) {
         apiService.saveChat(kept).catch(() => showToast('Could not save the partial reply', 'error'));
       }
       if (!aborted && isCurrent()) {
         const message = error?.message || 'Error communicating with DeepSeek';
+        failedModeRef.current = mode;
         setLastError(message);
         showToast(message, 'error');
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      if (isCurrent()) setIsTyping(false);
+      if (isCurrent()) {
+        setIsTyping(false);
+        setWritingId(null);
+      }
     }
   };
 
@@ -376,12 +425,22 @@ export const ChatPage: React.FC = () => {
   };
 
   /**
-   * Asks for a new reply to the last user message, replacing any partial
-   * reply left by the failed attempt.
+   * Retry after a failure: repeats a failed regenerate, continue or opening;
+   * otherwise asks for a new reply to the last user message, replacing any
+   * partial reply left by the failed attempt.
    */
   const retryLastReply = async () => {
     const current = chatRef.current;
     if (!current || isTyping || isReadOnly) return;
+    const failed = failedModeRef.current;
+    if (failed === 'regenerate' || failed === 'continue') {
+      await generateReply(current, failed);
+      return;
+    }
+    if (!current.messages.some(m => m.role === 'user' || m.role === 'assistant')) {
+      await generateReply(current, 'opening');
+      return;
+    }
     let end = current.messages.length;
     while (end > 0 && current.messages[end - 1].role !== 'user') end--;
     if (end === 0) return;
@@ -396,6 +455,53 @@ export const ChatPage: React.FC = () => {
     }
     await generateReply(base);
   };
+
+  /** Asks for another version of the last AI message */
+  const regenerateLast = async () => {
+    const current = chatRef.current;
+    if (!current || isTyping || isReadOnly) return;
+    if (current.messages[current.messages.length - 1]?.role !== 'assistant') return;
+    await generateReply(current, 'regenerate');
+  };
+
+  /** Asks the AI to keep writing the last AI message */
+  const continueLast = async () => {
+    const current = chatRef.current;
+    if (!current || isTyping || isReadOnly) return;
+    if (current.messages[current.messages.length - 1]?.role !== 'assistant') return;
+    scrollToBottom();
+    await generateReply(current, 'continue');
+  };
+
+  /** Shows another version of a message (the ‹ › arrows) and saves the choice */
+  const showVersion = async (messageId: string, index: number) => {
+    const current = chatRef.current;
+    if (!current || isTyping || isReadOnly) return;
+    const next: Chat = {
+      ...current,
+      messages: current.messages.map(m => {
+        if (m.id !== messageId || !m.versions?.length) return m;
+        const i = Math.max(0, Math.min(index, m.versions.length - 1));
+        return { ...m, content: m.versions[i], currentVersionIndex: i };
+      }),
+    };
+    commitChat(next);
+    setCutOffId(null);
+    try {
+      await apiService.saveChat(next);
+    } catch {
+      showToast('Could not save the chosen version', 'error');
+    }
+  };
+
+  // A chat with no greeting starts with an AI-written opening
+  useEffect(() => {
+    if (loading || !chat || !scenario || isReadOnly || isTyping) return;
+    if (chat.messages.some(m => m.role === 'user' || m.role === 'assistant')) return;
+    if (openingStartedRef.current === chat.id) return; // once per chat (and not twice in dev mode)
+    openingStartedRef.current = chat.id;
+    void generateReply(chat, 'opening');
+  }, [loading, chat?.id, scenario, isReadOnly]);
 
   /**
    * Public send handler — reads from the input state and sends.
@@ -449,52 +555,99 @@ export const ChatPage: React.FC = () => {
   if (!chat) return <div className="p-8 text-white">Chat not found.</div>;
   if (!scenario && !scenarioDeleted) return <div className="p-8 text-white">Chat not found.</div>;
 
-  // Message actions (edit, rewind, delete), shown on hover and always on touch screens
-  const messageActions = (m: Message) => (
-    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity">
-      <button
-        onClick={async () => {
-          const newContent = prompt('Edit message:', m.content);
-          if (newContent !== null) {
-            const newMessages = chat.messages.map(msg => msg.id === m.id ? { ...msg, content: newContent } : msg);
-            const updatedChat = { ...chat, messages: newMessages };
-            setChat(updatedChat);
-            await apiService.saveChat(updatedChat);
-          }
-        }}
-        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors" title="Edit" aria-label="Edit message"
-      >
-        <Edit2 size={13} />
-      </button>
-      <button
-        onClick={async () => {
-          if (await showConfirm('Delete this and all messages after it? (Rewind)')) {
-            const index = chat.messages.findIndex(msg => msg.id === m.id);
-            const newMessages = chat.messages.slice(0, index + 1);
-            const updatedChat = { ...chat, messages: newMessages };
-            setChat(updatedChat);
-            await apiService.saveChat(updatedChat);
-          }
-        }}
-        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors" title="Rewind to here" aria-label="Rewind to this message"
-      >
-        <RefreshCw size={13} />
-      </button>
-      <button
-        onClick={async () => {
-          if (await showConfirm('Delete this message?')) {
-            const newMessages = chat.messages.filter(msg => msg.id !== m.id);
-            const updatedChat = { ...chat, messages: newMessages };
-            setChat(updatedChat);
-            await apiService.saveChat(updatedChat);
-          }
-        }}
-        className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-900/30 transition-colors" title="Delete" aria-label="Delete message"
-      >
-        <Trash2 size={13} />
-      </button>
-    </div>
-  );
+  const actionButton = 'flex items-center gap-1 px-1.5 py-1 rounded text-[11px] font-bold hover:text-white hover:bg-zinc-800 disabled:opacity-30 disabled:hover:bg-transparent transition-colors';
+
+  /**
+   * Buttons under a message. The last AI message also gets its version
+   * arrows and Regenerate, and its row is always visible; on other messages
+   * the row shows on hover or focus (always on touch screens).
+   */
+  const messageActionRow = (m: Message, isLastAi: boolean) => {
+    if (isReadOnly || (isTyping && m.id === writingId)) return null;
+    const versionCount = m.versions?.length ?? 0;
+    const versionIndex = m.currentVersionIndex ?? 0;
+    return (
+      <div className={`flex flex-wrap items-center gap-0.5 mt-1.5 px-1 text-zinc-500 ${isLastAi ? '' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity'}`}>
+        {isLastAi && versionCount > 1 && (
+          <>
+            <button
+              onClick={() => showVersion(m.id, versionIndex - 1)}
+              disabled={isTyping || versionIndex <= 0}
+              className={actionButton}
+              title="Previous version" aria-label="Previous version"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <span className="text-[11px] tabular-nums min-w-[2.5rem] text-center" aria-live="polite">
+              {versionIndex + 1} / {versionCount}
+            </span>
+            <button
+              onClick={() => showVersion(m.id, versionIndex + 1)}
+              disabled={isTyping || versionIndex >= versionCount - 1}
+              className={actionButton}
+              title="Next version" aria-label="Next version"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </>
+        )}
+        {isLastAi && (
+          <button onClick={regenerateLast} disabled={isTyping} className={actionButton} title="Write a different version of this reply">
+            <RefreshCcw size={13} /> Regenerate
+          </button>
+        )}
+        <button
+          onClick={async () => {
+            const newContent = prompt('Edit message:', m.content);
+            if (newContent !== null) {
+              const newMessages = chat.messages.map(msg => {
+                if (msg.id !== m.id) return msg;
+                const versions = msg.versions?.length ? [...msg.versions] : undefined;
+                if (versions) versions[Math.min(msg.currentVersionIndex ?? 0, versions.length - 1)] = newContent;
+                return { ...msg, content: newContent, ...(versions ? { versions } : {}) };
+              });
+              const updatedChat = { ...chat, messages: newMessages };
+              setChat(updatedChat);
+              await apiService.saveChat(updatedChat);
+            }
+          }}
+          disabled={isTyping}
+          className={actionButton} title="Edit" aria-label="Edit message"
+        >
+          <Edit2 size={13} /> <span className="hidden sm:inline">Edit</span>
+        </button>
+        <button
+          onClick={async () => {
+            if (await showConfirm('Delete this and all messages after it? (Rewind)')) {
+              const index = chat.messages.findIndex(msg => msg.id === m.id);
+              const newMessages = chat.messages.slice(0, index + 1);
+              const updatedChat = { ...chat, messages: newMessages };
+              setChat(updatedChat);
+              await apiService.saveChat(updatedChat);
+            }
+          }}
+          disabled={isTyping}
+          className={actionButton} title="Rewind: delete everything after this message" aria-label="Rewind: delete everything after this message"
+        >
+          <Undo2 size={13} /> <span className="hidden sm:inline">Rewind</span>
+        </button>
+        <button
+          onClick={async () => {
+            if (await showConfirm('Delete this message?')) {
+              const newMessages = chat.messages.filter(msg => msg.id !== m.id);
+              const updatedChat = { ...chat, messages: newMessages };
+              setChat(updatedChat);
+              await apiService.saveChat(updatedChat);
+            }
+          }}
+          disabled={isTyping}
+          className={`${actionButton} hover:!text-red-400 hover:!bg-red-900/30`} title="Delete" aria-label="Delete message"
+        >
+          <Trash2 size={13} /> <span className="hidden sm:inline">Delete</span>
+        </button>
+      </div>
+    );
+  };
 
   /** Opens the side panel on one of its tabs */
   const openPanel = (tab: 'info' | 'matrix' | 'settings') => {
@@ -563,12 +716,12 @@ export const ChatPage: React.FC = () => {
             {chat.messages.length === 0 && (
               <div className="flex flex-col items-center justify-center py-24 text-zinc-500 text-center px-8">
                 <MessageSquare size={48} className="mb-4 opacity-20" />
-                <p>No messages yet. Send a message to start the story!</p>
+                <p>{isTyping ? 'The story is starting…' : 'No messages yet. Send a message to start the story!'}</p>
               </div>
             )}
 
             {/* Message list */}
-            {chat.messages.map((m) => m.role === 'system' ? (
+            {chat.messages.map((m, idx) => isSyntheticTurn(m) ? null : m.role === 'system' ? (
               // System messages (e.g., persona change notifications) rendered as pill badges
               <div key={m.id} className="flex justify-center !my-2">
                 <div className="px-4 py-1.5 bg-zinc-900/50 border border-zinc-800/50 rounded-full text-[10px] font-black text-zinc-600 uppercase tracking-widest italic">
@@ -577,7 +730,7 @@ export const ChatPage: React.FC = () => {
               </div>
             ) : (
               <div key={m.id} className={`group flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
-                {/* Message header: avatar, name, timestamp, actions */}
+                {/* Message header: avatar, name, timestamp */}
                 <div className={`flex items-center gap-2 mb-1.5 px-1 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
                   <Avatar
                     image={m.role === 'assistant' ? scenario?.image : chat.userCharacter?.avatar}
@@ -590,7 +743,6 @@ export const ChatPage: React.FC = () => {
                   <span className="text-[10px] text-zinc-600">
                     {format(m.timestamp, 'HH:mm')}
                   </span>
-                  {!isReadOnly && messageActions(m)}
                 </div>
 
                 {/* Message bubble with dialog/narration color highlighting */}
@@ -614,7 +766,10 @@ export const ChatPage: React.FC = () => {
                       return part;
                     })}
                   </div>
+                  {isTyping && m.id === writingId && <TypingDots className={m.content ? 'mt-2' : 'py-1'} />}
                 </div>
+
+                {messageActionRow(m, m.role === 'assistant' && idx === chat.messages.length - 1)}
               </div>
             ))}
 
@@ -635,17 +790,17 @@ export const ChatPage: React.FC = () => {
             {!isReadOnly && !isTyping && chat.messages.length > 0 && chat.messages[chat.messages.length - 1].role === 'assistant' && (
               <div className="flex justify-center">
                 <button
-                  onClick={() => sendMessage('*continue*')}
+                  onClick={continueLast}
                   className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-indigo-500/30 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 hover:border-indigo-500/50 hover:text-indigo-200 transition-all text-xs font-bold"
                 >
                   <Play size={12} fill="currentColor" />
-                  Continue
+                  {cutOffId === chat.messages[chat.messages.length - 1].id ? 'Continue (the reply was cut off)' : 'Continue'}
                 </button>
               </div>
             )}
 
-            {/* Typing indicator for non-streaming mode */}
-            {isTyping && !chat.settings.streamResponse && (
+            {/* Typing indicator for a non-streamed new reply (not yet in the list) */}
+            {isTyping && !chat.messages.some(m => m.id === writingId) && (
               <div className="flex flex-col items-start">
                 <div className="flex items-center gap-2 mb-1 px-1">
                   <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center">
@@ -653,12 +808,8 @@ export const ChatPage: React.FC = () => {
                   </div>
                   <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">AI is thinking...</span>
                 </div>
-                <div className="bg-zinc-900 border border-zinc-800 rounded-2xl rounded-tl-none p-4 w-16 flex justify-center">
-                  <div className="flex gap-1">
-                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce"></div>
-                  </div>
+                <div className="bg-zinc-900/60 ring-1 ring-white/5 rounded-2xl rounded-tl-md px-5 py-4">
+                  <TypingDots />
                 </div>
               </div>
             )}
@@ -1392,4 +1543,28 @@ const Avatar: React.FC<{ image?: string; name: string; accent?: boolean }> = ({ 
       {(name.trim()[0] || '?').toUpperCase()}
     </div>
   )
+);
+
+/** Old chats contain "*continue*" user turns the app sent on its own; they are not shown */
+const isSyntheticTurn = (m: Message) => m.role === 'user' && m.content.trim() === '*continue*';
+
+/**
+ * Joins a continuation to the text it continues. Prefix completion returns
+ * exactly what follows; otherwise the model starts a new piece of text, which
+ * needs a space unless one side already has whitespace or it starts with
+ * punctuation.
+ */
+function joinContinuation(previous: string, addition: string, mode?: 'prefix' | 'instruct'): string {
+  if (mode === 'prefix' || !previous || !addition) return previous + addition;
+  if (/\s$/.test(previous) || /^\s/.test(addition) || /^[.,!?;:…)\]'"’”-]/.test(addition)) return previous + addition;
+  return previous + ' ' + addition;
+}
+
+/** Three bouncing dots: the AI is writing */
+const TypingDots: React.FC<{ className?: string }> = ({ className = '' }) => (
+  <div className={`flex gap-1.5 ${className}`} role="status" aria-label="The AI is writing">
+    <span className="w-2 h-2 bg-indigo-400/80 rounded-full animate-bounce [animation-delay:-0.3s]" />
+    <span className="w-2 h-2 bg-indigo-400/80 rounded-full animate-bounce [animation-delay:-0.15s]" />
+    <span className="w-2 h-2 bg-indigo-400/80 rounded-full animate-bounce" />
+  </div>
 );
