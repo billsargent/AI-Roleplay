@@ -1,5 +1,30 @@
 # Changelog
 
+## [v2.1.0] - 2026-10-15
+
+Chat replies you can steer, linked lore, and a more honest scenario editor (#14, #15, #18, #19, #23, #24, #25, #39).
+
+### Added
+- **Regenerate** the last AI reply; earlier versions stay available with ‹ n/m › arrows, and the chosen one is what the AI sees next.
+- **Continue** extends the last AI reply instead of sending a visible `*continue*` message. With thinking off it uses DeepSeek prefix completion, so the text picks up exactly where it stopped; a reply cut off by the length limit says so.
+- Scenarios without a greeting start with a **streamed AI-written opening** (no fake user message).
+- **Typing dots** in the message the AI is writing; Edit, Rewind and Delete sit under each message next to Regenerate.
+- **Linked lore**: "Also send with this piece" in the editor; linked pieces go to the AI right after the piece, within the same limits.
+- Scenario page: a **Start Chat bar** stays at the bottom of narrow screens, and long introductions get **Skip introduction**.
+- Editor: errors shown under the fields, a summary length counter, help text saying what reaches the AI, a placeholder in the introduction editor and labelled toolbar buttons.
+
+### Changed
+- `POST /api/chats/:id/reply` takes `mode`: `reply`, `regenerate`, `continue` or `opening`.
+- Retry repeats whatever failed (reply, regenerate, continue or opening).
+- Rewind has its own icon so it is not mistaken for Regenerate.
+- Importing asks before replacing a draft; AI-generated scenarios are cleaned up before use.
+- The "Separate Persona" switch is gone (it had no effect); the scenario page shows character and lore counts instead of fixed labels.
+
+### Fixed
+- Imported or copied scenarios kept lore links pointing at the old ids; export turned a lore priority of 0 into 100.
+- Trigger words typed without pressing Enter were lost on save; triggered lore without trigger words silently became a draft (it still does, but the editor says so).
+- Old chats no longer show `*continue*` messages.
+
 ## [v2.0.0] - 2026-10-15
 
 A major release: security and data-loss fixes from a code audit (GitHub issues #1–#10), a rebuilt roleplay engine with prompts assembled on the server (#11–#17), and a new chat and editor layout (#30–#33).
