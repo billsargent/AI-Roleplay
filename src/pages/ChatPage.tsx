@@ -88,6 +88,8 @@ export const ChatPage: React.FC = () => {
   const [scenarioDeleted, setScenarioDeleted] = useState(false);
   /** Error from the last AI request, shown with a Retry button */
   const [lastError, setLastError] = useState<string | null>(null);
+  /** Id of the message the AI is writing into (shows the typing dots there) */
+  const [writingId, setWritingId] = useState<string | null>(null);
   /** Id of the AI message that stopped at the length limit (offer Continue) */
   const [cutOffId, setCutOffId] = useState<string | null>(null);
   /** What the failed request was doing, so Retry repeats the same thing */
@@ -181,6 +183,7 @@ export const ChatPage: React.FC = () => {
     setScenarioDeleted(false);
     setLastError(null);
     setCutOffId(null);
+    setWritingId(null);
     failedModeRef.current = null;
     setOverlay('none');
     setIsTyping(false);
@@ -343,6 +346,7 @@ export const ChatPage: React.FC = () => {
 
     const replyId = uuidv4();
     const target = base.messages[base.messages.length - 1];
+    setWritingId(mode === 'regenerate' || mode === 'continue' ? target.id : replyId);
     let partial = '';
     let continueMode: ReplyResult['continueMode'];
 
@@ -408,7 +412,10 @@ export const ChatPage: React.FC = () => {
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      if (isCurrent()) setIsTyping(false);
+      if (isCurrent()) {
+        setIsTyping(false);
+        setWritingId(null);
+      }
     }
   };
 
@@ -548,57 +555,99 @@ export const ChatPage: React.FC = () => {
   if (!chat) return <div className="p-8 text-white">Chat not found.</div>;
   if (!scenario && !scenarioDeleted) return <div className="p-8 text-white">Chat not found.</div>;
 
-  // Message actions (edit, rewind, delete), shown on hover and always on touch screens
-  const messageActions = (m: Message) => (
-    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity">
-      <button
-        onClick={async () => {
-          const newContent = prompt('Edit message:', m.content);
-          if (newContent !== null) {
-            const newMessages = chat.messages.map(msg => {
-              if (msg.id !== m.id) return msg;
-              const versions = msg.versions?.length ? [...msg.versions] : undefined;
-              if (versions) versions[Math.min(msg.currentVersionIndex ?? 0, versions.length - 1)] = newContent;
-              return { ...msg, content: newContent, ...(versions ? { versions } : {}) };
-            });
-            const updatedChat = { ...chat, messages: newMessages };
-            setChat(updatedChat);
-            await apiService.saveChat(updatedChat);
-          }
-        }}
-        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors" title="Edit" aria-label="Edit message"
-      >
-        <Edit2 size={13} />
-      </button>
-      <button
-        onClick={async () => {
-          if (await showConfirm('Delete this and all messages after it? (Rewind)')) {
-            const index = chat.messages.findIndex(msg => msg.id === m.id);
-            const newMessages = chat.messages.slice(0, index + 1);
-            const updatedChat = { ...chat, messages: newMessages };
-            setChat(updatedChat);
-            await apiService.saveChat(updatedChat);
-          }
-        }}
-        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors" title="Rewind: delete everything after this message" aria-label="Rewind: delete everything after this message"
-      >
-        <Undo2 size={13} />
-      </button>
-      <button
-        onClick={async () => {
-          if (await showConfirm('Delete this message?')) {
-            const newMessages = chat.messages.filter(msg => msg.id !== m.id);
-            const updatedChat = { ...chat, messages: newMessages };
-            setChat(updatedChat);
-            await apiService.saveChat(updatedChat);
-          }
-        }}
-        className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-900/30 transition-colors" title="Delete" aria-label="Delete message"
-      >
-        <Trash2 size={13} />
-      </button>
-    </div>
-  );
+  const actionButton = 'flex items-center gap-1 px-1.5 py-1 rounded text-[11px] font-bold hover:text-white hover:bg-zinc-800 disabled:opacity-30 disabled:hover:bg-transparent transition-colors';
+
+  /**
+   * Buttons under a message. The last AI message also gets its version
+   * arrows and Regenerate, and its row is always visible; on other messages
+   * the row shows on hover or focus (always on touch screens).
+   */
+  const messageActionRow = (m: Message, isLastAi: boolean) => {
+    if (isReadOnly || (isTyping && m.id === writingId)) return null;
+    const versionCount = m.versions?.length ?? 0;
+    const versionIndex = m.currentVersionIndex ?? 0;
+    return (
+      <div className={`flex flex-wrap items-center gap-0.5 mt-1.5 px-1 text-zinc-500 ${isLastAi ? '' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity'}`}>
+        {isLastAi && versionCount > 1 && (
+          <>
+            <button
+              onClick={() => showVersion(m.id, versionIndex - 1)}
+              disabled={isTyping || versionIndex <= 0}
+              className={actionButton}
+              title="Previous version" aria-label="Previous version"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <span className="text-[11px] tabular-nums min-w-[2.5rem] text-center" aria-live="polite">
+              {versionIndex + 1} / {versionCount}
+            </span>
+            <button
+              onClick={() => showVersion(m.id, versionIndex + 1)}
+              disabled={isTyping || versionIndex >= versionCount - 1}
+              className={actionButton}
+              title="Next version" aria-label="Next version"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </>
+        )}
+        {isLastAi && (
+          <button onClick={regenerateLast} disabled={isTyping} className={actionButton} title="Write a different version of this reply">
+            <RefreshCcw size={13} /> Regenerate
+          </button>
+        )}
+        <button
+          onClick={async () => {
+            const newContent = prompt('Edit message:', m.content);
+            if (newContent !== null) {
+              const newMessages = chat.messages.map(msg => {
+                if (msg.id !== m.id) return msg;
+                const versions = msg.versions?.length ? [...msg.versions] : undefined;
+                if (versions) versions[Math.min(msg.currentVersionIndex ?? 0, versions.length - 1)] = newContent;
+                return { ...msg, content: newContent, ...(versions ? { versions } : {}) };
+              });
+              const updatedChat = { ...chat, messages: newMessages };
+              setChat(updatedChat);
+              await apiService.saveChat(updatedChat);
+            }
+          }}
+          disabled={isTyping}
+          className={actionButton} title="Edit" aria-label="Edit message"
+        >
+          <Edit2 size={13} /> <span className="hidden sm:inline">Edit</span>
+        </button>
+        <button
+          onClick={async () => {
+            if (await showConfirm('Delete this and all messages after it? (Rewind)')) {
+              const index = chat.messages.findIndex(msg => msg.id === m.id);
+              const newMessages = chat.messages.slice(0, index + 1);
+              const updatedChat = { ...chat, messages: newMessages };
+              setChat(updatedChat);
+              await apiService.saveChat(updatedChat);
+            }
+          }}
+          disabled={isTyping}
+          className={actionButton} title="Rewind: delete everything after this message" aria-label="Rewind: delete everything after this message"
+        >
+          <Undo2 size={13} /> <span className="hidden sm:inline">Rewind</span>
+        </button>
+        <button
+          onClick={async () => {
+            if (await showConfirm('Delete this message?')) {
+              const newMessages = chat.messages.filter(msg => msg.id !== m.id);
+              const updatedChat = { ...chat, messages: newMessages };
+              setChat(updatedChat);
+              await apiService.saveChat(updatedChat);
+            }
+          }}
+          disabled={isTyping}
+          className={`${actionButton} hover:!text-red-400 hover:!bg-red-900/30`} title="Delete" aria-label="Delete message"
+        >
+          <Trash2 size={13} /> <span className="hidden sm:inline">Delete</span>
+        </button>
+      </div>
+    );
+  };
 
   /** Opens the side panel on one of its tabs */
   const openPanel = (tab: 'info' | 'matrix' | 'settings') => {
@@ -681,7 +730,7 @@ export const ChatPage: React.FC = () => {
               </div>
             ) : (
               <div key={m.id} className={`group flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
-                {/* Message header: avatar, name, timestamp, actions */}
+                {/* Message header: avatar, name, timestamp */}
                 <div className={`flex items-center gap-2 mb-1.5 px-1 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
                   <Avatar
                     image={m.role === 'assistant' ? scenario?.image : chat.userCharacter?.avatar}
@@ -694,7 +743,6 @@ export const ChatPage: React.FC = () => {
                   <span className="text-[10px] text-zinc-600">
                     {format(m.timestamp, 'HH:mm')}
                   </span>
-                  {!isReadOnly && messageActions(m)}
                 </div>
 
                 {/* Message bubble with dialog/narration color highlighting */}
@@ -718,44 +766,10 @@ export const ChatPage: React.FC = () => {
                       return part;
                     })}
                   </div>
+                  {isTyping && m.id === writingId && <TypingDots className={m.content ? 'mt-2' : 'py-1'} />}
                 </div>
 
-                {/* Last AI message: switch between versions and ask for another */}
-                {m.role === 'assistant' && idx === chat.messages.length - 1 && !isReadOnly && (
-                  <div className="flex items-center gap-1 mt-1.5 px-1 text-zinc-500">
-                    {(m.versions?.length ?? 0) > 1 && (
-                      <>
-                        <button
-                          onClick={() => showVersion(m.id, (m.currentVersionIndex ?? 0) - 1)}
-                          disabled={isTyping || (m.currentVersionIndex ?? 0) <= 0}
-                          className="p-1 rounded hover:text-white hover:bg-zinc-800 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-                          title="Previous version" aria-label="Previous version"
-                        >
-                          <ChevronLeft size={16} />
-                        </button>
-                        <span className="text-[11px] tabular-nums min-w-[2.5rem] text-center" aria-live="polite">
-                          {(m.currentVersionIndex ?? 0) + 1} / {m.versions!.length}
-                        </span>
-                        <button
-                          onClick={() => showVersion(m.id, (m.currentVersionIndex ?? 0) + 1)}
-                          disabled={isTyping || (m.currentVersionIndex ?? 0) >= m.versions!.length - 1}
-                          className="p-1 rounded hover:text-white hover:bg-zinc-800 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-                          title="Next version" aria-label="Next version"
-                        >
-                          <ChevronRight size={16} />
-                        </button>
-                      </>
-                    )}
-                    <button
-                      onClick={regenerateLast}
-                      disabled={isTyping}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-bold hover:text-white hover:bg-zinc-800 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-                      title="Write a different version of this reply"
-                    >
-                      <RefreshCcw size={13} /> Regenerate
-                    </button>
-                  </div>
-                )}
+                {messageActionRow(m, m.role === 'assistant' && idx === chat.messages.length - 1)}
               </div>
             ))}
 
@@ -785,8 +799,8 @@ export const ChatPage: React.FC = () => {
               </div>
             )}
 
-            {/* Typing indicator for non-streaming mode */}
-            {isTyping && !chat.settings.streamResponse && (
+            {/* Typing indicator for a non-streamed new reply (not yet in the list) */}
+            {isTyping && !chat.messages.some(m => m.id === writingId) && (
               <div className="flex flex-col items-start">
                 <div className="flex items-center gap-2 mb-1 px-1">
                   <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center">
@@ -794,12 +808,8 @@ export const ChatPage: React.FC = () => {
                   </div>
                   <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">AI is thinking...</span>
                 </div>
-                <div className="bg-zinc-900 border border-zinc-800 rounded-2xl rounded-tl-none p-4 w-16 flex justify-center">
-                  <div className="flex gap-1">
-                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce"></div>
-                  </div>
+                <div className="bg-zinc-900/60 ring-1 ring-white/5 rounded-2xl rounded-tl-md px-5 py-4">
+                  <TypingDots />
                 </div>
               </div>
             )}
@@ -1549,3 +1559,12 @@ function joinContinuation(previous: string, addition: string, mode?: 'prefix' | 
   if (/\s$/.test(previous) || /^\s/.test(addition) || /^[.,!?;:…)\]'"’”-]/.test(addition)) return previous + addition;
   return previous + ' ' + addition;
 }
+
+/** Three bouncing dots: the AI is writing */
+const TypingDots: React.FC<{ className?: string }> = ({ className = '' }) => (
+  <div className={`flex gap-1.5 ${className}`} role="status" aria-label="The AI is writing">
+    <span className="w-2 h-2 bg-indigo-400/80 rounded-full animate-bounce [animation-delay:-0.3s]" />
+    <span className="w-2 h-2 bg-indigo-400/80 rounded-full animate-bounce [animation-delay:-0.15s]" />
+    <span className="w-2 h-2 bg-indigo-400/80 rounded-full animate-bounce" />
+  </div>
+);
