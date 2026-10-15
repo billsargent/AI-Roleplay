@@ -9,12 +9,12 @@
  * @module CreateScenario
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   X, Image as ImageIcon, Info, BookOpen, Brain, 
   Settings as SettingsIcon, Save, Plus, Trash2, 
-  UserPlus, MessageSquare, ChevronLeft, Globe, Lock, Upload,
+  UserPlus, ChevronLeft, Globe, Lock, Upload,
   FileJson, Sparkles, FileText
 } from 'lucide-react';
 import { apiService } from '../services/api';
@@ -88,6 +88,23 @@ export const CreateScenario: React.FC = () => {
   const [showAiGenerator, setShowAiGenerator] = useState(false);
   const [triggerInputs, setTriggerInputs] = useState<Record<string, string>>({});
   const [rteKey, setRteKey] = useState(0);
+  /** True when there are edits that have not been saved */
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // Closing or reloading the tab with unsaved edits asks first
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+
+  /** Back and Cancel: asks before throwing away unsaved edits */
+  const leaveEditor = async () => {
+    if (dirty && !(await showConfirm('You have unsaved changes. Leave without saving?'))) return;
+    navigate('/');
+  };
   const importInputRef = React.useRef<HTMLInputElement>(null);
 
   /**
@@ -268,6 +285,7 @@ export const CreateScenario: React.FC = () => {
 
         setScenario(imported);
         setRteKey(prev => prev + 1);
+        setDirty(true);
         showToast('✅ Import successful! All images downloaded and embedded.', 'success');
       } catch (err) {
         showToast('Import failed: Invalid JSON file', 'error');
@@ -280,7 +298,12 @@ export const CreateScenario: React.FC = () => {
 
   /** Updates a subset of scenario fields. */
   const updateScenario = (updates: Partial<Scenario>) => {
-    setScenario(prev => ({ ...prev, ...updates }));
+    setScenario(prev => {
+      const changed = (Object.keys(updates) as (keyof Scenario)[]).some(k => updates[k] !== prev[k]);
+      if (!changed) return prev;
+      setDirty(true);
+      return { ...prev, ...updates };
+    });
   };
 
   /** Updates scenario settings (privacy/customization toggles). */
@@ -296,6 +319,7 @@ export const CreateScenario: React.FC = () => {
    * - Requires cover image for public scenarios
    */
   const handleSave = async () => {
+    if (saving) return;
     // Remove blank lore cards (no meaningful content)
     const nonBlankLore = scenario.lorePieces.filter(
       p => p.content.trim() || (p.title.trim() && p.title !== 'New Lore Piece')
@@ -310,6 +334,14 @@ export const CreateScenario: React.FC = () => {
         : p
     );
 
+    // Drop characters that were added but never filled in; a described character needs a name
+    const characters = scenario.characters.filter(c => (c.name || '').trim() || (c.description || '').trim() || (c.personality || '').trim() || c.avatar);
+    if (characters.some(c => !(c.name || '').trim())) {
+      showToast('Every character needs a name.', 'error');
+      document.getElementById('editor-cast')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+
     // Validate required fields
     if (!scenario.name || !scenario.description || !scenario.backstory) {
       showToast('Name, Description, and Backstory are required.', 'error');
@@ -321,11 +353,15 @@ export const CreateScenario: React.FC = () => {
       return;
     }
 
+    setSaving(true);
     try {
-      await apiService.saveScenario({ ...scenario, lorePieces: cleanedLore });
+      await apiService.saveScenario({ ...scenario, characters, lorePieces: cleanedLore });
+      setDirty(false);
       navigate('/');
     } catch (e: any) {
       showToast(e.response?.data?.error || 'Failed to save scenario', 'error');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -333,9 +369,9 @@ export const CreateScenario: React.FC = () => {
   const addCharacter = () => {
     const char: StoryCharacter = {
       id: uuidv4(),
-      name: 'New Character',
-      description: 'Role/Brief bio',
-      personality: 'Key traits',
+      name: '',
+      description: '',
+      personality: '',
     };
     updateScenario({ characters: [...scenario.characters, char] });
   };
@@ -345,7 +381,7 @@ export const CreateScenario: React.FC = () => {
     const piece: LorePiece = {
       id: uuidv4(),
       type: 'location',
-      title: 'New Lore Piece',
+      title: '',
       description: '',
       content: '',
       weight: 100,
@@ -413,326 +449,341 @@ export const CreateScenario: React.FC = () => {
       createdAt: Date.now(),
     };
     setScenario(newScenario);
+    setDirty(true);
     setShowAiGenerator(false);
     showToast('✨ AI-generated scenario loaded as a draft. Add images and tweak as needed!', 'success');
   };
 
   // ── Render ──
-  return (
+  const inputClass = 'w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500';
+  const labelClass = 'block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2';
+  const sectionClass = 'scroll-mt-32 bg-zinc-900/60 ring-1 ring-white/5 rounded-2xl p-5 sm:p-8 space-y-6';
 
-    <div className="pb-32 pt-6 px-4 max-w-5xl mx-auto space-y-12">
+  return (
+    <div className="pt-6 px-4 max-w-5xl mx-auto">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
         <div className="flex items-center gap-4">
-          <button onClick={() => navigate('/')} className="p-2 bg-zinc-900 rounded-full text-zinc-400 hover:text-white border border-zinc-800">
+          <button onClick={leaveEditor} className="p-2 bg-zinc-900 rounded-full text-zinc-400 hover:text-white border border-zinc-800" title="Back" aria-label="Back">
             <ChevronLeft size={20} />
           </button>
           <div>
-            <h1 className="text-3xl font-black text-white">Scenario Editor</h1>
+            <h1 className="text-2xl sm:text-3xl font-black text-white">Scenario Editor</h1>
             <p className="text-zinc-500 text-sm">Design your world and its inhabitants</p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button 
+        <div className="flex items-center gap-2">
+          <button
             onClick={handleAiGenerateClick}
-            className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white px-4 py-3 rounded-2xl font-bold flex items-center gap-2 shadow-xl shadow-purple-900/20 transition-all active:scale-95"
+            className="bg-indigo-600/10 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-600/20 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all"
           >
-            <Sparkles size={18} /> AI Generate
+            <Sparkles size={16} /> AI Generate
           </button>
           <input type="file" accept=".json" ref={importInputRef} className="hidden" onChange={handleImport} />
-          <button 
+          <button
             onClick={() => importInputRef.current?.click()}
-            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-4 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all"
+            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all"
           >
-            <FileJson size={18} /> Import
-          </button>
-          <button 
-            onClick={handleSave}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-3 rounded-2xl font-bold flex items-center gap-2 shadow-xl shadow-indigo-900/20 transition-all active:scale-95"
-          >
-            <Save size={20} /> Save Changes
+            <FileJson size={16} /> Import
           </button>
         </div>
       </div>
 
+      {/* Section navigation: stays at the top while scrolling (navbar is on top from md up) */}
+      <nav aria-label="Editor sections" className="sticky top-0 md:top-16 z-30 -mx-4 px-4 py-2 mb-6 bg-zinc-950/90 backdrop-blur border-b border-zinc-800/60">
+        <div className="flex gap-1 overflow-x-auto">
+          {EDITOR_SECTIONS.map(s => (
+            <button
+              key={s.id}
+              onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+              className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </nav>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-8 items-start">
-        {/* ── Left Column: Form Fields ── */}
-        <div className="space-y-10">
-          
-          {/* Essential Details: Name, Tags, Image */}
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
-            <h2 className="text-xl font-bold flex items-center gap-3"><Info className="text-blue-500" /> Essential Details</h2>
-            <div className="grid grid-cols-1 gap-6">
-              <div className="flex flex-col md:flex-row gap-6">
-                {/* Cover image upload area */}
-                <div className="w-full md:w-48 aspect-square bg-zinc-950 border border-zinc-800 rounded-2xl flex flex-col items-center justify-center relative group overflow-hidden cursor-pointer">
-                  {scenario.image ? <img src={scenario.image} className="w-full h-full object-cover" /> : <ImageIcon size={40} className="text-zinc-800" />}
-                  <label className="absolute inset-0 bg-black/80 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 flex flex-col items-center justify-center p-4 transition-opacity cursor-pointer text-center">
-                    <Upload size={24} className="text-white mb-2" />
-                    <span className="text-xs font-bold text-white uppercase">Upload Image</span>
-                    <span className="text-[10px] text-zinc-500 mt-1">Best fit: 1920×1080px (16:9 ratio)</span>
-                    <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+      <div className="space-y-8">
+        {/* Essential Details: Name, Tags, Image, Summary */}
+        <section id="editor-basics" className={sectionClass}>
+          <h2 className="text-xl font-bold flex items-center gap-3"><Info className="text-indigo-400" /> Essential Details</h2>
+          <div className="flex flex-col md:flex-row gap-6">
+            {/* Cover image upload area */}
+            <div className="w-full md:w-56 aspect-video md:aspect-square bg-zinc-950 border border-zinc-800 rounded-2xl flex flex-col items-center justify-center relative group overflow-hidden cursor-pointer flex-shrink-0">
+              {scenario.image ? <img src={scenario.image} className="w-full h-full object-cover" alt="Cover" /> : <ImageIcon size={40} className="text-zinc-800" />}
+              <label className="absolute inset-0 bg-black/80 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 flex flex-col items-center justify-center p-4 transition-opacity cursor-pointer text-center">
+                <Upload size={24} className="text-white mb-2" />
+                <span className="text-xs font-bold text-white uppercase">Upload Image</span>
+                <span className="text-[10px] text-zinc-500 mt-1">Best fit: 1920×1080px (16:9 ratio)</span>
+                <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+              </label>
+            </div>
+            <div className="flex-1 space-y-4 min-w-0">
+              <div>
+                <label className={labelClass} htmlFor="scenario-name">Scenario Name</label>
+                <input id="scenario-name" className={inputClass} placeholder="Give your story a title..." value={scenario.name} onChange={e => updateScenario({ name: e.target.value })} />
+              </div>
+              <div>
+                <label className={labelClass} htmlFor="scenario-tag">Tags</label>
+                {scenario.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mb-3">
+                    {scenario.tags.map(tag => (
+                      <span key={tag} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-3 py-1 rounded-full text-[11px] font-bold flex items-center gap-2">
+                        {tag}
+                        <button onClick={() => updateScenario({ tags: scenario.tags.filter(t => t !== tag) })} aria-label={`Remove tag ${tag}`}><X size={12} /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <input id="scenario-tag" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Add tag (press Enter)" value={newTag} onChange={e => setNewTag(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newTag.trim()) { if (!scenario.tags.includes(newTag.trim())) updateScenario({ tags: [...scenario.tags, newTag.trim()] }); setNewTag(''); } }} />
+              </div>
+            </div>
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="scenario-summary">Brief Summary</label>
+            <AutoTextarea id="scenario-summary" minRows={3} className={inputClass} placeholder="A short hook to grab players' attention..." value={scenario.description} onChange={v => updateScenario({ description: v })} />
+            <p className="text-[11px] text-zinc-600 mt-1">Shown on the scenario card. Not sent to the AI.</p>
+          </div>
+        </section>
+
+        {/* Introduction: Rich Text Editor */}
+        <section id="editor-intro" className={sectionClass}>
+          <h2 className="text-xl font-bold flex items-center gap-3"><FileText className="text-amber-400" /> Introduction</h2>
+          <p className="text-xs text-zinc-500">
+            A rich, visual introduction shown to players before they start. Only sent to the AI if you turn on
+            "Send Introduction to AI" in the settings below.
+          </p>
+          <RichtextEditor
+            key={rteKey}
+            content={scenario.introduction || ''}
+            onChange={(html) => updateScenario({ introduction: html })}
+            placeholder="Write a captivating introduction for your story..."
+          />
+        </section>
+
+        {/* Story Foundation: Backstory, Greeting, Custom Instructions */}
+        <section id="editor-story" className={sectionClass}>
+          <h2 className="text-xl font-bold flex items-center gap-3"><BookOpen className="text-emerald-400" /> Story Foundation</h2>
+          <div>
+            <label className={labelClass} htmlFor="scenario-backstory">Main Backstory & World Details</label>
+            <AutoTextarea id="scenario-backstory" minRows={10} className={`${inputClass} font-serif text-lg leading-relaxed`} placeholder="Describe the environment, the history, and the current situation. Use {{user}} to refer to the player's character." value={scenario.backstory} onChange={v => updateScenario({ backstory: v })} />
+            <p className="text-[11px] text-zinc-600 mt-1">Sent to the AI with every reply. Use <strong className="text-zinc-400">{'{{user}}'}</strong> for the player's persona name.</p>
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="scenario-greeting">Greeting Message</label>
+            <AutoTextarea id="scenario-greeting" minRows={5} className={`${inputClass} text-sm text-zinc-300`} placeholder="The first message sent to the player. Set the tone here." value={scenario.greetingMessage} onChange={v => updateScenario({ greetingMessage: v })} />
+            <p className="text-[11px] text-zinc-600 mt-1">Becomes the AI's first message in every new chat.</p>
+          </div>
+          <div>
+            <label className={labelClass} htmlFor="scenario-instructions">Custom AI Instructions</label>
+            <AutoTextarea id="scenario-instructions" minRows={4} className={`${inputClass} text-sm text-zinc-300`} placeholder="Special rules for the AI (e.g., 'Joe always speaks in rhymes')" value={scenario.customInstructions} onChange={v => updateScenario({ customInstructions: v })} />
+          </div>
+        </section>
+
+        {/* Cast of Characters */}
+        <section id="editor-cast" className={sectionClass}>
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="text-xl font-bold flex items-center gap-3"><UserPlus className="text-violet-400" /> Cast of Characters</h2>
+            <button onClick={addCharacter} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors">
+              <Plus size={16} /> Add NPC
+            </button>
+          </div>
+          <div className="space-y-4">
+            {scenario.characters.map(char => (
+              <div key={char.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 sm:p-6 space-y-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-4 flex-1 min-w-0">
+                    {/* Character avatar */}
+                    <div className="w-12 h-12 flex-shrink-0 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center relative overflow-hidden group/npc">
+                      {char.avatar ? <img src={char.avatar} className="w-full h-full object-cover" alt="" /> : <UserPlus size={20} className="text-zinc-700" />}
+                      <label className="absolute inset-0 bg-black/60 opacity-0 group-hover/npc:opacity-100 group-focus-within/npc:opacity-100 pointer-coarse:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
+                        <Upload size={14} className="text-white" />
+                        <input type="file" accept="image/*" className="hidden" onChange={async (e) => { const file = e.target.files?.[0]; if (file) { const base64 = await fileToBase64(file); updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, avatar: base64 } : c) }); } }} />
+                      </label>
+                    </div>
+                    <input aria-label="Character name" placeholder="Character name" className="bg-transparent text-xl font-bold text-white outline-none focus:border-b border-indigo-500 flex-1 min-w-0" value={char.name} onChange={e => {
+                      const newName = e.target.value;
+                      if (newName.toLowerCase() === '{{user}}') {
+                        showToast('"{{user}}" is a reserved placeholder and cannot be used as a character name.', 'error');
+                        return;
+                      }
+                      updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, name: newName } : c) });
+                    }} />
+                  </div>
+                  <button onClick={() => updateScenario({ characters: scenario.characters.filter(c => c.id !== char.id) })} className="text-zinc-600 hover:text-red-500 p-2" title="Remove character" aria-label="Remove character"><Trash2 size={18} /></button>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-zinc-500 uppercase mb-1 block">Role & Appearance</label>
+                  <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Who they are and what they look like" value={char.description} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, description: v } : c) })} />
+                </div>
+                <div>
+                  <label className="text-[10px] font-black text-zinc-500 uppercase mb-1 block">Personality & Mannerisms</label>
+                  <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="How they think, speak and behave" value={char.personality} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, personality: v } : c) })} />
+                </div>
+              </div>
+            ))}
+            {scenario.characters.length === 0 && (
+              <div className="text-center py-10 border border-dashed border-zinc-800 rounded-2xl">
+                <p className="text-zinc-600 text-sm">Every good story needs characters. Add some NPCs!</p>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* World Lore */}
+        <section id="editor-lore" className={sectionClass}>
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="text-xl font-bold flex items-center gap-3"><Brain className="text-indigo-400" /> World Lore</h2>
+            <button onClick={addLorePiece} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors">
+              <Plus size={16} /> Add Lore
+            </button>
+          </div>
+          <p className="text-xs text-zinc-500">
+            "Always" pieces are sent every turn (up to 10). Triggered pieces are sent when a trigger word appears as a
+            whole word in the last few messages (up to 5 at a time). Higher priority wins when there are too many.
+          </p>
+          <div className="space-y-4">
+            {scenario.lorePieces.map(piece => (
+              <div key={piece.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 sm:p-6 space-y-4">
+                <div className="flex items-center justify-between gap-4">
+                  <input aria-label="Lore title" placeholder="Lore title" className="bg-transparent text-lg font-bold text-white outline-none focus:border-b border-indigo-500 flex-1 min-w-0" value={piece.title} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, title: e.target.value } : p) }); }} />
+                  <button onClick={() => updateScenario({ lorePieces: scenario.lorePieces.filter(p => p.id !== piece.id) })} className="text-zinc-600 hover:text-red-500 p-2" title="Remove lore" aria-label="Remove lore"><Trash2 size={16} /></button>
+                </div>
+                <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Describe this location, object, or event..." value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} />
+                {/* How this lore reaches the AI: one mode instead of three checkboxes */}
+                <div className="flex flex-wrap items-end gap-4">
+                  <label className="text-[10px] font-black text-zinc-500 uppercase">
+                    <span className="block mb-1">Sent to the AI</span>
+                    <select
+                      className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-300 normal-case font-normal"
+                      value={piece.pinned ? 'pinned' : piece.smartActivation ? 'triggered' : 'off'}
+                      onChange={e => {
+                        const mode = e.target.value;
+                        updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, pinned: mode === 'pinned', smartActivation: mode === 'triggered' } : p) });
+                      }}
+                    >
+                      <option value="triggered">When a trigger word comes up</option>
+                      <option value="pinned">Always</option>
+                      <option value="off">Never (draft)</option>
+                    </select>
+                  </label>
+                  <label className="text-[10px] font-black text-zinc-500 uppercase">
+                    <span className="block mb-1">Priority</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1000}
+                      className="w-20 bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-300"
+                      value={piece.weight ?? 100}
+                      onChange={e => {
+                        const weight = Math.max(0, Math.min(1000, Number(e.target.value) || 0));
+                        updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, weight } : p) });
+                      }}
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-[10px] font-black text-zinc-500 uppercase cursor-pointer pb-1.5" title="The AI still uses it; other players cannot read it unless you allow customization">
+                    <input
+                      type="checkbox"
+                      checked={!!piece.hidden}
+                      onChange={e => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, hidden: e.target.checked } : p) })}
+                    /> Hidden from players
                   </label>
                 </div>
-                <div className="flex-1 space-y-4">
-                  {/* Scenario name input */}
+                {/* Trigger words input (only shown for smart-activated lore) */}
+                {piece.smartActivation && (
                   <div>
-                    <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Scenario Name</label>
-                    <input className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Give your story a title..." value={scenario.name} onChange={e => updateScenario({ name: e.target.value })} />
-                  </div>
-                  {/* Tags input */}
-                  <div>
-                    <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Tags</label>
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      {scenario.tags.map(tag => (
-                        <span key={tag} className="bg-indigo-600/10 text-indigo-400 border border-indigo-600/20 px-3 py-1 rounded-full text-[10px] font-bold flex items-center gap-2">
-                          {tag}
-                          <button onClick={() => updateScenario({ tags: scenario.tags.filter(t => t !== tag) })}><X size={12}/></button>
-                        </span>
-                      ))}
-                    </div>
-                    <div className="flex gap-2">
-                      <input className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-sm text-white" placeholder="Add tag (Press Enter)" value={newTag} onChange={e => setNewTag(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && newTag.trim()) { updateScenario({ tags: [...scenario.tags, newTag.trim()] }); setNewTag(''); } }} />
-                    </div>
-                  </div>
-                </div>
-              </div>
-              {/* Description */}
-              <div>
-                <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Brief Summary</label>
-                <textarea className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 h-24 resize-none" placeholder={scenario.description ? "" : "A short hook to grab players' attention..."} value={scenario.description} onChange={e => updateScenario({ description: e.target.value })} />
-              </div>
-            </div>
-          </section>
-
-          {/* Introduction: Rich Text Editor */}
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
-            <h2 className="text-xl font-bold flex items-center gap-3"><FileText className="text-amber-500" /> Introduction</h2>
-            <div>
-              <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Engaging Story Introduction</label>
-              <p className="text-xs text-zinc-600 mb-4">Craft a rich, visually compelling introduction to set the scene. Use images, formatting, and layout to draw players in.</p>
-              <RichtextEditor
-                key={rteKey}
-                content={scenario.introduction || ''}
-                onChange={(html) => updateScenario({ introduction: html })}
-                placeholder="Write a captivating introduction for your story..."
-              />
-            </div>
-          </section>
-
-          {/* Story Foundation: Backstory, Greeting, Custom Instructions */}
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
-            <h2 className="text-xl font-bold flex items-center gap-3"><BookOpen className="text-green-500" /> Story Foundation</h2>
-            <div className="space-y-6">
-              <div>
-                <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Main Backstory & World Details</label>
-                <textarea className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-4 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 h-64 resize-y font-serif text-lg leading-relaxed" placeholder={scenario.backstory ? "" : "Describe the environment, the history, and the current situation. Use {{user}} to refer to the player's character."} value={scenario.backstory} onChange={e => updateScenario({ backstory: e.target.value })} />
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Greeting Message</label>
-                  <textarea className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 h-40 resize-none" placeholder={scenario.greetingMessage ? "" : "The first message sent to the player. Set the tone here."} value={scenario.greetingMessage} onChange={e => updateScenario({ greetingMessage: e.target.value })} />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2">Custom AI Instructions</label>
-                  <textarea className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 h-40 resize-none" placeholder={scenario.customInstructions ? "" : "Special rules for the AI (e.g., 'Joe always speaks in rhymes')"} value={scenario.customInstructions} onChange={e => updateScenario({ customInstructions: e.target.value })} />
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Cast of Characters */}
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold flex items-center gap-3"><UserPlus className="text-purple-500" /> Cast of Characters</h2>
-              <button onClick={addCharacter} className="bg-indigo-600/10 text-indigo-400 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors">
-                <Plus size={16} /> Add NPC
-              </button>
-            </div>
-            <div className="grid grid-cols-1 gap-4">
-              {scenario.characters.map(char => (
-                <div key={char.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-6 space-y-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-4 flex-1">
-                      {/* Character avatar */}
-                      <div className="w-12 h-12 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center relative overflow-hidden group/npc">
-                        {char.avatar ? <img src={char.avatar} className="w-full h-full object-cover" /> : <UserPlus size={20} className="text-zinc-700" />}
-                        <label className="absolute inset-0 bg-black/60 opacity-0 group-hover/npc:opacity-100 group-focus-within/npc:opacity-100 pointer-coarse:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
-                          <Upload size={14} className="text-white" />
-                          <input type="file" accept="image/*" className="hidden" onChange={async (e) => { const file = e.target.files?.[0]; if (file) { const base64 = await fileToBase64(file); updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, avatar: base64 } : c) }); } }} />
-                        </label>
-                      </div>
-                      <input className="bg-transparent text-xl font-bold text-white outline-none focus:border-b border-indigo-500 flex-1" value={char.name} onChange={e => { 
-                        const newName = e.target.value;
-                        if (newName.toLowerCase() === '{{user}}') {
-                          showToast('"{{user}}" is a reserved placeholder and cannot be used as a character name.', 'error');
-                          return;
-                        }
-                        updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, name: newName } : c) }); 
-                      }} />
-                    </div>
-                    <button onClick={() => updateScenario({ characters: scenario.characters.filter(c => c.id !== char.id) })} className="text-zinc-700 hover:text-red-500 p-2"><Trash2 size={18} /></button>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-[10px] font-black text-zinc-600 uppercase mb-1 block">Role & Appearance</label>
-                      <textarea className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 resize-none h-24" value={char.description} onChange={e => { updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, description: e.target.value } : c) }); }} />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-black text-zinc-600 uppercase mb-1 block">Personality & Mannerisms</label>
-                      <textarea className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 resize-none h-24" value={char.personality} onChange={e => { updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, personality: e.target.value } : c) }); }} />
-                    </div>
-                  </div>
-                </div>
-              ))}
-              {scenario.characters.length === 0 && (
-                <div className="text-center py-10 border border-dashed border-zinc-800 rounded-2xl">
-                  <p className="text-zinc-600 text-sm">Every good story needs characters. Add some NPCs!</p>
-                </div>
-              )}
-            </div>
-          </section>
-
-          {/* World Lore */}
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 space-y-6">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold flex items-center gap-3"><Brain className="text-indigo-500" /> World Lore</h2>
-              <button onClick={addLorePiece} className="bg-indigo-600/10 text-indigo-400 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors">
-                <Plus size={16} /> Add Lore
-              </button>
-            </div>
-            <div className="grid grid-cols-1 gap-4">
-              {scenario.lorePieces.map(piece => (
-                <div key={piece.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-6 flex gap-4">
-                  <div className="flex-1 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <input className="bg-transparent text-lg font-bold text-white outline-none focus:border-b border-indigo-500" value={piece.title} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, title: e.target.value } : p) }); }} />
-                      <button onClick={() => updateScenario({ lorePieces: scenario.lorePieces.filter(p => p.id !== piece.id) })} className="text-zinc-700 hover:text-red-500"><Trash2 size={16}/></button>
-                    </div>
-                    <textarea className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-400 h-24" placeholder="Describe this location, object, or event..." value={piece.content} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: e.target.value } : p) }); }} />
-                    {/* How this lore reaches the AI: one mode instead of three checkboxes */}
-                    <div className="flex flex-wrap items-end gap-4">
-                      <label className="text-[10px] font-black text-zinc-500 uppercase">
-                        <span className="block mb-1">Sent to the AI</span>
-                        <select
-                          className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-300 normal-case font-normal"
-                          value={piece.pinned ? 'pinned' : piece.smartActivation ? 'triggered' : 'off'}
-                          onChange={e => {
-                            const mode = e.target.value;
-                            updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, pinned: mode === 'pinned', smartActivation: mode === 'triggered' } : p) });
-                          }}
-                        >
-                          <option value="triggered">When a trigger word comes up</option>
-                          <option value="pinned">Always</option>
-                          <option value="off">Never (draft)</option>
-                        </select>
-                      </label>
-                      <label className="text-[10px] font-black text-zinc-500 uppercase">
-                        <span className="block mb-1">Priority</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={1000}
-                          className="w-20 bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-300"
-                          value={piece.weight ?? 100}
-                          onChange={e => {
-                            const weight = Math.max(0, Math.min(1000, Number(e.target.value) || 0));
-                            updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, weight } : p) });
-                          }}
-                        />
-                      </label>
-                      <label className="flex items-center gap-2 text-[10px] font-black text-zinc-500 uppercase cursor-pointer pb-1.5" title="The AI still uses it; other players cannot read it unless you allow customization">
-                        <input
-                          type="checkbox"
-                          checked={!!piece.hidden}
-                          onChange={e => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, hidden: e.target.checked } : p) })}
-                        /> Hidden from players
-                      </label>
-                    </div>
-                    <p className="text-[10px] text-zinc-600">
-                      "Always" pieces are sent every turn (up to 10). Triggered pieces are sent when a trigger word appears as a
-                      whole word in the last few messages (up to 5 at a time). Higher priority wins when there are too many.
-                    </p>
-                    {/* Trigger words input (only shown for smart-activated lore) */}
-                    {piece.smartActivation && (
-                      <div>
-                        <label className="text-[10px] font-black text-zinc-600 uppercase mb-1 block">Trigger Words (comma-separated, press Enter to add)</label>
-                        <div className="flex flex-wrap gap-1 mb-2">
-                          {(piece.triggers || []).map(t => (
-                            <span key={t} className="bg-amber-600/10 text-amber-400 border border-amber-600/20 px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1">
-                              {t}
-                              <button onClick={() => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, triggers: (p.triggers || []).filter(x => x !== t) } : p) })}><X size={10}/></button>
-                            </span>
-                          ))}
-                        </div>
-                        <input
-                          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-300"
-                          placeholder="e.g. forest, dark, shadows"
-                          value={triggerInputs[piece.id] || ''}
-                          onChange={e => setTriggerInputs(prev => ({ ...prev, [piece.id]: e.target.value }))}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') {
-                              const words = (triggerInputs[piece.id] || '').split(',').map(s => s.trim()).filter(Boolean);
-                              if (words.length > 0) {
-                                updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, triggers: [...new Set([...(p.triggers || []), ...words])] } : p) });
-                              }
-                              setTriggerInputs(prev => ({ ...prev, [piece.id]: '' }));
-                            }
-                          }}
-                        />
+                    <label className="text-[10px] font-black text-zinc-500 uppercase mb-1 block">Trigger Words (comma-separated, press Enter to add)</label>
+                    {(piece.triggers || []).length > 0 && (
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {(piece.triggers || []).map(t => (
+                          <span key={t} className="bg-amber-600/10 text-amber-400 border border-amber-600/20 px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1">
+                            {t}
+                            <button onClick={() => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, triggers: (p.triggers || []).filter(x => x !== t) } : p) })} aria-label={`Remove trigger ${t}`}><X size={10} /></button>
+                          </span>
+                        ))}
                       </div>
                     )}
+                    <input
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      placeholder="e.g. forest, dark, shadows"
+                      value={triggerInputs[piece.id] || ''}
+                      onChange={e => setTriggerInputs(prev => ({ ...prev, [piece.id]: e.target.value }))}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          const words = (triggerInputs[piece.id] || '').split(',').map(s => s.trim()).filter(Boolean);
+                          if (words.length > 0) {
+                            updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, triggers: [...new Set([...(p.triggers || []), ...words])] } : p) });
+                          }
+                          setTriggerInputs(prev => ({ ...prev, [piece.id]: '' }));
+                        }
+                      }}
+                    />
                   </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        </div>
+                )}
+              </div>
+            ))}
+            {scenario.lorePieces.length === 0 && (
+              <div className="text-center py-10 border border-dashed border-zinc-800 rounded-2xl">
+                <p className="text-zinc-600 text-sm">Lore cards hold places, factions, items and history the AI can draw on.</p>
+              </div>
+            )}
+          </div>
+        </section>
 
-        {/* ── Right Column: Settings Sidebar ── */}
-        <div className="space-y-6 lg:sticky lg:top-24">
-          
-          {/* Logic & Privacy toggles */}
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-6">
-            <h2 className="text-lg font-bold flex items-center gap-2 text-white"><SettingsIcon size={18} className="text-zinc-500" /> Logic & Privacy</h2>
+        {/* Settings & Publishing: all switches live here, after the content */}
+        <section id="editor-settings" className={sectionClass}>
+          <h2 className="text-xl font-bold flex items-center gap-3"><SettingsIcon className="text-zinc-400" /> Settings & Publishing</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-4">
+              <h3 className="text-xs font-black text-zinc-500 uppercase tracking-widest">Sharing & Privacy</h3>
               <SettingToggle label="Public Scenario" hint="Visible in Explore" checked={!!scenario.settings.isPublic} onChange={v => updateSettings({ isPublic: v })} />
               <SettingToggle label="Allow Customization" hint="Others can remix" checked={!!scenario.settings.allowCustomization} onChange={v => updateSettings({ allowCustomization: v })} />
               <SettingToggle label="Hide Prompts" hint="Others can't read backstory or lore" checked={!!scenario.settings.hidePrompts} onChange={v => updateSettings({ hidePrompts: v })} />
               <SettingToggle label="Mature Content" hint="18+ label" color="bg-red-600" checked={!!scenario.settings.sensitiveContent} onChange={v => updateSettings({ sensitiveContent: v })} />
               <SettingToggle label="Separate Persona" hint="User is distinct" checked={!!scenario.settings.separateUserCharacter} onChange={v => updateSettings({ separateUserCharacter: v })} />
             </div>
-            <h3 className="text-xs font-black text-zinc-500 uppercase tracking-widest pt-2">AI Instructions</h3>
             <div className="space-y-4">
+              <h3 className="text-xs font-black text-zinc-500 uppercase tracking-widest">AI Instructions</h3>
               <SettingToggle label="*Action* / &quot;Dialogue&quot; Style" hint="Ask the AI for this formatting" checked={scenario.settings.asteriskFormatting !== false} onChange={v => updateSettings({ asteriskFormatting: v })} />
               <SettingToggle label="Send Introduction to AI" hint="Otherwise only players see it" checked={!!scenario.settings.sendIntroduction} onChange={v => updateSettings({ sendIntroduction: v })} />
-            </div>
-          </section>
 
-          {/* Visibility summary card */}
-          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
-            <div className="flex items-center gap-2 text-zinc-500 mb-4"><Globe size={16} /><span className="text-xs font-bold uppercase tracking-widest">Visibility</span></div>
-            <div className="flex items-center gap-3 p-4 bg-zinc-950 rounded-2xl border border-zinc-800">
-              {scenario.settings.isPublic ? <Globe className="text-green-500" size={24} /> : <Lock className="text-orange-500" size={24} />}
-              <div>
-                <p className="text-sm font-bold text-white">{scenario.settings.isPublic ? 'Public Story' : 'Private Draft'}</p>
-                <p className="text-[10px] text-zinc-600">{scenario.settings.isPublic ? 'Anyone can play and find this' : 'Only you can see this'}</p>
+              {/* Visibility summary */}
+              <div className="flex items-center gap-3 p-4 mt-2 bg-zinc-950 rounded-2xl border border-zinc-800">
+                {scenario.settings.isPublic ? <Globe className="text-emerald-500" size={24} /> : <Lock className="text-amber-500" size={24} />}
+                <div>
+                  <p className="text-sm font-bold text-white">{scenario.settings.isPublic ? 'Public Story' : 'Private Draft'}</p>
+                  <p className="text-[11px] text-zinc-500">{scenario.settings.isPublic ? 'Anyone can play and find this' : 'Only you can see this'}</p>
+                </div>
               </div>
+              {/* Warning for public scenarios without a cover image */}
+              {scenario.settings.isPublic && !scenario.image && (
+                <div className="p-3 bg-amber-900/20 border border-amber-600/30 rounded-xl">
+                  <p className="text-xs font-bold text-amber-400">⚠ A cover image is required for public scenarios. Upload one above or switch to Private.</p>
+                </div>
+              )}
             </div>
-            {/* Warning for public scenarios without a cover image */}
-            {scenario.settings.isPublic && !scenario.image && (
-              <div className="mt-3 p-3 bg-amber-900/20 border border-amber-600/30 rounded-xl">
-                <p className="text-xs font-bold text-amber-400">⚠ A cover image is required for public scenarios. Upload one above or switch to Private.</p>
-              </div>
-            )}
-          </section>
-
-          {/* Pro tip */}
-          <div className="p-4 rounded-2xl bg-indigo-600/5 border border-indigo-600/10">
-            <h4 className="text-xs font-black text-indigo-400 uppercase mb-2 flex items-center gap-2"><MessageSquare size={14}/> Pro Tip</h4>
-            <p className="text-xs text-zinc-500 leading-relaxed">Use <strong>{`{{user}}`}</strong> in your backstory to dynamically reference the player's persona name.</p>
           </div>
+        </section>
+      </div>
+
+      {/* Save bar: stays at the bottom of the screen (above the phone navbar) */}
+      <div className="sticky bottom-16 md:bottom-0 z-30 -mx-4 mt-8 px-4 py-3 bg-zinc-950/90 backdrop-blur border-t border-zinc-800/60">
+        <div className="flex items-center justify-end gap-3">
+          <span className={`mr-auto flex items-center gap-2 text-xs ${dirty ? 'text-amber-400' : 'text-zinc-600'}`} aria-live="polite">
+            <span className={`w-2 h-2 rounded-full ${dirty ? 'bg-amber-400' : 'bg-zinc-700'}`} />
+            {dirty ? 'Unsaved changes' : 'No unsaved changes'}
+          </span>
+          <button onClick={leaveEditor} className="px-4 py-2.5 rounded-xl text-sm font-bold text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors">
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white px-6 py-2.5 rounded-xl font-bold flex items-center gap-2 shadow-lg shadow-indigo-900/20 transition-all active:scale-95"
+          >
+            <Save size={18} /> {saving ? 'Saving…' : 'Save Changes'}
+          </button>
         </div>
       </div>
 
@@ -746,7 +797,46 @@ export const CreateScenario: React.FC = () => {
   );
 };
 
-/** On/off switch for the editor's settings sidebar */
+/** Sections listed in the editor's sticky navigation */
+const EDITOR_SECTIONS = [
+  { id: 'editor-basics', label: 'Basics' },
+  { id: 'editor-intro', label: 'Introduction' },
+  { id: 'editor-story', label: 'Story' },
+  { id: 'editor-cast', label: 'Cast' },
+  { id: 'editor-lore', label: 'Lore' },
+  { id: 'editor-settings', label: 'Settings' },
+];
+
+/** Textarea that grows with its content, so long text never hides behind a scrollbar */
+const AutoTextarea: React.FC<{
+  value: string | undefined;
+  onChange: (value: string) => void;
+  minRows?: number;
+  className?: string;
+  placeholder?: string;
+  id?: string;
+}> = ({ value, onChange, minRows = 3, className = '', placeholder, id }) => {
+  const ref = React.useRef<HTMLTextAreaElement>(null);
+  React.useLayoutEffect(() => {
+    const ta = ref.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${ta.scrollHeight + 2}px`;
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      id={id}
+      rows={minRows}
+      className={`${className} resize-none overflow-hidden`}
+      placeholder={placeholder}
+      value={value || ''}
+      onChange={e => onChange(e.target.value)}
+    />
+  );
+};
+
+/** On/off switch for the editor's settings section */
 const SettingToggle: React.FC<{
   label: string;
   hint: string;
@@ -757,7 +847,7 @@ const SettingToggle: React.FC<{
   <div className="flex items-center justify-between gap-3">
     <div>
       <h4 className="text-sm font-bold text-zinc-300">{label}</h4>
-      <p className="text-[10px] text-zinc-600 uppercase font-black">{hint}</p>
+      <p className="text-[10px] text-zinc-500 uppercase font-black">{hint}</p>
     </div>
     <button
       type="button"
