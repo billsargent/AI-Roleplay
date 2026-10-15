@@ -10,13 +10,25 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import { saveImage, deleteImage, copyImage, resolveImageUrl, parseDataUrl, relativePath } from './images.js';
+import { sanitizeRichText } from '../lib/sanitizeHtml.js';
+import { saveImage, deleteImage, copyImage, resolveImageUrl, parseDataUrl, relativePath, adoptImage, imagePathFromUrl, isValidEntityId } from './images.js';
+
+/**
+ * An error caused by the request data (not a server fault).
+ * Routes return `status` and `message` to the client.
+ */
+export class DataError extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.status = status;
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/** Path to the SQLite database file (stored in project root) */
-const DB_PATH = path.join(__dirname, '..', 'database.sqlite');
+/** Path to the SQLite database file (project root by default; DB_PATH overrides, e.g. for tests) */
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'database.sqlite');
 
 let db;
 
@@ -30,6 +42,8 @@ export function getDb() {
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');    // Write-Ahead Logging for performance
     db.pragma('foreign_keys = ON');     // Enforce referential integrity
+    db.pragma('busy_timeout = 5000');   // Wait for a lock (e.g. migration script) instead of failing at once
+    db.pragma('synchronous = NORMAL');  // Safe with WAL; fewer fsyncs per write
     initTables();
   }
   return db;
@@ -146,15 +160,53 @@ function initTables() {
     );
   `);
 
-  // ── Safe migrations ──
-  try { db.exec(`ALTER TABLE scenarios ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
-  try { db.exec(`ALTER TABLE chats ADD COLUMN deleted_at INTEGER DEFAULT NULL`); } catch {}
-  try { db.exec(`ALTER TABLE scenarios ADD COLUMN introduction TEXT DEFAULT ''`); } catch {}
-  // ── Image path columns (file-system storage) ──
-  try { db.exec(`ALTER TABLE scenarios ADD COLUMN image_path TEXT DEFAULT ''`); } catch {}
-  try { db.exec(`ALTER TABLE characters ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
-  try { db.exec(`ALTER TABLE lore_pieces ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
-  try { db.exec(`ALTER TABLE personas ADD COLUMN avatar_path TEXT DEFAULT ''`); } catch {}
+  // ── Column migrations (each adds the column only if it is missing) ──
+  addColumnIfMissing('scenarios', 'deleted_at', 'INTEGER DEFAULT NULL');
+  addColumnIfMissing('chats', 'deleted_at', 'INTEGER DEFAULT NULL');
+  addColumnIfMissing('scenarios', 'introduction', "TEXT DEFAULT ''");
+  // Image path columns (file-system storage)
+  addColumnIfMissing('scenarios', 'image_path', "TEXT DEFAULT ''");
+  addColumnIfMissing('characters', 'avatar_path', "TEXT DEFAULT ''");
+  addColumnIfMissing('lore_pieces', 'avatar_path', "TEXT DEFAULT ''");
+  addColumnIfMissing('personas', 'avatar_path', "TEXT DEFAULT ''");
+  // Session revocation: tokens issued before this time (ms) are rejected
+  addColumnIfMissing('users', 'password_changed_at', 'INTEGER DEFAULT 0');
+  // Which of a message's alternative versions is shown
+  addColumnIfMissing('messages', 'current_version_index', 'INTEGER DEFAULT 0');
+  // Time of the last message a memory summarises (rolling memories)
+  addColumnIfMissing('memories', 'covered_until', 'INTEGER DEFAULT NULL');
+
+  // ── Indexes for the lookups every page makes ──
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id, deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_chats_scenario ON chats(scenario_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_memories_chat ON memories(chat_id);
+    CREATE INDEX IF NOT EXISTS idx_characters_scenario ON characters(scenario_id);
+    CREATE INDEX IF NOT EXISTS idx_lore_scenario ON lore_pieces(scenario_id);
+    CREATE INDEX IF NOT EXISTS idx_scenarios_user ON scenarios(user_id, deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_scenarios_deleted ON scenarios(deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_personas_user ON personas(user_id);
+  `);
+}
+
+/**
+ * Adds a column when it does not exist yet. Unlike a bare ALTER wrapped in
+ * try/catch, real errors (typos, locked database) are not swallowed.
+ */
+function addColumnIfMissing(table, column, definition) {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === column);
+  if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+/**
+ * Value for the old image/avatar text columns. Once a file exists on disk
+ * (path column set) nothing more is stored there, so base64 images stop
+ * bloating the database on every save. Plain web URLs are kept.
+ */
+function legacyImageValue(value, filePath) {
+  if (filePath) return '';
+  return typeof value === 'string' && /^https?:\/\//i.test(value) ? value : '';
 }
 
 // ─── Users ────────────────────────────────────────────────────────────
@@ -215,14 +267,44 @@ export function updateUser(id, updates) {
     db.prepare(`UPDATE users SET role = ? WHERE id = ?`).run(updates.role, id);
   }
   if (updates.password !== undefined) {
-    db.prepare(`UPDATE users SET password = ? WHERE id = ?`).run(updates.password, id);
+    // Changing the password signs the user out everywhere (see auth middleware)
+    db.prepare(`UPDATE users SET password = ?, password_changed_at = ? WHERE id = ?`)
+      .run(updates.password, Date.now(), id);
   }
   return getUserById(id);
 }
 
+/** Number of admin accounts (excluding the internal system user) */
+export function countAdmins() {
+  return db.prepare(`SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin' AND id != 'system'`).get().cnt;
+}
+
+/**
+ * Creates a user, making them admin if they are the first real account.
+ * The count and the insert run in one transaction, so two simultaneous
+ * first sign-ups cannot both become admin.
+ * @returns {object} The created user
+ */
+export function createUserFirstIsAdmin(user) {
+  return db.transaction(() => {
+    const { cnt } = db.prepare(`SELECT COUNT(*) AS cnt FROM users WHERE id != 'system'`).get();
+    const created = { ...user, role: cnt === 0 ? 'admin' : 'user' };
+    createUser(created);
+    return created;
+  }).immediate();
+}
+
 /** Deletes a user and all cascade-related data (chats, scenarios, etc.) */
 export function deleteUserById(id) {
+  // Rows cascade in the database, but image files on disk do not: collect them first
+  const files = [
+    ...db.prepare(`SELECT avatar_path FROM personas WHERE user_id = ?`).all(id).map(r => r.avatar_path),
+    ...db.prepare(`SELECT id FROM scenarios WHERE user_id = ?`).all(id).flatMap(s => scenarioImagePaths(s.id)),
+  ];
+  // Other users' chats keep working (read-only) when the scenario is gone
+  db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id IN (SELECT id FROM scenarios WHERE user_id = ?)`).run(id);
   db.prepare(`DELETE FROM users WHERE id = ?`).run(id);
+  for (const f of files) if (f) deleteImage(f);
 }
 
 
@@ -245,26 +327,32 @@ export function getPersonasByUserId(userId) {
  * @param {Object} persona - Persona object with id, userId, name, description, avatar
  */
 export function upsertPersona(persona) {
-  const existing = db.prepare(`SELECT id, avatar_path FROM personas WHERE id = ?`).get(persona.id);
+  if (!isValidEntityId(persona.id)) throw new DataError('Invalid persona id', 400);
+  const existing = db.prepare(`SELECT id, user_id, avatar_path FROM personas WHERE id = ?`).get(persona.id);
+  // Never let one user update (or delete the avatar of) another user's persona
+  if (existing && existing.user_id !== persona.userId) {
+    throw new DataError('Persona not found or unauthorized', 403);
+  }
 
   // ── Extract avatar to file system ──
   let avatarPath = existing?.avatar_path || '';
   if (persona.avatar && persona.avatar.startsWith('data:image/')) {
-    // Delete old avatar file if exists
-    if (existing?.avatar_path) deleteImage(existing.avatar_path);
     const saved = saveImage(persona.avatar, 'personas', persona.id);
     if (saved) avatarPath = saved;
   } else if (persona.avatar && persona.avatar.startsWith('/api/images/')) {
-    avatarPath = persona.avatar.replace('/api/images/', '');
+    avatarPath = adoptImage(persona.avatar, 'personas', persona.id) || avatarPath;
   }
 
   if (existing) {
     db.prepare(`UPDATE personas SET name = ?, description = ?, avatar = ?, avatar_path = ? WHERE id = ?`)
-      .run(persona.name, persona.description || '', persona.avatar || '', avatarPath, persona.id);
+      .run(persona.name, persona.description || '', legacyImageValue(persona.avatar, avatarPath), avatarPath, persona.id);
   } else {
     db.prepare(`INSERT INTO personas (id, user_id, name, description, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(persona.id, persona.userId, persona.name, persona.description || '', persona.avatar || '', avatarPath);
+      .run(persona.id, persona.userId, persona.name, persona.description || '', legacyImageValue(persona.avatar, avatarPath), avatarPath);
   }
+  // Remove the previous avatar only after saving, and only if it was replaced
+  // by a file with a different name (same name means it was overwritten in place)
+  if (existing?.avatar_path && existing.avatar_path !== avatarPath) deleteImage(existing.avatar_path);
   return persona;
 }
 
@@ -352,6 +440,72 @@ export function getAccessibleScenarios(userId) {
 }
 
 /**
+ * Lists scenarios with filtering, search and pagination done in SQL, so
+ * search finds matches on every page and totals are correct.
+ *
+ * @param {object} opts
+ * @param {string} opts.userId - Requesting user
+ * @param {boolean} opts.isAdmin - Admins can see every scenario
+ * @param {'explore'|'mine-public'|'mine-private'} [opts.tab] - Home page tab; omitted = everything the user can see
+ * @param {string} [opts.q] - Search text (name, description, creator, tags)
+ * @param {number} opts.limit
+ * @param {number} opts.offset
+ * @returns {{ scenarios: object[], total: number }}
+ */
+export function listScenarios({ userId, isAdmin, tab, q, limit, offset }) {
+  const where = ['deleted_at IS NULL'];
+  const params = [];
+  const isPublic = `json_extract(settings, '$.isPublic') = 1`;
+
+  if (tab === 'explore') {
+    where.push(isPublic);
+  } else if (tab === 'mine-public') {
+    where.push('user_id = ?', isPublic);
+    params.push(userId);
+  } else if (tab === 'mine-private') {
+    where.push('user_id = ?', `COALESCE(json_extract(settings, '$.isPublic'), 0) != 1`);
+    params.push(userId);
+  } else if (!isAdmin) {
+    where.push(`(${isPublic} OR user_id = ?)`);
+    params.push(userId);
+  }
+
+  const search = typeof q === 'string' ? q.trim().toLowerCase() : '';
+  if (search) {
+    const like = `%${search.replace(/[\\%_]/g, m => '\\' + m)}%`;
+    where.push(`(LOWER(name) LIKE ? ESCAPE '\\' OR LOWER(description) LIKE ? ESCAPE '\\' OR LOWER(creator_name) LIKE ? ESCAPE '\\' OR LOWER(tags) LIKE ? ESCAPE '\\')`);
+    params.push(like, like, like, like);
+  }
+
+  const whereSql = where.join(' AND ');
+  const total = db.prepare(`SELECT COUNT(*) AS cnt FROM scenarios WHERE ${whereSql}`).get(...params).cnt;
+  const rows = db.prepare(`SELECT ${SCENARIO_LIST_COLUMNS} FROM scenarios WHERE ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+    .all(...params, limit, offset);
+  return { scenarios: rows.map(scenarioToListCamelCase), total };
+}
+
+/**
+ * Name and cover image for each scenario id (including trashed ones), so
+ * chat lists can label chats without loading every scenario.
+ * @param {string[]} ids
+ * @returns {Record<string, { name: string, image: string, deleted: boolean }>}
+ */
+export function getScenarioLabels(ids) {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (unique.length === 0) return {};
+  const rows = db.prepare(`SELECT id, name, image, image_path, deleted_at FROM scenarios WHERE id IN (${unique.map(() => '?').join(',')})`).all(...unique);
+  const labels = {};
+  for (const r of rows) {
+    labels[r.id] = {
+      name: r.name,
+      image: resolveImageUrl(r.image, r.image_path),
+      deleted: r.deleted_at != null,
+    };
+  }
+  return labels;
+}
+
+/**
  * Gets a full scenario by ID including characters and lore pieces — excludes soft-deleted items.
  * Lore pieces are enriched with parsed JSON and boolean conversions.
  */
@@ -395,6 +549,17 @@ export function getScenarioById(id) {
  * legacy data until the migration script clears them).
  */
 export function saveScenarioTransaction(scenario) {
+  if (!isValidEntityId(scenario.id)) throw new DataError('Invalid scenario id', 400);
+  for (const item of [...(scenario.characters || []), ...(scenario.lorePieces || [])]) {
+    if (!isValidEntityId(item?.id)) throw new DataError('Invalid character or lore id', 400);
+  }
+
+  // Introduction is rendered as HTML, so strip anything that can run script
+  scenario.introduction = sanitizeRichText(scenario.introduction);
+
+  const oldPaths = [];
+  // Files in use before the save (cover, avatars, own embedded intro images)
+  const oldScenarioPaths = scenarioImagePaths(scenario.id);
   const transaction = db.transaction(() => {
     const existing = db.prepare(`SELECT id, image_path FROM scenarios WHERE id = ?`).get(scenario.id);
     const settingsJson = JSON.stringify(scenario.settings || {});
@@ -410,15 +575,15 @@ export function saveScenarioTransaction(scenario) {
         // keep image field as base64 for now (migration will clear it later)
       }
     } else if (scenario.image && scenario.image.startsWith('/api/images/')) {
-      // Already a URL — extract path from it
-      imagePath = scenario.image.replace('/api/images/', '');
+      // Already a URL — validate it and make sure the file belongs to this scenario
+      imagePath = adoptImage(scenario.image, 'scenarios', scenario.id) || imagePath;
     }
     // If image is a plain URL (e.g., Unsplash), keep it in image field — no file to save
 
     if (existing) {
       db.prepare(`UPDATE scenarios SET name=?, description=?, image=?, image_path=?, tags=?, backstory=?, introduction=?, greeting_message=?, custom_instructions=?, settings=?, creator_name=? WHERE id=?`)
         .run(
-          scenario.name, scenario.description || '', scenario.image || '', imagePath, tagsJson,
+          scenario.name, scenario.description || '', legacyImageValue(scenario.image, imagePath), imagePath, tagsJson,
           scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '', scenario.customInstructions || '',
           settingsJson, scenario.creatorName || '', scenario.id
         );
@@ -426,54 +591,48 @@ export function saveScenarioTransaction(scenario) {
       db.prepare(`INSERT INTO scenarios (id, user_id, creator_name, name, description, image, image_path, tags, backstory, introduction, greeting_message, custom_instructions, settings, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(
           scenario.id, scenario.userId, scenario.creatorName || '', scenario.name, scenario.description || '',
-          scenario.image || '', imagePath, tagsJson, scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '',
+          legacyImageValue(scenario.image, imagePath), imagePath, tagsJson, scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '',
           scenario.customInstructions || '', settingsJson, scenario.createdAt || Date.now()
         );
     }
 
-    // ── Delete old character avatar files (if scenario already existed) ──
-    if (existing) {
-      const oldChars = db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenario.id);
-      for (const oc of oldChars) {
-        if (oc.avatar_path) deleteImage(oc.avatar_path);
-      }
-    }
+    // Remember the files this scenario used before the save; any that are no
+    // longer referenced afterwards are deleted once the transaction commits
+    if (existing) oldPaths.push(...oldScenarioPaths);
 
     // Replace all characters for this scenario (delete old, insert new)
     db.prepare(`DELETE FROM characters WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.characters && scenario.characters.length > 0) {
-      const insertChar = db.prepare(`INSERT OR REPLACE INTO characters (id, scenario_id, name, description, personality, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      // Plain INSERT: this scenario's rows were just deleted, so an id that still
+      // exists belongs to another scenario (or is duplicated) and must not be replaced
+      const insertChar = db.prepare(`INSERT INTO characters (id, scenario_id, name, description, personality, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      const charTaken = db.prepare(`SELECT 1 FROM characters WHERE id = ?`);
       for (const c of scenario.characters) {
+        if (charTaken.get(c.id)) throw new DataError('Character id conflicts with an existing character', 409);
         let charAvatarPath = '';
         if (c.avatar && c.avatar.startsWith('data:image/')) {
           const saved = saveImage(c.avatar, 'characters', c.id);
           if (saved) charAvatarPath = saved;
         } else if (c.avatar && c.avatar.startsWith('/api/images/')) {
-          charAvatarPath = c.avatar.replace('/api/images/', '');
+          charAvatarPath = adoptImage(c.avatar, 'characters', c.id) || '';
         }
-        insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', c.avatar || '', charAvatarPath);
-      }
-    }
-
-    // ── Delete old lore piece avatar files ──
-    if (existing) {
-      const oldLore = db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenario.id);
-      for (const ol of oldLore) {
-        if (ol.avatar_path) deleteImage(ol.avatar_path);
+        insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', legacyImageValue(c.avatar, charAvatarPath), charAvatarPath);
       }
     }
 
     // Replace all lore pieces for this scenario
     db.prepare(`DELETE FROM lore_pieces WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.lorePieces && scenario.lorePieces.length > 0) {
-      const insertLore = db.prepare(`INSERT OR REPLACE INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insertLore = db.prepare(`INSERT INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const loreTaken = db.prepare(`SELECT 1 FROM lore_pieces WHERE id = ?`);
       for (const p of scenario.lorePieces) {
+        if (loreTaken.get(p.id)) throw new DataError('Lore id conflicts with an existing lore piece', 409);
         let loreAvatarPath = '';
         if (p.avatar && p.avatar.startsWith('data:image/')) {
           const saved = saveImage(p.avatar, 'lore-pieces', p.id);
           if (saved) loreAvatarPath = saved;
         } else if (p.avatar && p.avatar.startsWith('/api/images/')) {
-          loreAvatarPath = p.avatar.replace('/api/images/', '');
+          loreAvatarPath = adoptImage(p.avatar, 'lore-pieces', p.id) || '';
         }
         insertLore.run(
           p.id, scenario.id, p.type || 'other', p.title || '', p.content || '', p.weight || 100,
@@ -486,6 +645,13 @@ export function saveScenarioTransaction(scenario) {
   });
 
   transaction();
+
+  // Delete files that were in use before the save and are not referenced now.
+  // Done after commit so a failed save never loses images.
+  const stillUsed = new Set(scenarioImagePaths(scenario.id));
+  for (const p of new Set(oldPaths)) {
+    if (p && !stillUsed.has(p)) deleteImage(p);
+  }
   return scenario;
 }
 
@@ -508,21 +674,8 @@ export function restoreScenarioById(id) {
 
 /** Permanently deletes a scenario and all its associated image files from disk (final deletion after trash) */
 export function permanentlyDeleteScenarioById(id) {
-  // Clean up scenario image file
-  const scenarioImage = db.prepare(`SELECT image_path FROM scenarios WHERE id = ?`).get(id);
-  if (scenarioImage?.image_path) deleteImage(scenarioImage.image_path);
-
-  // Clean up character avatar files
-  const charAvatars = db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(id);
-  for (const ca of charAvatars) {
-    if (ca.avatar_path) deleteImage(ca.avatar_path);
-  }
-
-  // Clean up lore piece avatar files
-  const loreAvatars = db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(id);
-  for (const la of loreAvatars) {
-    if (la.avatar_path) deleteImage(la.avatar_path);
-  }
+  // Clean up the cover, character/lore avatars and embedded introduction images
+  cleanupScenarioImages(id);
 
   // Orphan all chats referencing this scenario so they remain accessible in read-only mode
   db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id = ?`).run(id);
@@ -556,7 +709,7 @@ export function purgeExpiredScenarioTrash(daysOld = 30) {
 
   // Orphan all chats referencing expired scenarios first
   db.prepare(`UPDATE chats SET scenario_id = NULL WHERE scenario_id IN (SELECT id FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?)`).run(cutoff);
-  db.prepare(`DELETE FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff);
+  return db.prepare(`DELETE FROM scenarios WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff).changes;
 }
 
 /**
@@ -565,21 +718,33 @@ export function purgeExpiredScenarioTrash(daysOld = 30) {
  * @param {string} scenarioId
  */
 function cleanupScenarioImages(scenarioId) {
-  const scenarioImage = db.prepare(`SELECT image_path FROM scenarios WHERE id = ?`).get(scenarioId);
-  if (scenarioImage?.image_path) deleteImage(scenarioImage.image_path);
+  for (const p of scenarioImagePaths(scenarioId)) deleteImage(p);
+}
 
-  const charAvatars = db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenarioId);
-  for (const ca of charAvatars) {
-    if (ca.avatar_path) deleteImage(ca.avatar_path);
-  }
+/**
+ * Every image file a scenario owns: cover, character and lore avatars, and
+ * the embedded introduction images it created ("{id prefix}_{hash}").
+ * @param {string} scenarioId
+ * @returns {string[]} Relative image paths
+ */
+function scenarioImagePaths(scenarioId) {
+  const paths = [];
+  const s = db.prepare(`SELECT image_path, introduction FROM scenarios WHERE id = ?`).get(scenarioId);
+  if (!s) return paths;
+  paths.push(s.image_path);
+  for (const r of db.prepare(`SELECT avatar_path FROM characters WHERE scenario_id = ?`).all(scenarioId)) paths.push(r.avatar_path);
+  for (const r of db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenarioId)) paths.push(r.avatar_path);
+  paths.push(...ownIntroImagePaths(scenarioId, s.introduction));
+  return paths.filter(Boolean);
+}
 
-  // Clean up embedded introduction images
-  cleanupIntroImages(scenarioId);
-
-  const loreAvatars = db.prepare(`SELECT avatar_path FROM lore_pieces WHERE scenario_id = ?`).all(scenarioId);
-  for (const la of loreAvatars) {
-    if (la.avatar_path) deleteImage(la.avatar_path);
-  }
+/** Embedded introduction images created by this scenario (never another scenario's files) */
+function ownIntroImagePaths(scenarioId, introduction) {
+  if (!introduction) return [];
+  const ownPrefix = scenarioId.substring(0, 14) + "_";
+  return (introduction.match(/\/api\/images\/embedded\/[^"'?#\s)]+/g) || [])
+    .map(url => imagePathFromUrl(url))
+    .filter(rel => rel && path.basename(rel).startsWith(ownPrefix));
 }
 
 /**
@@ -597,21 +762,13 @@ function extractIntroImages(scenarioId, introduction) {
     var embeddedId = scenarioId.substring(0, 14) + "_" + hash.substring(0, 12);
     var saved = saveImage(dataUrl, "embedded", embeddedId);
     if (saved) {
-      return match.replace(dataUrl, "/api/images/" + relativePath("embedded", embeddedId, parsed.ext));
+      // Use the path saveImage wrote (its extension comes from the real bytes)
+      return match.replace(dataUrl, "/api/images/" + saved);
     }
     return match;
   });
 }
 
-function cleanupIntroImages(scenarioId) {
-  var scenario = db.prepare("SELECT introduction FROM scenarios WHERE id = ?").get(scenarioId);
-  if (!scenario || !scenario.introduction) return;
-  var urls = scenario.introduction.match(/\/api\/images\/embedded\/[^"']+/g);
-  if (!urls) return;
-  for (var i = 0; i < urls.length; i++) {
-    deleteImage(urls[i].replace("/api/images/", ""));
-  }
-}
 
 
 
@@ -647,9 +804,37 @@ function enrichChat(chat) {
     userCharacter,
     settings,
     createdAt: chat.created_at,
-    messages,
-    memories,
+    // Shapes match the Message / Memory types in src/types/index.ts
+    messages: messages.map(m => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      timestamp: m.timestamp,
+      characterName: m.character_name || undefined,
+      versions: parseVersions(m.versions),
+      currentVersionIndex: m.current_version_index ?? 0,
+    })),
+    memories: memories.map(m => ({
+      id: m.id,
+      content: m.content,
+      pinned: !!m.pinned,
+      timestamp: m.timestamp,
+      coveredUntil: m.covered_until || undefined,
+    })),
   };
+}
+
+/**
+ * Message versions as an array of strings. Older saves double-encoded the
+ * JSON (the raw string was sent back and stringified again), so unwrap
+ * until an array appears.
+ */
+function parseVersions(value) {
+  let v = value;
+  for (let i = 0; i < 5 && typeof v === 'string'; i++) {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  return Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
 }
 
 /**
@@ -673,11 +858,14 @@ export function saveChatTransaction(chat) {
     // Replace all messages for this chat
     if (chat.messages) {
       db.prepare(`DELETE FROM messages WHERE chat_id = ?`).run(chat.id);
-      const insertMsg = db.prepare(`INSERT INTO messages (id, chat_id, role, content, timestamp, character_name, versions) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      const insertMsg = db.prepare(`INSERT INTO messages (id, chat_id, role, content, timestamp, character_name, versions, current_version_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const m of chat.messages) {
+        const versions = parseVersions(m.versions);
+        const index = Number.isInteger(m.currentVersionIndex) ? m.currentVersionIndex : 0;
         insertMsg.run(
           m.id, chat.id, m.role, m.content || '', m.timestamp || Date.now(),
-          m.characterName || '', JSON.stringify(m.versions || [])
+          m.characterName || '', JSON.stringify(versions),
+          Math.min(Math.max(index, 0), Math.max(versions.length - 1, 0))
         );
       }
     }
@@ -685,9 +873,10 @@ export function saveChatTransaction(chat) {
     // Replace all memories for this chat
     if (chat.memories) {
       db.prepare(`DELETE FROM memories WHERE chat_id = ?`).run(chat.id);
-      const insertMem = db.prepare(`INSERT INTO memories (id, chat_id, content, pinned, timestamp) VALUES (?, ?, ?, ?, ?)`);
+      const insertMem = db.prepare(`INSERT INTO memories (id, chat_id, content, pinned, timestamp, covered_until) VALUES (?, ?, ?, ?, ?, ?)`);
       for (const m of chat.memories) {
-        insertMem.run(m.id, chat.id, m.content || '', m.pinned ? 1 : 0, m.timestamp || Date.now());
+        insertMem.run(m.id, chat.id, m.content || '', m.pinned ? 1 : 0, m.timestamp || Date.now(),
+          Number.isFinite(Number(m.coveredUntil)) ? Number(m.coveredUntil) : null);
       }
     }
   });
@@ -735,7 +924,7 @@ export function emptyChatTrashByUserId(userId) {
 /** Permanently deletes chats that have been in the trash for more than the specified number of days */
 export function purgeExpiredChatTrash(daysOld = 30) {
   const cutoff = Date.now() - (daysOld * 24 * 60 * 60 * 1000);
-  db.prepare(`DELETE FROM chats WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff);
+  return db.prepare(`DELETE FROM chats WHERE deleted_at IS NOT NULL AND deleted_at < ?`).run(cutoff).changes;
 }
 
 /** Deletes all chats owned by a specific user (permanent — used by "Delete All My Chats") */

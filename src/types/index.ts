@@ -15,8 +15,10 @@ export interface Scenario {
   creatorName?: string;
   name: string;
   description: string;
-  /** Base64 or URL scenario image */
+  /** Image URL: "/api/images/..." for uploaded files, a web URL, or a base64 data URL before saving */
   image?: string;
+  /** Relative file path of the uploaded image (set by the server) */
+  imagePath?: string;
   tags: string[];
   backstory: string;
   /** Rich text HTML content for the scenario introduction */
@@ -28,6 +30,8 @@ export interface Scenario {
   characters: StoryCharacter[];
   settings: ScenarioSettings;
   createdAt: number;
+  /** Set by the server when the creator hides the backstory and lore from other users */
+  promptsHidden?: boolean;
 }
 
 /** An NPC or major character within a scenario */
@@ -36,8 +40,10 @@ export interface StoryCharacter {
   name: string;
   description: string;
   personality: string;
-  /** Base64 or URL character avatar */
+  /** Image URL: "/api/images/..." for uploaded files, a web URL, or a base64 data URL before saving */
   avatar?: string;
+  /** Relative file path of the uploaded avatar (set by the server) */
+  avatarPath?: string;
 }
 
 /** A registered user (returned by the API, includes personas) */
@@ -46,6 +52,7 @@ export interface User {
   username: string;
   role: 'admin' | 'user';
   personas: Persona[];
+  createdAt?: number;
 }
 
 /** A user-created persona used when roleplaying as a character in a scenario */
@@ -53,8 +60,10 @@ export interface Persona {
   id: string;
   name: string;
   description: string;
-  /** Base64 or URL persona avatar */
+  /** Image URL: "/api/images/..." for uploaded files, a web URL, or a base64 data URL before saving */
   avatar?: string;
+  /** Relative file path of the uploaded avatar (set by the server) */
+  avatarPath?: string;
 }
 
 /** Thematic category for a lore piece */
@@ -65,7 +74,8 @@ export interface LorePiece {
   id: string;
   type: LorePieceType;
   title: string;
-  description: string;
+  /** Not stored by the server; kept for imported files */
+  description?: string;
   content: string;
   /** Priority weight (higher = more important) */
   weight: number;
@@ -81,8 +91,10 @@ export interface LorePiece {
   triggers: string[];
   /** IDs of other lore pieces linked to this one (e.g., a location linked to an event) */
   linkedPieces: string[];
-  /** Base64 or URL lore image */
+  /** Image URL: "/api/images/..." for uploaded files */
   avatar?: string;
+  /** Relative file path of the uploaded image (set by the server) */
+  avatarPath?: string;
 }
 
 /** Toggleable scenario behavior flags */
@@ -101,13 +113,18 @@ export interface ScenarioSettings {
   hidePrompts: boolean;
   /** Allow users to leave comments on the scenario */
   allowCommenting: boolean;
+  /** Ask the AI for *actions* and "dialogue" formatting (default on) */
+  asteriskFormatting?: boolean;
+  /** Also send the introduction text to the AI (default off) */
+  sendIntroduction?: boolean;
 }
 
 /** A single chat session tied to a scenario */
 export interface Chat {
   id: string;
   userId?: string;
-  scenarioId: string;
+  /** null once the scenario has been permanently deleted (the chat stays readable) */
+  scenarioId: string | null;
   title: string;
   messages: Message[];
   memories: Memory[];
@@ -117,6 +134,11 @@ export interface Chat {
   createdAt: number;
   /** Username of the chat owner (included when admin views other users' chats) */
   ownerUsername?: string;
+  /** Scenario name and cover, added by the chat list endpoint */
+  scenarioName?: string;
+  scenarioImage?: string;
+  /** True when the scenario is in the trash or permanently deleted */
+  scenarioDeleted?: boolean;
 }
 
 /** A single message exchanged in a chat */
@@ -129,7 +151,7 @@ export interface Message {
   characterName?: string;
   /** Alternative message versions (for undo/edit) */
   versions?: string[];
-  /** Index of the currently active version */
+  /** Index of the currently active version (stored by the server) */
   currentVersionIndex?: number;
 }
 
@@ -140,6 +162,8 @@ export interface Memory {
   /** Pinned memories are never trimmed */
   pinned: boolean;
   timestamp: number;
+  /** Time of the last message this memory summarises; the next memory starts after it */
+  coveredUntil?: number;
 }
 
 /** The persona the user chose to play as in a chat session */
@@ -190,6 +214,6 @@ export interface LlmSettings {
   memoryWordCount?: string;
   /** Maximum number of memories to retain (oldest are trimmed) */
   memoryMaxCount?: string;
-  /** DeepSeek model ID to use for all AI requests (e.g., "deepseek-chat", "deepseek-reasoner") */
+  /** DeepSeek model ID to use for all AI requests (e.g., "deepseek-flash", "deepseek-v4-pro") */
   deepseekModel?: string;
 }

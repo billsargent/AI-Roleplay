@@ -15,6 +15,7 @@
 import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { CheckCircle, AlertTriangle, X } from 'lucide-react';
+import { useDialog } from './useDialog';
 
 // ─── Toast Item ───
 
@@ -72,6 +73,9 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
   }, []);
 
   /** Handle the user's confirm/cancel choice */
+  // Esc cancels; focus starts on Cancel (the safe choice)
+  const confirmRef = useDialog(!!confirm, () => handleConfirm(false));
+
   const handleConfirm = (value: boolean) => {
     confirm?.resolve(value);
     setConfirm(null);
@@ -117,7 +121,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
             >
               {toastIcons[toast.type]}
               <span className="text-sm font-semibold">{toast.message}</span>
-              <button onClick={() => removeToast(toast.id)} className="ml-2 opacity-60 hover:opacity-100 transition-opacity">
+              <button onClick={() => removeToast(toast.id)} aria-label="Dismiss notification" className="ml-2 opacity-60 hover:opacity-100 transition-opacity">
                 <X size={16} />
               </button>
             </motion.div>
@@ -145,12 +149,16 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
               transition={{ duration: 0.15 }}
               className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 max-w-md w-full shadow-2xl"
               onClick={e => e.stopPropagation()}
+              ref={confirmRef}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="confirm-dialog-title"
             >
               <div className="flex items-center gap-3 mb-4">
                 <div className="p-2 bg-amber-600/20 text-amber-500 rounded-xl">
                   <AlertTriangle size={24} />
                 </div>
-                <h3 className="text-lg font-bold text-white">Confirm</h3>
+                <h3 id="confirm-dialog-title" className="text-lg font-bold text-white">Confirm</h3>
               </div>
               <p className="text-zinc-300 text-sm leading-relaxed mb-6 whitespace-pre-wrap">{confirm.message}</p>
               <div className="flex gap-3">

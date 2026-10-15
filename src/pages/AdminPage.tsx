@@ -7,7 +7,7 @@
  * Tabs:
  *   1. System   — DeepSeek API Key management + Site Branding (site name)
  *   2. LLM Config — Global LLM instructions, temperature, max tokens, response length
- *                   tokens, frequency/presence penalties, chat padding, and memory
+ *                   tokens, frequency/presence penalties, and memory
  *                   management (send interval, generate interval, word count, max count)
  *   3. Users    — Renders the <UserEditor> component for user CRUD operations
  *
@@ -42,27 +42,33 @@ export const AdminPage: React.FC = () => {
 
   // ─── System settings ───
   const [apiKey, setApiKey] = useState('');
+  const [maskedKey, setMaskedKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [siteName, setSiteName] = useState('');
-  const [rateLimitMax, setRateLimitMax] = useState('200');
+  const [rateLimitMax, setRateLimitMax] = useState('1000');
+  const [registrationOpen, setRegistrationOpen] = useState(true);
   const [debugLlmPrompt, setDebugLlmPrompt] = useState(false);
 
   // ─── LLM settings ───
   const [globalInstructions, setGlobalInstructions] = useState('');
-  const [temperature, setTemperature] = useState('0.9');
+  const [temperature, setTemperature] = useState('1.3');
   const [maxTokens, setMaxTokens] = useState('4096');
   const [tokenShort, setTokenShort] = useState('300');
   const [tokenMedium, setTokenMedium] = useState('800');
   const [tokenLong, setTokenLong] = useState('2000');
-  const [chatPaddingLeft, setChatPaddingLeft] = useState('16');
-  const [chatPaddingRight, setChatPaddingRight] = useState('16');
-  const [memorySendInterval, setMemorySendInterval] = useState('25');
+  // Context and lore engine (server-side prompt builder)
+  const [contextTokenBudget, setContextTokenBudget] = useState('32000');
+  const [loreScanDepth, setLoreScanDepth] = useState('10');
+  const [loreActiveMax, setLoreActiveMax] = useState('5');
+  const [lorePinnedMax, setLorePinnedMax] = useState('10');
   const [memoryGenerateInterval, setMemoryGenerateInterval] = useState('25');
   const [memoryWordCount, setMemoryWordCount] = useState('100');
   const [memoryMaxCount, setMemoryMaxCount] = useState('50');
   const [frequencyPenalty, setFrequencyPenalty] = useState('0');
   const [presencePenalty, setPresencePenalty] = useState('0');
-  const [deepseekModel, setDeepseekModel] = useState('deepseek-chat');
+  const [deepseekModel, setDeepseekModel] = useState('deepseek-flash');
+  /** '' = model default, 'off', or a thinking effort level */
+  const [deepseekThinking, setDeepseekThinking] = useState('');
   const [availableModels, setAvailableModels] = useState<Array<{ id: string }>>([]);
   const [loadingModels, setLoadingModels] = useState(false);
 
@@ -78,24 +84,28 @@ export const AdminPage: React.FC = () => {
     const loadSettings = async () => {
       try {
         const settings = await apiService.getSystemSettings();
-        setApiKey(settings.deepseekKey || '');
+        // Only a masked form of the stored key is returned (e.g. "sk-…abcd")
+        setMaskedKey(settings.deepseekKeySet ? settings.deepseekKey || 'set' : '');
         setGlobalInstructions(settings.globalInstructions || DEFAULT_GLOBAL_INSTRUCTIONS);
-        setTemperature(settings.temperature || '0.9');
+        setTemperature(settings.temperature || '1.3');
         setMaxTokens(settings.maxTokens || '4096');
         setTokenShort(settings.tokenShort || '300');
         setTokenMedium(settings.tokenMedium || '800');
         setTokenLong(settings.tokenLong || '2000');
-        setChatPaddingLeft(settings.chatPaddingLeft || '16');
-        setChatPaddingRight(settings.chatPaddingRight || '16');
         setFrequencyPenalty(settings.frequencyPenalty || '0');
         setPresencePenalty(settings.presencePenalty || '0');
         setSiteName(settings.siteName || '');
-        setMemorySendInterval(settings.memorySendInterval || '25');
+        setContextTokenBudget(settings.contextTokenBudget || '32000');
+        setLoreScanDepth(settings.loreScanDepth || '10');
+        setLoreActiveMax(settings.loreActiveMax || '5');
+        setLorePinnedMax(settings.lorePinnedMax || '10');
         setMemoryGenerateInterval(settings.memoryGenerateInterval || '25');
         setMemoryWordCount(settings.memoryWordCount || '100');
         setMemoryMaxCount(settings.memoryMaxCount || '50');
-        setRateLimitMax(settings.rateLimitMax || '200');
-        setDeepseekModel(settings.deepseekModel || 'deepseek-chat');
+        setRateLimitMax(settings.rateLimitMax || '1000');
+        setRegistrationOpen(settings.registrationOpen !== false);
+        setDeepseekModel(settings.deepseekModel || 'deepseek-flash');
+        setDeepseekThinking(settings.deepseekThinking || '');
         setDebugLlmPrompt(settings.debugLlmPrompt === 'true');
       } catch (e) {
         console.error('Failed to load settings', e);
@@ -129,10 +139,16 @@ export const AdminPage: React.FC = () => {
     }
   }, [activeTab]);
 
-  /** Save only the DeepSeek API key */
+  /** Save only the DeepSeek API key (the stored key is never sent back to the browser) */
   const handleSaveKey = async () => {
+    if (!apiKey.trim()) {
+      showToast('Enter a new API key to replace the current one', 'info');
+      return;
+    }
     try {
-      await apiService.updateSystemSettings({ deepseekKey: apiKey });
+      await apiService.updateSystemSettings({ deepseekKey: apiKey.trim() });
+      setMaskedKey(`${apiKey.trim().slice(0, 3)}…${apiKey.trim().slice(-4)}`);
+      setApiKey('');
       setApiKeySaved(true);
       setTimeout(() => setApiKeySaved(false), 3000);
       showToast('API key saved', 'success');
@@ -145,7 +161,7 @@ export const AdminPage: React.FC = () => {
   /** Save site name + rate limit + update localStorage + document.title immediately */
   const handleSaveSiteName = async () => {
     try {
-      await apiService.updateSystemSettings({ siteName, rateLimitMax });
+      await apiService.updateSystemSettings({ siteName, rateLimitMax, registrationOpen });
       localStorage.setItem('fl_siteName', siteName);
       document.title = siteName || 'AI Roleplay';
       setSiteNameSaved(true);
@@ -175,9 +191,11 @@ export const AdminPage: React.FC = () => {
     try {
       await apiService.updateSystemSettings({
         globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong,
-        chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName,
-        memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount,
+        frequencyPenalty, presencePenalty, siteName,
+        memoryGenerateInterval, memoryWordCount, memoryMaxCount,
+        contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax,
         deepseekModel,
+        deepseekThinking,
       });
       setLlmSaved(true);
       setTimeout(() => setLlmSaved(false), 3000);
@@ -248,7 +266,8 @@ export const AdminPage: React.FC = () => {
                   <input
                     type={showKey ? 'text' : 'password'}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 pr-20"
-                    placeholder="sk-..."
+                    placeholder={maskedKey ? `Current key: ${maskedKey} (type a new key to replace it)` : 'sk-...'}
+                    aria-label="DeepSeek API key"
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                   />
@@ -310,13 +329,38 @@ export const AdminPage: React.FC = () => {
                 min="10"
                 max="10000"
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                placeholder="200"
+                placeholder="1000"
                 value={rateLimitMax}
                 onChange={(e) => setRateLimitMax(e.target.value)}
               />
               <p className="mt-2 text-xs text-zinc-500 italic">
                 Maximum API requests per 15-minute window for non-admin users. Admins are not rate-limited.
               </p>
+            </div>
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <p className="text-sm font-bold text-zinc-300" id="registration-open-label">Allow New Sign-ups</p>
+                <p className="text-xs text-zinc-500 mt-1">
+                  When off, the registration page refuses new accounts. Existing users can still log in, and
+                  admins can still create accounts in User Management.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={registrationOpen}
+                aria-labelledby="registration-open-label"
+                onClick={() => setRegistrationOpen(!registrationOpen)}
+                className={`relative w-14 h-7 rounded-full transition-colors flex-shrink-0 ml-4 ${
+                  registrationOpen ? 'bg-indigo-600' : 'bg-zinc-700'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-transform ${
+                    registrationOpen ? 'translate-x-7' : 'translate-x-0'
+                  }`}
+                />
+              </button>
             </div>
             <button
               onClick={handleSaveSiteName}
@@ -413,8 +457,11 @@ export const AdminPage: React.FC = () => {
                     ))
                   ) : (
                     <>
-                      <option value="deepseek-chat">deepseek-chat</option>
-                      <option value="deepseek-reasoner">deepseek-reasoner</option>
+                      <option value="deepseek-flash">deepseek-flash</option>
+                      <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+                      {!['deepseek-flash', 'deepseek-v4-pro'].includes(deepseekModel) && (
+                        <option value={deepseekModel}>{deepseekModel}</option>
+                      )}
                     </>
                   )}
                 </select>
@@ -429,6 +476,26 @@ export const AdminPage: React.FC = () => {
               </div>
               <p className="mt-2 text-xs text-zinc-500">
                 Select which DeepSeek model to use for all AI responses. Click refresh to fetch the latest available models from the DeepSeek API.
+                The older names deepseek-chat and deepseek-reasoner were scheduled for retirement by DeepSeek in July 2026.
+              </p>
+            </div>
+            <div className="mt-4">
+              <label className="block text-sm font-bold text-zinc-400 mb-2" htmlFor="thinking-mode">Thinking (reasoning) mode</label>
+              <select
+                id="thinking-mode"
+                value={deepseekThinking}
+                onChange={(e) => setDeepseekThinking(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none cursor-pointer"
+              >
+                <option value="">Model default (send nothing)</option>
+                <option value="off">Off: faster, uses temperature and penalties</option>
+                <option value="low">On, low effort</option>
+                <option value="high">On, high effort</option>
+                <option value="max">On, maximum effort</option>
+              </select>
+              <p className="mt-2 text-xs text-zinc-500">
+                When thinking is on, DeepSeek ignores temperature and the frequency/presence penalties, and the
+                reply budget is raised to leave room for the reasoning. deepseek-flash thinks by default.
               </p>
             </div>
           </div>
@@ -450,6 +517,9 @@ export const AdminPage: React.FC = () => {
               <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
                 <span>Precise (0)</span><span>Creative (2)</span>
               </div>
+              <p className="mt-2 text-xs text-zinc-500">
+                DeepSeek recommends 1.3 for conversation and 1.5 for creative writing. Ignored while thinking mode is on.
+              </p>
             </div>
 
             {/* Max tokens cap slider */}
@@ -516,27 +586,6 @@ export const AdminPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Chat Padding — left/right token padding for API requests */}
-            <div className="border-t border-zinc-800 pt-4 mb-6">
-              <label className="block text-sm font-bold text-zinc-400 mb-3 flex items-center gap-2">
-                <AlignLeft size={16} /> Chat Padding (px)
-              </label>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider">Left Padding</label>
-                  <input type="number" min="0" max="200" value={chatPaddingLeft}
-                    onChange={(e) => setChatPaddingLeft(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider">Right Padding</label>
-                  <input type="number" min="0" max="200" value={chatPaddingRight}
-                    onChange={(e) => setChatPaddingRight(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-                </div>
-              </div>
-            </div>
-
             {/* Memory Management — auto-memory generation and trimming settings */}
             <div className="border-t border-zinc-800 pt-4 mb-6">
               <div className="flex items-center gap-2 mb-4">
@@ -545,13 +594,11 @@ export const AdminPage: React.FC = () => {
                 </div>
                 <h3 className="text-lg font-bold text-white">Memory Management</h3>
               </div>
+              <p className="text-xs text-zinc-500 mb-4">
+                A memory card is written after every "Generate Interval" user messages and summarises everything since the
+                previous one. All memories (pinned first, then the newest up to "Max Memories") are sent with every reply.
+              </p>
               <div className="grid grid-cols-2 gap-4 mb-4">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider">Send Interval</label>
-                  <input type="number" min="1" max="500" value={memorySendInterval}
-                    onChange={(e) => setMemorySendInterval(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-                </div>
                 <div>
                   <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider">Generate Interval</label>
                   <input type="number" min="1" max="500" value={memoryGenerateInterval}
@@ -571,6 +618,42 @@ export const AdminPage: React.FC = () => {
                   <input type="number" min="1" max="500" value={memoryMaxCount}
                     onChange={(e) => setMemoryMaxCount(e.target.value)}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+              </div>
+            </div>
+
+            {/* Context & lore engine */}
+            <div className="border-t border-zinc-800 pt-4 mb-6">
+              <div className="flex items-center gap-2 mb-4">
+                <div className="p-1.5 bg-emerald-600/20 text-emerald-500 rounded-lg">
+                  <Cpu size={18} />
+                </div>
+                <h3 className="text-lg font-bold text-white">Context &amp; Lore</h3>
+              </div>
+              <p className="text-xs text-zinc-500 mb-4">
+                Each reply sends the scenario, lore, memories and as much recent conversation as fits the context budget;
+                older messages are covered by memories. A lower budget costs less per message.
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="context-budget">Context Budget (tokens)</label>
+                  <input id="context-budget" type="number" min="4000" max="1000000" step="1000" value={contextTokenBudget}
+                    onChange={(e) => setContextTokenBudget(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="lore-scan">Lore Trigger Scan (messages)</label>
+                  <input id="lore-scan" type="number" min="1" max="200" value={loreScanDepth}
+                    onChange={(e) => setLoreScanDepth(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="lore-active">Max Triggered Lore</label>
+                  <input id="lore-active" type="number" min="0" max="50" value={loreActiveMax}
+                    onChange={(e) => setLoreActiveMax(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="lore-pinned">Max Always-on Lore</label>
+                  <input id="lore-pinned" type="number" min="0" max="100" value={lorePinnedMax}
+                    onChange={(e) => setLorePinnedMax(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                 </div>
               </div>
             </div>

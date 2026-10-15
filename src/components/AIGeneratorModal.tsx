@@ -15,6 +15,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Sparkles, Loader2, AlertTriangle, X } from 'lucide-react';
 import { deepseek, AiGeneratedScenarioData } from '../services/deepseek';
+import { useDialog } from '../utils/useDialog';
 
 interface AIGeneratorModalProps {
   /** Whether the modal is visible */
@@ -46,11 +47,15 @@ export const AIGeneratorModal: React.FC<AIGeneratorModalProps> = ({
     setErrorMessage('');
   };
 
-  /** Handles the close action: reset state and notify parent */
+  /** Handles the close action: reset state and notify parent. Ignored while generating. */
   const handleClose = () => {
+    if (state === 'generating') return;
     reset();
     onClose();
   };
+
+  // Esc closes (unless generating), focus stays inside the modal
+  const dialogRef = useDialog(isOpen, handleClose);
 
   /**
    * Submits the user's description to the AI and processes the result.
@@ -100,6 +105,10 @@ export const AIGeneratorModal: React.FC<AIGeneratorModalProps> = ({
             transition={{ duration: 0.15 }}
             className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 max-w-xl w-full shadow-2xl"
             onClick={e => e.stopPropagation()}
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-generator-title"
           >
             {/* ── Header ── */}
             <div className="flex items-center justify-between mb-2">
@@ -107,11 +116,13 @@ export const AIGeneratorModal: React.FC<AIGeneratorModalProps> = ({
                 <div className="p-2 bg-indigo-600/20 text-indigo-400 rounded-xl">
                   <Sparkles size={24} />
                 </div>
-                <h3 className="text-xl font-bold text-white">AI Scenario Generator</h3>
+                <h3 id="ai-generator-title" className="text-xl font-bold text-white">AI Scenario Generator</h3>
               </div>
               <button
                 onClick={handleClose}
-                className="text-zinc-600 hover:text-zinc-300 p-1 rounded-lg transition-colors"
+                disabled={state === 'generating'}
+                aria-label="Close"
+                className="text-zinc-600 hover:text-zinc-300 p-1 rounded-lg transition-colors disabled:opacity-30"
               >
                 <X size={20} />
               </button>

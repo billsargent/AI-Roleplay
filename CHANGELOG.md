@@ -1,5 +1,69 @@
 # Changelog
 
+## [v2.0.0] - 2026-10-15
+
+A major release: security and data-loss fixes from a code audit (GitHub issues #1–#10), a rebuilt roleplay engine with prompts assembled on the server (#11–#17), and a new chat and editor layout (#30–#33).
+
+### Upgrading from 1.x
+- **Back up `database.sqlite` and `uploads/` first.** The schema is migrated automatically on start (new columns and indexes only).
+- **Node.js 20 or later** is required. Run `npm install` (the lock file is now committed) and `npm run build`.
+- **Admin › LLM Config:** pick a current model (`deepseek-flash` or `deepseek-v4-pro`; DeepSeek scheduled `deepseek-chat` and `deepseek-reasoner` for retirement on 2026-07-24), set **Thinking mode** (Off uses temperature and penalties; On ignores them), and check **temperature** (about 1.0–1.2 for roleplay; 1.5 produced nonsense in testing). Negative frequency/presence penalties now take effect and encourage repetition; 0 is the safe value.
+- **New Context & Lore settings** (context budget, lore scan depth and caps) default to sensible values; review them once.
+- Optional environment variables are listed in the README (`TRUST_PROXY` matters behind a reverse proxy).
+- Trash older than `TRASH_RETENTION_DAYS` (default 30) is purged on the first start.
+
+### Breaking
+- The generic AI endpoints `/api/deepseek/chat` and `/api/deepseek/chat/stream` are removed. Clients ask for a reply to a saved chat with `POST /api/chats/:id/reply` and the server builds the prompt; memories use `POST /api/chats/:id/memory`.
+- `/api/system/deepseek-key` is removed; the key is only ever returned masked.
+- The "Chat Padding" and "Memory Send Interval" admin settings are removed (the chat lays itself out, and memories are sent every turn).
+- Only the chat owner can ask the AI to reply in a chat (admins viewing another user's chat are read-only).
+
+### Security
+- **Image paths** — Image reads, writes and deletes only accept the `{type}/{prefix}/{id}.{ext}` layout inside the uploads folder. Previously a crafted path could read files such as the database, and a crafted avatar path could delete arbitrary files. Image URLs pointing at another entity's file are copied, never shared.
+- **Image proxy** — `/api/proxy-image` requires login and only fetches public http(s) addresses (checked at connect time and on every redirect), with a timeout, a 10 MB cap and the type detected from the bytes.
+- **Ownership** — Users can no longer overwrite another user's persona, or take over another scenario's characters or lore by reusing their ids.
+- **XSS** — Scenario introductions are sanitized on save (sanitize-html) and before display (DOMPurify). The CSP no longer allows inline or eval script.
+- **Request size** — The 250 MB body limit only applies to scenario saves after login; everything else is 1 MB (chats, personas and AI requests 10 MB).
+- **AI proxy** — The server picks the model, caps reply length and clamps sampling values; per-user AI rate limit; DeepSeek errors return 502 instead of looking like an expired session.
+- **Accounts** — Tokens stop working when a user is deleted or changes password; the first-admin assignment is atomic; admin user edits are validated and the last admin cannot be demoted; login timing no longer reveals which usernames exist.
+- **Dependencies** — `npm audit` from 40 known vulnerabilities to 0 (patch updates, Tiptap 3.31.4, Vite 7.3.6).
+- The DeepSeek key is only returned masked; the raw-key endpoint was removed.
+
+### Fixed
+- Editing a scenario no longer deletes its character avatars.
+- Trash auto-purge after 30 days now actually runs (it was documented in v1.0.4 but never scheduled). Configurable with `TRASH_RETENTION_DAYS`.
+- Replaced images now show up: images use ETag revalidation instead of a one-year immutable cache (v1.0.8 said images get new paths on update; they do not).
+- Base64 copies are no longer written into the database on every save; `migrate-images.js --dry-run` no longer writes files, and a live run backs up the database first.
+- Orphan image files are removed when users, scenarios or introduction images are deleted.
+- Chat: Stop and Retry; partial replies are kept; memory generation no longer blocks or gets overwritten; Enter while the AI replies keeps your text; switching chats quickly no longer shows the wrong chat; custom instructions save once instead of on every keystroke.
+- Home search and tabs now cover all scenarios, not only the current page; the chat list no longer labels chats of later scenarios as deleted.
+- Message `versions` were JSON-encoded again on every save; existing rows are repaired when read.
+- Restarting the server no longer signs everyone out (the JWT secret is kept in the database when `JWT_SECRET` is not set).
+- `.env` files are now loaded (they were documented but ignored).
+- The admin "API Rate Limit" field now takes effect.
+- Imported introductions keep their centred/right alignment.
+
+### Roleplay engine
+- **Prompts are built on the server** (`lib/prompt.js`) from the saved chat and scenario. Players can no longer send arbitrary prompts through the site's API key, and "Hide prompts" and hidden lore are enforced for other users.
+- **Long chats work:** the newest history that fits a configurable token budget is sent; older turns are covered by memories instead of eventually failing with a context-length error.
+- **Rolling memories:** each memory summarises everything since the previous one (it used to cover only the last 10 messages), all memories are sent with every reply (unpinned ones used to be sent only every 25th turn), and `*continue*` turns no longer count toward the interval.
+- **Lore triggers** match whole words only ("art" no longer fires on "party"), look only at recent messages, are ordered by priority, and the caps are configurable. One "Sent to the AI" selector (When triggered / Always / Never) replaces three conflicting checkboxes; lore can be hidden from players.
+- **Prompt cleanups:** concrete length targets, no doubled punctuation, chat notices are not sent to the AI, character lore that repeats a cast member is skipped, and two new per-scenario switches: *Action* / "Dialogue" formatting rule and sending the introduction to the AI.
+- **Current DeepSeek models** with a Thinking mode setting; the reply-length cap works (thinking gets extra headroom).
+
+### Added
+- Admin switch to close new sign-ups.
+- Database indexes; `npm test` with unit and end-to-end tests.
+- Settings: `TRUST_PROXY`, `TRASH_RETENTION_DAYS`, `MEDIUM_JSON_BODY_SIZE`, `MAX_IMAGE_BYTES`, `LLM_RATE_LIMIT`, `LLM_RATE_WINDOW_MIN`, `DB_PATH`, `UPLOADS_DIR`.
+
+### Changed
+- Requires Node.js 20 or later. `package-lock.json` is committed.
+- **Chat layout** — The chat fits the space under the navbar, the input box is part of the page and can no longer cover messages (or hide behind the navbar on phones), and messages sit in a centred reading column. The admin "Chat Padding" setting is removed. Scrolling follows new text only while you are at the bottom; a "New messages" button appears when you have scrolled up. The input grows with its text. New chat header with scenario info, memories and settings.
+- **Scenario editor** — One wide column with all switches in a "Settings & Publishing" section at the end; fields grow with their text; sticky section navigation and save bar with an unsaved-changes marker; leaving with unsaved edits asks first.
+- New characters and lore cards start empty (placeholder text such as "Role/Brief bio" was saved as real prompt content).
+- Chat messages show the scenario image and persona avatar; one accent colour; larger reading text.
+- Rich text (introductions and their editor) now gets heading, list and quote styles (`@tailwindcss/typography` was never installed).
+
 ## [v1.0.9] - 2026-07-27
 
 ### Fixed

@@ -7,7 +7,10 @@
  * Uses ESM module system (type: "module" in package.json).
  */
 
+// Load .env first so every module below sees its settings (see README)
+import 'dotenv/config';
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
@@ -29,8 +32,6 @@ import {
   getPersonasByUserId,
   upsertPersona,
   deletePersonaById,
-  getAllScenarios,
-  getAccessibleScenarios,
 
   getScenarioById,
   saveScenarioTransaction,
@@ -55,9 +56,19 @@ import {
   setUserSetting,
   getAllUserSettings,
   seedDefaultScenariosIfEmpty,
+  DataError,
+  countAdmins,
+  createUserFirstIsAdmin,
+  listScenarios,
+  getScenarioLabels,
+  purgeExpiredScenarioTrash,
+  purgeExpiredChatTrash,
 } from './database/index.js';
 
-import { ensureUploadsDirs, saveImage, deleteImage, readImage } from './database/images.js';
+import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
+import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
+import { validateCompletionRequest, relayCompletion, completeOnce, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
+import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,10 +76,31 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+/** Body limit for scenario saves/imports, which can embed many base64 images */
 const MAX_JSON_BODY_SIZE = process.env.MAX_JSON_BODY_SIZE || '250mb';
+/** Body limit for chats, personas (avatar) and AI requests */
+const MEDIUM_JSON_BODY_SIZE = process.env.MEDIUM_JSON_BODY_SIZE || '10mb';
+/** Body limit for everything else, including unauthenticated routes */
+const DEFAULT_JSON_BODY_SIZE = '1mb';
 
-// Generate a random JWT secret if one isn't provided via environment variable
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+// JWT secret: JWT_SECRET if set, otherwise one generated on first start and
+// kept in the database, so restarting the server no longer logs everyone out.
+getDb();
+const JWT_SECRET = process.env.JWT_SECRET || (() => {
+  let secret = getSystemSetting('jwtSecret');
+  if (!secret) {
+    secret = crypto.randomBytes(64).toString('hex');
+    setSystemSetting('jwtSecret', secret);
+  }
+  return secret;
+})();
+
+// Behind a reverse proxy, set TRUST_PROXY (e.g. "1" or "loopback") so rate
+// limits see each client's address instead of the proxy's
+if (process.env.TRUST_PROXY) {
+  const v = process.env.TRUST_PROXY;
+  app.set('trust proxy', /^\d+$/.test(v) ? Number(v) : v === 'true' ? true : v);
+}
 
 // ─── Image Serving Endpoint (BEFORE rate limiter for performance) ─────
 
@@ -80,9 +112,11 @@ const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('he
  * Images are public by design — access control is enforced at the
  * entity level (scenarios, characters, etc.) through the API.
  * 
- * Sets a long cache duration (1 year, immutable) since uploaded images
- * never change (they get new paths on update via the delete+recreate pattern).
- * 
+ * Caching: an image keeps the same URL when it is replaced (the path comes
+ * from the entity id), so it must not be cached as immutable. Browsers
+ * revalidate with an ETag (size + modification time) and get a cheap 304
+ * when nothing changed, and the new picture as soon as it is replaced.
+ *
  * NOTE: Using app.use() with mount path to avoid path-to-regexp v8 issues.
  * The bundled version in Express 5's router (v8.4.2) dropped support for
  * both bare * wildcards and the + modifier syntax. With app.use(), Express
@@ -97,10 +131,26 @@ app.use('/api/images/', (req, res) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Extract the relative path after /api/images/ (strip leading /)
+  // Extract the relative path after /api/images/ (strip leading /).
+  // isValidImagePath only accepts "{entityType}/{prefix}/{id}.{ext}", so
+  // traversal attempts like "../../database.sqlite" never reach the disk.
   const relPath = req.path.replace(/^\//, '');
-  if (!relPath) {
+  if (!isValidImagePath(relPath)) {
     return res.status(400).json({ error: 'Invalid image path' });
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(absoluteImagePath(relPath));
+  } catch {
+    return res.status(404).json({ error: 'Image not found' });
+  }
+  const etag = `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'public, no-cache');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end();
   }
 
   const image = readImage(relPath);
@@ -109,19 +159,35 @@ app.use('/api/images/', (req, res) => {
   }
 
   res.setHeader('Content-Type', image.contentType);
-  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   res.send(image.buffer);
 });
 
 // ─── Security Middleware ───────────────────────────────────────────────
 
+/**
+ * Hashes of the inline <script> blocks in the built index.html, so the CSP
+ * can allow exactly those scripts instead of 'unsafe-inline'. Computed at
+ * startup so editing index.html never silently breaks the page.
+ */
+function inlineScriptHashes() {
+  try {
+    const html = fs.readFileSync(path.join(__dirname, 'dist', 'index.html'), 'utf8');
+    return [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
+      .map(m => `'sha256-${crypto.createHash('sha256').update(m[1]).digest('base64')}'`);
+  } catch {
+    return [];
+  }
+}
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      // No 'unsafe-inline' / 'unsafe-eval': injected markup cannot run script
+      scriptSrc: ["'self'", ...inlineScriptHashes()],
+      // Inline styles are needed by React style props and animation libraries
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      imgSrc: ["'self'", "data:", "block:", "https://images.unsplash.com", "https://*.unsplash.com", "/api/images/"],
+      imgSrc: ["'self'", "data:", "blob:", "https://images.unsplash.com", "https://*.unsplash.com"],
 
       fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
       connectSrc: ["'self'", "https://api.deepseek.com"],
@@ -140,12 +206,32 @@ app.use(cors({
   credentials: true,
 }));
 
-app.use(express.json({ limit: MAX_JSON_BODY_SIZE }));
-app.use(express.urlencoded({ extended: true, limit: MAX_JSON_BODY_SIZE }));
+/**
+ * JSON body parsing.
+ * Large bodies are only parsed on the routes that need them, and only after
+ * `auth` has run, so unauthenticated clients cannot make the server buffer
+ * hundreds of megabytes. Those routes are listed here so the global parser
+ * skips them and the route parses with its own limit.
+ */
+const largeBody = express.json({ limit: MAX_JSON_BODY_SIZE });
+const mediumBody = express.json({ limit: MEDIUM_JSON_BODY_SIZE });
+const ROUTE_PARSED_BODIES = new Set([
+  'POST /api/scenarios',
+  'POST /api/chats',
+  'POST /api/personas',
+]);
+const defaultBody = express.json({ limit: DEFAULT_JSON_BODY_SIZE });
+app.use((req, res, next) => {
+  // Express 5 leaves req.body undefined without a JSON body; routes destructure it
+  if (req.body === undefined) req.body = {};
+  if (ROUTE_PARSED_BODIES.has(`${req.method} ${req.path}`)) return next();
+  defaultBody(req, res, next);
+});
 
-app.use((err, req, res, next) => {
+/** Turns body-parser errors into JSON responses (used before and after the routes) */
+function bodyErrorHandler(err, req, res, next) {
   if (err && (err.type === 'entity.too.large' || err.code === 'ENTITY_TOO_LARGE' || err.status === 413)) {
-    console.warn(`[PAYLOAD] ${req.method} ${req.originalUrl} exceeded ${MAX_JSON_BODY_SIZE}`);
+    console.warn(`[PAYLOAD] ${req.method} ${req.originalUrl} exceeded the body size limit`);
     return res.status(413).json({
       error: 'Request payload too large. Please reduce the number of images or split the import into smaller scenario payloads.'
     });
@@ -156,7 +242,8 @@ app.use((err, req, res, next) => {
   }
 
   next(err);
-});
+}
+app.use(bodyErrorHandler);
 
 app.use(express.static(path.join(__dirname, 'dist')));
 
@@ -184,8 +271,8 @@ const generalLimiter = rateLimit({
     }
     return false;
   },
-  // Static limit — no async function to avoid any potential issues
-  max: 1000,
+  // Admin-configurable (Admin > Site Branding); synchronous lookup, default 1000
+  max: () => Number(getSystemSetting('rateLimitMax')) || 1000,
   message: { error: 'Too many requests. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -199,7 +286,8 @@ app.use('/api', generalLimiter);
 // Rate limiting for auth endpoints to prevent brute force attacks
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // 20 attempts per window
+  max: 20, // 20 failed attempts per window
+  skipSuccessfulRequests: true, // successful logins do not use up the allowance
   message: { error: 'Too many login/registration attempts. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -210,25 +298,63 @@ getDb();
 seedDefaultScenariosIfEmpty();
 ensureUploadsDirs();
 
+/**
+ * Trash auto-purge: items in the trash longer than TRASH_RETENTION_DAYS
+ * (default 30, as documented) are permanently deleted, including their
+ * image files. Runs at startup and once a day. Set TRASH_RETENTION_DAYS=0
+ * to keep trashed items forever.
+ */
+const TRASH_RETENTION_DAYS = Number(process.env.TRASH_RETENTION_DAYS ?? 30);
+function purgeExpiredTrash() {
+  if (!(TRASH_RETENTION_DAYS > 0)) return;
+  try {
+    const removed = purgeExpiredScenarioTrash(TRASH_RETENTION_DAYS) + purgeExpiredChatTrash(TRASH_RETENTION_DAYS);
+    if (removed > 0) console.log(`Trash purge: permanently deleted ${removed} item(s) older than ${TRASH_RETENTION_DAYS} days`);
+  } catch (err) {
+    console.error('Trash purge failed:', err);
+  }
+}
+purgeExpiredTrash();
+setInterval(purgeExpiredTrash, 24 * 60 * 60 * 1000).unref();
+
 // ─── Authentication Middleware ────────────────────────────────────────
 
 /**
  * Verifies JWT token from Authorization header.
  * Attaches userId to request on success.
  */
-const auth = async (req, res, next) => {
+/**
+ * Resolves the user for a request's bearer token, or null.
+ * Rejects tokens for deleted users and tokens issued before the user's
+ * last password change (so changing a password signs out other sessions).
+ */
+/** Signs a session token. iatMs gives millisecond issue time for revocation checks. */
+function signToken(userId) {
+  return jwt.sign({ userId, iatMs: Date.now() }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
+}
+
+function userFromRequest(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized: No token provided' });
-    }
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.userId = decoded.userId;
-    next();
-  } catch (err) {
-    res.status(401).json({ error: 'Unauthorized: Invalid token' });
+    const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
+    const user = getUserById(decoded.userId);
+    if (!user) return null;
+    // iatMs is set by signToken; older tokens only have iat (seconds)
+    const issuedMs = decoded.iatMs ?? decoded.iat * 1000;
+    if (user.password_changed_at && issuedMs < user.password_changed_at) return null;
+    return user;
+  } catch {
+    return null;
   }
+}
+
+const auth = async (req, res, next) => {
+  const user = userFromRequest(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized: Invalid or expired session' });
+  req.userId = user.id;
+  req.user = user;
+  next();
 };
 
 /**
@@ -236,22 +362,12 @@ const auth = async (req, res, next) => {
  * Returns 403 if the user is not an admin.
  */
 const adminAuth = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized: No token provided' });
-    }
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const user = getUserById(decoded.userId);
-    if (user?.role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden: Admins only' });
-    }
-    req.userId = decoded.userId;
-    next();
-  } catch (err) {
-    res.status(401).json({ error: 'Unauthorized: Invalid token' });
-  }
+  const user = userFromRequest(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized: Invalid or expired session' });
+  if (user.role !== 'admin') return res.status(403).json({ error: 'Forbidden: Admins only' });
+  req.userId = user.id;
+  req.user = user;
+  next();
 };
 
 // ─── Auth Routes ──────────────────────────────────────────────────────
@@ -260,11 +376,29 @@ const TOKEN_EXPIRY = '7d';
 
 /** Validates password meets minimum length requirement */
 function validatePassword(password) {
-  if (!password || password.length < 6) {
+  if (typeof password !== 'string' || password.length < 6) {
     return 'Password must be at least 6 characters long';
+  }
+  // bcrypt only uses the first 72 bytes; longer passwords would be silently truncated
+  if (Buffer.byteLength(password, 'utf8') > 72) {
+    return 'Password must be at most 72 bytes long';
   }
   return null;
 }
+
+/** Usernames: 3-32 letters, digits, dot, dash or underscore */
+const USERNAME_RE = /^[A-Za-z0-9_.-]{3,32}$/;
+function validateUsername(username) {
+  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
+    return 'Username must be 3-32 characters: letters, numbers, dot, dash or underscore';
+  }
+  return null;
+}
+
+const VALID_ROLES = ['user', 'admin'];
+
+/** Hash used to keep login timing the same whether or not the username exists */
+const DUMMY_HASH = bcrypt.hashSync('timing-equalizer-not-a-password', 10);
 
 /**
  * POST /api/register
@@ -278,9 +412,20 @@ app.post('/api/register', authLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
+    const usernameError = validateUsername(username);
+    if (usernameError) {
+      return res.status(400).json({ error: usernameError });
+    }
+
     const passwordError = validatePassword(password);
     if (passwordError) {
       return res.status(400).json({ error: passwordError });
+    }
+
+    // Admins can close sign-ups; the very first account (the admin) is always allowed
+    if (getSystemSetting('registrationOpen') === 'false') {
+      const { cnt } = getDb().prepare(`SELECT COUNT(*) as cnt FROM users WHERE id != 'system'`).get();
+      if (cnt > 0) return res.status(403).json({ error: 'Registration is currently closed.' });
     }
 
     const existing = getUserByUsername(username);
@@ -289,24 +434,21 @@ app.post('/api/register', authLimiter, async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    // First real user gets admin role (exclude internal system user)
-    const realUsers = getDb().prepare(`SELECT COUNT(*) as cnt FROM users WHERE id != 'system'`).get();
-    const role = realUsers.cnt === 0 ? 'admin' : 'user';
-
-    const user = {
+    // First real user gets admin role; decided atomically with the insert
+    const user = createUserFirstIsAdmin({
       id: uuidv4(),
       username,
       password: hashedPassword,
-      role,
       createdAt: Date.now(),
-    };
-
-    createUser(user);
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
+    });
+    const token = signToken(user.id);
     const { password: _, ...userWithoutPassword } = user;
-    console.log(`Registered user: ${username} with role: ${role}`);
+    console.log(`Registered user: ${username} with role: ${user.role}`);
     res.json({ user: userWithoutPassword, token });
   } catch (err) {
+    if (err?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
     console.error('Registration error:', err);
     res.status(500).json({ error: 'Internal server error during registration' });
   }
@@ -324,12 +466,17 @@ app.post('/api/login', authLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
+    if (typeof username !== 'string' || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
     const user = getUserByUsername(username);
-    if (!user || !(await bcrypt.compare(password, user.password))) {
+    // Compare against a dummy hash for unknown users so response time does not reveal which usernames exist
+    const ok = await bcrypt.compare(password, user ? user.password : DUMMY_HASH);
+    if (!user || !ok) {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
 
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
+    const token = signToken(user.id);
     const { password: _, ...userWithoutPassword } = user;
     console.log(`Logged in user: ${username}`);
     res.json({ user: userWithoutPassword, token });
@@ -357,10 +504,16 @@ app.get('/api/personas', auth, (req, res) => {
 });
 
 /** POST /api/personas — Creates or updates a persona */
-app.post('/api/personas', auth, (req, res) => {
-  const persona = { ...req.body, userId: req.userId };
-  const saved = upsertPersona(persona);
-  res.json(saved);
+app.post('/api/personas', auth, mediumBody, (req, res) => {
+  try {
+    const persona = { ...req.body, userId: req.userId };
+    const saved = upsertPersona(persona);
+    res.json(saved);
+  } catch (err) {
+    if (err instanceof DataError) return res.status(err.status).json({ error: err.message });
+    console.error('Save persona error:', err);
+    res.status(500).json({ error: 'Server error saving persona' });
+  }
 });
 
 /** DELETE /api/personas/:id — Deletes a persona (owner-only) */
@@ -379,32 +532,26 @@ app.delete('/api/personas/:id', auth, (req, res) => {
  * Supports pagination via ?page and ?limit query params.
  */
 app.get('/api/scenarios', auth, (req, res) => {
-  const user = getUserById(req.userId);
-  const isAdmin = user?.role === 'admin';
+  const isAdmin = req.user?.role === 'admin';
 
-  let scenarios;
-  if (isAdmin) {
-    scenarios = getAllScenarios();
-  } else {
-    scenarios = getAccessibleScenarios(req.userId);
-  }
-
-  // — Pagination support —
+  // Pagination, tab and search are applied in SQL so totals and search
+  // results cover every scenario, not just the current page.
+  // ?tab=explore|mine-public|mine-private  ?q=search text
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
-  const total = scenarios.length;
-  const totalPages = Math.ceil(total / limit);
-  const start = (page - 1) * limit;
-  const paginated = scenarios.slice(start, start + limit);
+  const tab = ['explore', 'mine-public', 'mine-private'].includes(req.query.tab) ? req.query.tab : undefined;
+  const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 200) : '';
 
-  console.log(`[TIMING] GET /api/scenarios: ${total} total, returned ${paginated.length} (page ${page}/${totalPages})`);
+  const { scenarios, total } = listScenarios({
+    userId: req.userId, isAdmin, tab, q, limit, offset: (page - 1) * limit,
+  });
   res.json({
-    scenarios: paginated,
+    scenarios,
     pagination: {
       page,
       limit,
       total,
-      totalPages,
+      totalPages: Math.ceil(total / limit),
     }
   });
 });
@@ -427,15 +574,35 @@ app.get('/api/scenarios/:id', auth, (req, res) => {
     return res.status(403).json({ error: 'Unauthorized to view this scenario' });
   }
 
-  res.json(scenario);
+  res.json(isOwner || isAdmin ? scenario : scenarioForViewer(scenario));
 });
+
+/**
+ * What other users may see of a scenario. The AI always gets everything
+ * (prompts are built on the server); this only limits what is shown.
+ * - If the owner allows customization, nothing is withheld, so copies of
+ *   the scenario stay complete.
+ * - Otherwise lore pieces marked hidden are withheld, and with "hide
+ *   prompts" on, the backstory, custom instructions and all lore too.
+ */
+function scenarioForViewer(scenario) {
+  if (scenario.settings?.allowCustomization) return scenario;
+  const visible = { ...scenario, lorePieces: (scenario.lorePieces || []).filter(p => !p.hidden) };
+  if (scenario.settings?.hidePrompts) {
+    visible.backstory = '';
+    visible.customInstructions = '';
+    visible.lorePieces = [];
+    visible.promptsHidden = true;
+  }
+  return visible;
+}
 
 /**
  * POST /api/scenarios
  * Creates a new scenario or saves edits to an existing one.
  * Handles ownership verification, copy flow, and creator name preservation.
  */
-app.post('/api/scenarios', auth, (req, res) => {
+app.post('/api/scenarios', auth, largeBody, (req, res) => {
   try {
     const scenario = req.body;
     const existing = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(scenario.id);
@@ -465,6 +632,7 @@ app.post('/api/scenarios', auth, (req, res) => {
     saveScenarioTransaction(scenario);
     res.json(scenario);
   } catch (err) {
+    if (err instanceof DataError) return res.status(err.status).json({ error: err.message });
     console.error('Save scenario error:', err);
     res.status(500).json({ error: 'Server error saving scenario' });
   }
@@ -523,6 +691,16 @@ app.get('/api/chats', auth, (req, res) => {
     chats = getChatsByUserId(req.userId);
   }
 
+  // Label each chat with its scenario's name and cover, so the chat list
+  // does not have to load (a capped page of) every scenario to show them
+  const labels = getScenarioLabels(chats.map(c => c.scenarioId));
+  for (const c of chats) {
+    const label = labels[c.scenarioId];
+    c.scenarioName = label?.name || '';
+    c.scenarioImage = label?.image || '';
+    c.scenarioDeleted = !label || label.deleted;
+  }
+
   res.json(chats);
 
 });
@@ -532,7 +710,7 @@ app.get('/api/chats', auth, (req, res) => {
  * Creates a new chat or saves updates to an existing one.
  * Handles ownership verification.
  */
-app.post('/api/chats', auth, (req, res) => {
+app.post('/api/chats', auth, mediumBody, (req, res) => {
   try {
     const chat = req.body;
     const existing = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(chat.id);
@@ -628,8 +806,10 @@ app.get('/api/trash', auth, (req, res) => {
  */
 app.post('/api/trash/restore/chat/:id', auth, (req, res) => {
   try {
-    const chat = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(req.params.id);
+    const chat = getDb().prepare(`SELECT id, user_id, deleted_at FROM chats WHERE id = ?`).get(req.params.id);
     if (!chat) return res.status(404).json({ error: 'Chat not found' });
+    // Only items in the trash can be restored or permanently deleted
+    if (chat.deleted_at == null) return res.status(400).json({ error: 'Chat is not in the trash' });
 
     const user = getUserById(req.userId);
     const isAdmin = user?.role === 'admin';
@@ -653,8 +833,10 @@ app.post('/api/trash/restore/chat/:id', auth, (req, res) => {
  */
 app.post('/api/trash/restore/scenario/:id', auth, (req, res) => {
   try {
-    const scenario = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(req.params.id);
+    const scenario = getDb().prepare(`SELECT id, user_id, deleted_at FROM scenarios WHERE id = ?`).get(req.params.id);
     if (!scenario) return res.status(404).json({ error: 'Scenario not found' });
+    // Only items in the trash can be restored or permanently deleted
+    if (scenario.deleted_at == null) return res.status(400).json({ error: 'Scenario is not in the trash' });
 
     const user = getUserById(req.userId);
     const isAdmin = user?.role === 'admin';
@@ -678,8 +860,10 @@ app.post('/api/trash/restore/scenario/:id', auth, (req, res) => {
  */
 app.delete('/api/trash/chat/:id', auth, (req, res) => {
   try {
-    const chat = getDb().prepare(`SELECT id, user_id FROM chats WHERE id = ?`).get(req.params.id);
+    const chat = getDb().prepare(`SELECT id, user_id, deleted_at FROM chats WHERE id = ?`).get(req.params.id);
     if (!chat) return res.status(404).json({ error: 'Chat not found' });
+    // Only items in the trash can be restored or permanently deleted
+    if (chat.deleted_at == null) return res.status(400).json({ error: 'Chat is not in the trash' });
 
     const user = getUserById(req.userId);
     const isAdmin = user?.role === 'admin';
@@ -703,8 +887,10 @@ app.delete('/api/trash/chat/:id', auth, (req, res) => {
  */
 app.delete('/api/trash/scenario/:id', auth, (req, res) => {
   try {
-    const scenario = getDb().prepare(`SELECT id, user_id FROM scenarios WHERE id = ?`).get(req.params.id);
+    const scenario = getDb().prepare(`SELECT id, user_id, deleted_at FROM scenarios WHERE id = ?`).get(req.params.id);
     if (!scenario) return res.status(404).json({ error: 'Scenario not found' });
+    // Only items in the trash can be restored or permanently deleted
+    if (scenario.deleted_at == null) return res.status(400).json({ error: 'Scenario is not in the trash' });
 
     const user = getUserById(req.userId);
     const isAdmin = user?.role === 'admin';
@@ -741,15 +927,16 @@ app.delete('/api/trash/empty', auth, (req, res) => {
 
 /** GET /api/system/settings — Returns all system settings (admin only) */
 app.get('/api/system/settings', adminAuth, (req, res) => {
-  const deepseekKey = getSystemSetting('deepseekKey');
+  const storedKey = getSystemSetting('deepseekKey');
+  // Only a masked form leaves the server (e.g. "sk-…abcd")
+  const deepseekKey = storedKey ? `${storedKey.slice(0, 3)}…${storedKey.slice(-4)}` : '';
+  const deepseekKeySet = !!storedKey;
   const globalInstructions = getSystemSetting('globalInstructions');
   const temperature = getSystemSetting('temperature');
   const maxTokens = getSystemSetting('maxTokens');
   const tokenShort = getSystemSetting('tokenShort');
   const tokenMedium = getSystemSetting('tokenMedium');
   const tokenLong = getSystemSetting('tokenLong');
-  const chatPaddingLeft = getSystemSetting('chatPaddingLeft');
-  const chatPaddingRight = getSystemSetting('chatPaddingRight');
   const frequencyPenalty = getSystemSetting('frequencyPenalty');
   const presencePenalty = getSystemSetting('presencePenalty');
   const siteName = getSystemSetting('siteName');
@@ -759,7 +946,14 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const memoryMaxCount = getSystemSetting('memoryMaxCount');
   const deepseekModel = getSystemSetting('deepseekModel');
   const debugLlmPrompt = getSystemSetting('debugLlmPrompt');
-  res.json({ deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt });
+  const registrationOpen = getSystemSetting('registrationOpen') !== 'false';
+  const rateLimitMax = getSystemSetting('rateLimitMax') || '1000';
+  const deepseekThinking = getSystemSetting('deepseekThinking') || '';
+  const contextTokenBudget = getSystemSetting('contextTokenBudget');
+  const loreScanDepth = getSystemSetting('loreScanDepth');
+  const loreActiveMax = getSystemSetting('loreActiveMax');
+  const lorePinnedMax = getSystemSetting('lorePinnedMax');
+  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax });
 
 
 
@@ -767,16 +961,23 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
 
 /** POST /api/system/settings — Updates system settings (admin only) */
 app.post('/api/system/settings', adminAuth, (req, res) => {
-  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt } = req.body;
-  if (deepseekKey !== undefined) setSystemSetting('deepseekKey', deepseekKey);
+  const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking } = req.body;
+  // Engine limits: whole numbers within sensible ranges
+  for (const [key, min, max] of [['contextTokenBudget', 4000, 1000000], ['loreScanDepth', 1, 200], ['loreActiveMax', 0, 50], ['lorePinnedMax', 0, 100]]) {
+    if (req.body[key] === undefined) continue;
+    const n = Math.round(Number(req.body[key]));
+    if (Number.isFinite(n) && n >= min && n <= max) setSystemSetting(key, String(n));
+  }
+  // Ignore an echoed masked key so it can never overwrite the real one
+  if (typeof deepseekKey === 'string' && deepseekKey.trim() && !deepseekKey.includes('…')) {
+    setSystemSetting('deepseekKey', deepseekKey.trim());
+  }
   if (globalInstructions !== undefined) setSystemSetting('globalInstructions', globalInstructions);
   if (temperature !== undefined) setSystemSetting('temperature', String(temperature));
   if (maxTokens !== undefined) setSystemSetting('maxTokens', String(maxTokens));
   if (tokenShort !== undefined) setSystemSetting('tokenShort', String(tokenShort));
   if (tokenMedium !== undefined) setSystemSetting('tokenMedium', String(tokenMedium));
   if (tokenLong !== undefined) setSystemSetting('tokenLong', String(tokenLong));
-  if (chatPaddingLeft !== undefined) setSystemSetting('chatPaddingLeft', String(chatPaddingLeft));
-  if (chatPaddingRight !== undefined) setSystemSetting('chatPaddingRight', String(chatPaddingRight));
   if (frequencyPenalty !== undefined) setSystemSetting('frequencyPenalty', String(frequencyPenalty));
   if (presencePenalty !== undefined) setSystemSetting('presencePenalty', String(presencePenalty));
   if (siteName !== undefined) setSystemSetting('siteName', siteName);
@@ -786,16 +987,14 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   if (memoryMaxCount !== undefined) setSystemSetting('memoryMaxCount', String(memoryMaxCount));
   if (deepseekModel !== undefined) setSystemSetting('deepseekModel', deepseekModel);
   if (debugLlmPrompt !== undefined) setSystemSetting('debugLlmPrompt', debugLlmPrompt ? 'true' : 'false');
+  if (registrationOpen !== undefined) setSystemSetting('registrationOpen', registrationOpen ? 'true' : 'false');
+  if (deepseekThinking !== undefined && THINKING_LEVELS.includes(deepseekThinking)) setSystemSetting('deepseekThinking', deepseekThinking);
+  if (rateLimitMax !== undefined) {
+    const n = Math.round(Number(rateLimitMax));
+    if (Number.isFinite(n) && n >= 10 && n <= 100000) setSystemSetting('rateLimitMax', String(n));
+  }
 
   res.json({ success: true });
-
-
-});
-
-/** GET /api/system/deepseek-key — Returns the DeepSeek API key (admin only) */
-app.get('/api/system/deepseek-key', adminAuth, (req, res) => {
-  const deepseekKey = getSystemSetting('deepseekKey');
-  res.json({ deepseekKey });
 });
 
 // ─── LLM Debug Logging Helper ────────────────────────────────────────
@@ -822,7 +1021,7 @@ function debugLogLlmPrompt(userId, payload, endpoint) {
     console.log('┌─────────────────────────────────────────────────────────────┐');
     console.log(`│ 🔍 LLM DEBUG — ${endpoint.padEnd(40)}│`);
     console.log('├─────────────────────────────────────────────────────────────┤');
-    console.log(`│ Model:            ${String(model || 'deepseek-chat').padEnd(37)}│`);
+    console.log(`│ Model:            ${String(model || DEFAULT_MODEL).padEnd(37)}│`);
     console.log(`│ Temperature:      ${String(temperature ?? 'N/A').padEnd(37)}│`);
     console.log(`│ Max Tokens:       ${String(max_tokens ?? 'N/A').padEnd(37)}│`);
     console.log(`│ Freq Penalty:     ${String(frequency_penalty ?? 'N/A').padEnd(37)}│`);
@@ -852,7 +1051,6 @@ function debugLogLlmPrompt(userId, payload, endpoint) {
 
 // ─── DeepSeek Proxy Routes ───────────────────────────────────────────
 
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
 /**
  * GET /api/deepseek/models — Fetches available model IDs from DeepSeek API (admin only)
@@ -875,7 +1073,7 @@ app.get('/api/deepseek/models', adminAuth, async (req, res) => {
 
     const data = await response.json();
     if (!response.ok) {
-      return res.status(response.status).json({ error: data.error?.message || 'DeepSeek API error' });
+      return res.status(502).json({ error: data.error?.message || `DeepSeek API error (HTTP ${response.status})` });
     }
     res.json(data);
   } catch (err) {
@@ -886,161 +1084,153 @@ app.get('/api/deepseek/models', adminAuth, async (req, res) => {
 
 
 /**
- * POST /api/deepseek/chat — Proxies non-streaming chat to DeepSeek API
- * The API key stays server-side — never exposed to the client.
+ * Per-user limit on AI requests. The DeepSeek key belongs to the site, so one
+ * account must not be able to run up the bill. Admins are not limited.
+ * LLM_RATE_LIMIT requests per LLM_RATE_WINDOW_MIN minutes (default 120 per 15).
  */
-app.post('/api/deepseek/chat', auth, async (req, res) => {
-  try {
-    const deepseekKey = getSystemSetting('deepseekKey');
-    if (!deepseekKey) {
-      return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
-    }
-    const { messages, model, temperature, max_tokens, frequency_penalty, presence_penalty } = req.body;
-
-    // Debug logging for admin users
-    debugLogLlmPrompt(req.userId, req.body, 'Chat');
-
-    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${deepseekKey}`,
-      },
-      body: JSON.stringify({
-        model: model || 'deepseek-chat',
-        messages,
-        temperature,
-        max_tokens,
-        frequency_penalty,
-        presence_penalty,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data.error?.message || 'DeepSeek API error' });
-    }
-    res.json(data);
-  } catch (err) {
-    console.error('DeepSeek proxy error:', err);
-    res.status(500).json({ error: 'Failed to communicate with DeepSeek API' });
-  }
+const llmLimiter = rateLimit({
+  windowMs: (Number(process.env.LLM_RATE_WINDOW_MIN) || 15) * 60 * 1000,
+  max: Number(process.env.LLM_RATE_LIMIT) || 120,
+  keyGenerator: (req) => `user:${req.userId}`,
+  skip: (req) => getUserById(req.userId)?.role === 'admin',
+  message: { error: 'You are sending AI requests too quickly. Please wait a few minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 /**
- * POST /api/deepseek/chat/stream — Proxies SSE streaming chat to DeepSeek API
- * Streams data chunks back to the client as they arrive from DeepSeek.
+ * Sends a server-built prompt to DeepSeek and relays the answer.
+ * The model, thinking mode and token cap come from admin settings
+ * (lib/deepseek.js); the browser never supplies prompt text.
  */
-app.post('/api/deepseek/chat/stream', auth, async (req, res) => {
-  try {
-    const deepseekKey = getSystemSetting('deepseekKey');
-    if (!deepseekKey) {
-      return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
-    }
-    const { messages, model, temperature, max_tokens, frequency_penalty, presence_penalty } = req.body;
-
-    // Debug logging for admin users
-    debugLogLlmPrompt(req.userId, req.body, 'Chat Stream');
-
-    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${deepseekKey}`,
-      },
-      body: JSON.stringify({
-        model: model || 'deepseek-chat',
-        messages,
-        temperature,
-        max_tokens,
-        frequency_penalty,
-        presence_penalty,
-        stream: true,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      return res.status(response.status).json({ error: errorData.error?.message || 'DeepSeek API error' });
-    }
-
-    // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    // Pipe the DeepSeek stream to the client
-    const reader = response.body?.getReader();
-    if (!reader) {
-      return res.status(500).json({ error: 'No response body' });
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        res.write('data: [DONE]\n\n');
-        res.end();
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (line.trim()) {
-          res.write(line + '\n');
-        }
-      }
-    }
-  } catch (err) {
-    console.error('DeepSeek streaming proxy error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to communicate with DeepSeek API' });
-    }
+async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, label, stream = false }) {
+  const deepseekKey = getSystemSetting('deepseekKey');
+  if (!deepseekKey) {
+    return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
   }
+  let params;
+  try {
+    params = validateCompletionRequest(
+      { messages, max_tokens: maxTokens, temperature, frequency_penalty: frequencyPenalty, presence_penalty: presencePenalty },
+      {
+        model: getSystemSetting('deepseekModel') || DEFAULT_MODEL,
+        // Admin "Max Tokens Cap"
+        maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
+        thinking: getSystemSetting('deepseekThinking') || '',
+      }
+    );
+  } catch (err) {
+    if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+  // Debug logging for admin users
+  debugLogLlmPrompt(req.userId, params, label);
+  await relayCompletion(req, res, params, { apiKey: deepseekKey, stream });
+}
+
+/**
+ * Loads a chat the caller may generate for: it must exist and belong to
+ * them (admins can read other users' chats but not write to them).
+ * Sends the error response and returns null otherwise.
+ */
+function loadOwnChatForAi(req, res) {
+  const chat = getChatById(req.params.id);
+  if (!chat) { res.status(404).json({ error: 'Chat not found' }); return null; }
+  if (chat.userId !== req.userId) { res.status(403).json({ error: 'You can only generate replies in your own chats' }); return null; }
+  return chat;
+}
+
+/**
+ * POST /api/chats/:id/reply — AI reply to the chat's last user message.
+ * Body: { stream?: boolean }. The prompt is built here from the stored
+ * chat and scenario, so the global instructions cannot be bypassed.
+ * The client saves the user message first and saves the reply afterwards.
+ */
+app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
+  const chat = loadOwnChatForAi(req, res);
+  if (!chat) return;
+  if (!chat.scenarioId) return res.status(409).json({ error: 'This chat\'s scenario has been deleted' });
+  const scenario = getScenarioById(chat.scenarioId);
+  if (!scenario) return res.status(409).json({ error: 'This chat\'s scenario has been deleted' });
+  const last = chat.messages[chat.messages.length - 1];
+  if (!last || last.role !== 'user') {
+    return res.status(400).json({ error: 'The last message must be from the user' });
+  }
+
+  const llm = readLlmSettings(getSystemSetting);
+  const { messages, maxTokens } = buildChatPrompt({ messages: chat.messages, scenario, chat, llm });
+  await runCompletion(req, res, {
+    messages, maxTokens,
+    temperature: llm.temperature, frequencyPenalty: llm.frequencyPenalty, presencePenalty: llm.presencePenalty,
+    label: req.body?.stream ? 'Chat Stream' : 'Chat',
+    stream: !!req.body?.stream,
+  });
 });
 
 /**
- * POST /api/deepseek/generate — Proxies scenario generation to DeepSeek API
+ * POST /api/chats/:id/memory — Writes a memory card covering everything
+ * since the previous memory (rolling memories).
+ * Body: { auto?: boolean }. With auto, a memory is only made once enough
+ * real user messages arrived (memoryGenerateInterval); otherwise the
+ * response is { skipped: true } and no AI call is made.
+ * Returns { memory: { id, content, pinned, timestamp, coveredUntil } };
+ * the client adds it to the chat and saves.
  */
-app.post('/api/deepseek/generate', auth, async (req, res) => {
-  try {
+app.post('/api/chats/:id/memory', auth, async (req, res, next) => {
+  const chat = loadOwnChatForAi(req, res);
+  if (!chat) return;
+  const llm = readLlmSettings(getSystemSetting);
+  if (req.body?.auto && !memoryDue(chat, llm)) return res.json({ skipped: true });
+
+  let source = messagesSinceLastMemory(chat);
+  // Manual request with nothing new: summarise the most recent part instead
+  if (source.length === 0) source = chat.messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-10);
+  if (source.length === 0) return res.status(400).json({ error: 'Nothing to summarise yet' });
+
+  // Only now count it against the AI limit
+  llmLimiter(req, res, async () => {
     const deepseekKey = getSystemSetting('deepseekKey');
-    if (!deepseekKey) {
-      return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+    if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+    try {
+      const { messages, maxTokens, temperature } = buildMemoryPrompt(source, llm.memoryWordCount);
+      const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature }, {
+        model: getSystemSetting('deepseekModel') || DEFAULT_MODEL,
+        maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
+        thinking: getSystemSetting('deepseekThinking') || '',
+      });
+      debugLogLlmPrompt(req.userId, params, 'Memory');
+      const content = (await completeOnce(params, { apiKey: deepseekKey })).trim();
+      if (!content) return res.status(502).json({ error: 'The AI returned an empty memory' });
+      res.json({
+        memory: {
+          id: crypto.randomUUID(),
+          content,
+          pinned: false,
+          timestamp: Date.now(),
+          coveredUntil: Math.max(...source.map(m => Number(m.timestamp) || 0)),
+        },
+      });
+    } catch (err) {
+      if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+      next(err);
     }
-    const { messages, model, temperature, max_tokens } = req.body;
+  });
+});
 
-    // Debug logging for admin users
-    debugLogLlmPrompt(req.userId, req.body, 'Generate');
-
-    const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${deepseekKey}`,
-      },
-      body: JSON.stringify({
-        model: model || 'deepseek-chat',
-        messages,
-        temperature: temperature || 0.8,
-        max_tokens: max_tokens || 4000,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data.error?.message || 'DeepSeek API error' });
-    }
-    res.json(data);
-  } catch (err) {
-    console.error('DeepSeek generate proxy error:', err);
-    res.status(500).json({ error: 'Failed to communicate with DeepSeek API' });
+/**
+ * POST /api/deepseek/generate — Generates a scenario draft from a description.
+ * Body: { description: string }. The instructions are built here.
+ */
+app.post('/api/deepseek/generate', auth, llmLimiter, async (req, res) => {
+  const description = req.body?.description;
+  if (typeof description !== 'string' || !description.trim()) {
+    return res.status(400).json({ error: 'Describe the scenario you want' });
   }
+  if (description.length > 10000) {
+    return res.status(413).json({ error: 'Description is too long (max 10,000 characters)' });
+  }
+  const { messages, maxTokens, temperature } = buildScenarioGenerationPrompt(description);
+  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate' });
 });
 
 /** GET /api/system/llm-settings — Returns LLM configuration (any authenticated user) */
@@ -1051,8 +1241,6 @@ app.get('/api/system/llm-settings', auth, (req, res) => {
   const tokenShort = getSystemSetting('tokenShort');
   const tokenMedium = getSystemSetting('tokenMedium');
   const tokenLong = getSystemSetting('tokenLong');
-  const chatPaddingLeft = getSystemSetting('chatPaddingLeft');
-  const chatPaddingRight = getSystemSetting('chatPaddingRight');
   const frequencyPenalty = getSystemSetting('frequencyPenalty');
   const presencePenalty = getSystemSetting('presencePenalty');
   const siteName = getSystemSetting('siteName');
@@ -1061,7 +1249,7 @@ app.get('/api/system/llm-settings', auth, (req, res) => {
   const memoryWordCount = getSystemSetting('memoryWordCount');
   const memoryMaxCount = getSystemSetting('memoryMaxCount');
   const deepseekModel = getSystemSetting('deepseekModel');
-  res.json({ globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, chatPaddingLeft, chatPaddingRight, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel });
+  res.json({ globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel });
 
 
 
@@ -1096,7 +1284,9 @@ app.post('/api/users/change-password', auth, async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     updateUser(req.userId, { password: hashedPassword });
-    res.json({ success: true });
+    // Other sessions are now signed out; give this one a fresh token
+    const token = signToken(req.userId);
+    res.json({ success: true, token });
   } catch (err) {
     console.error('Change password error:', err);
     res.status(500).json({ error: 'Server error changing password' });
@@ -1156,6 +1346,9 @@ app.post('/api/admin/users', adminAuth, async (req, res) => {
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password are required' });
     }
+    const inputError = validateUsername(username) || validatePassword(password)
+      || (role !== undefined && !VALID_ROLES.includes(role) ? 'Role must be "user" or "admin"' : null);
+    if (inputError) return res.status(400).json({ error: inputError });
     const existing = getUserByUsername(username);
     if (existing) {
       return res.status(400).json({ error: 'Username already exists' });
@@ -1186,9 +1379,24 @@ app.put('/api/admin/users/:id', adminAuth, async (req, res) => {
     if (targetUser.id === 'system') return res.status(400).json({ error: 'Cannot modify system user' });
 
     const updates = {};
-    if (username !== undefined) updates.username = username;
-    if (role !== undefined) updates.role = role;
-    if (password !== undefined && password.trim()) {
+    if (username !== undefined && username !== targetUser.username) {
+      const usernameError = validateUsername(username);
+      if (usernameError) return res.status(400).json({ error: usernameError });
+      const taken = getUserByUsername(username);
+      if (taken && taken.id !== targetUser.id) return res.status(400).json({ error: 'Username already exists' });
+      updates.username = username;
+    }
+    if (role !== undefined && role !== targetUser.role) {
+      if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Role must be "user" or "admin"' });
+      // Never remove the last admin, or nobody could manage the site
+      if (targetUser.role === 'admin' && countAdmins() <= 1) {
+        return res.status(400).json({ error: 'Cannot remove the last admin' });
+      }
+      updates.role = role;
+    }
+    if (password !== undefined && password !== '') {
+      const passwordError = validatePassword(password);
+      if (passwordError) return res.status(400).json({ error: passwordError });
       updates.password = await bcrypt.hash(password, 10);
     }
 
@@ -1229,26 +1437,23 @@ app.delete('/api/admin/users/:id', adminAuth, (req, res) => {
  *   url - The full URL of the image to fetch (required)
  *
  * Returns: { dataUrl: "data:image/webp;base64,..." }
+ *
+ * Requires login. Only public http(s) addresses are fetched (see
+ * lib/safeImageFetch.js), with a timeout, a 10 MB cap and image-only types.
  */
-app.get('/api/proxy-image', async (req, res) => {
+app.get('/api/proxy-image', auth, async (req, res) => {
   try {
     const { url } = req.query;
-    if (!url || typeof url !== 'string') {
+    if (!url || typeof url !== 'string' || url.length > 2048) {
       return res.status(400).json({ error: 'Missing or invalid "url" query parameter' });
     }
 
-    const response = await fetch(url);
-    if (!response.ok) {
-      return res.status(response.status).json({ error: `Upstream HTTP ${response.status}` });
-    }
-
-    const contentType = response.headers.get('content-type') || 'image/webp';
-    const buffer = await response.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-    const dataUrl = `data:${contentType};base64,${base64}`;
-
-    res.json({ dataUrl });
+    const { contentType, buffer } = await fetchImage(url);
+    res.json({ dataUrl: `data:${contentType};base64,${buffer.toString('base64')}` });
   } catch (err) {
+    if (err instanceof ImageFetchError) {
+      return res.status(err.status).json({ error: err.message });
+    }
     console.error('Proxy-image error:', err);
     res.status(500).json({ error: 'Failed to proxy image' });
   }
@@ -1256,9 +1461,23 @@ app.get('/api/proxy-image', async (req, res) => {
 
 // ─── Serve Frontend ───────────────────────────────────────────────────
 
+// Unknown API routes get a JSON 404 instead of the HTML app shell
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
 // Catch-all: serve index.html for all non-API routes (SPA support)
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
+// Final error handlers: body-parser errors from route-level parsers, then
+// anything unexpected. Never send stack traces to the client.
+app.use(bodyErrorHandler);
+app.use((err, req, res, next) => {
+  console.error(`Unhandled error on ${req.method} ${req.originalUrl}:`, err);
+  if (res.headersSent) return res.end();
+  res.status(err.status && err.status < 500 ? err.status : 500).json({ error: 'Internal server error' });
 });
 
 

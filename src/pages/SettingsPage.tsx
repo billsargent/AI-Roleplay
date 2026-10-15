@@ -328,7 +328,7 @@ export const SettingsPage: React.FC = () => {
       </section>
 
       <div className="text-center pt-8">
-         <p className="text-xs text-zinc-700 font-bold uppercase tracking-[0.2em]">{siteName || (localStorage.getItem('fl_siteName') || 'AI Roleplay')} v1.0.0</p>
+         <p className="text-xs text-zinc-700 font-bold uppercase tracking-[0.2em]">{siteName || (localStorage.getItem('fl_siteName') || 'AI Roleplay')} v{__APP_VERSION__}</p>
       </div>
 
     </div>

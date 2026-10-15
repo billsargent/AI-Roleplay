@@ -15,12 +15,12 @@
  * @module ChatPage
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { 
-  Send, Settings as SettingsIcon, Brain, Info, 
+import {
+  Send, Settings as SettingsIcon, Brain, Info,
   ChevronLeft, MessageSquare, RefreshCw, Trash2,
-  X, Pin, User, Edit2, FileDown, Play
+  X, Pin, User, Edit2, FileDown, Play, Square, RotateCcw, ArrowDown
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
@@ -28,6 +28,7 @@ import { Chat, Message, Scenario, Persona } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
 import { useNotifications } from '../utils/notifications';
+import { useDialog } from '../utils/useDialog';
 import { jsPDF } from 'jspdf';
 
 /**
@@ -36,11 +37,27 @@ import { jsPDF } from 'jspdf';
  */
 declare global {
   interface Window {
-    __memorySendInterval: number;      // How often (in user messages) memories are sent to the AI
-    __memoryGenerateInterval: number;   // How often new memories are auto-generated
-    __memoryWordCount: number;          // Target word count for generated memories
     __memoryMaxCount: number;           // Maximum number of stored memories before trimming
   }
+}
+
+
+/**
+ * Keeps all pinned memories plus the newest unpinned ones, up to maxCount.
+ * Returns a new array (never mutates chat state).
+ */
+function trimMemories(memories: Chat['memories'], maxCount: number): Chat['memories'] {
+  if (memories.length <= maxCount) return memories;
+  const pinned = memories.filter(m => m.pinned);
+  const keep = new Set(
+    memories
+      .filter(m => !m.pinned)
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, Math.max(0, maxCount - pinned.length))
+      .map(m => m.id)
+  );
+  // Preserve the original order
+  return memories.filter(m => m.pinned || keep.has(m.id));
 }
 
 /**
@@ -65,25 +82,55 @@ export const ChatPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isReadOnly, setIsReadOnly] = useState(false);
   const [scenarioDeleted, setScenarioDeleted] = useState(false);
+  /** Error from the last AI request, shown with a Retry button */
+  const [lastError, setLastError] = useState<string | null>(null);
 
-  // ── Reference to messages container for PDF capture ──
+  /** Cancels the in-flight AI request (Stop button, switching chats, leaving the page) */
+  const abortRef = useRef<AbortController | null>(null);
+  /** Latest chat state, for async work that finishes after later edits */
+  const chatRef = useRef<Chat | null>(null);
+  /** The chat currently on screen; async results for another chat are not applied */
+  const activeChatIdRef = useRef<string | undefined>(chatId);
+
+  useEffect(() => { chatRef.current = chat; }, [chat]);
+
+  // Full-screen overlay: Esc closes it, focus stays inside while open
+  const overlayRef = useDialog(overlay !== 'none', () => setOverlay('none'));
+
+  /** Sets chat state and the ref together, so async code sees it immediately */
+  const commitChat = (next: Chat) => {
+    chatRef.current = next;
+    setChat(next);
+  };
+
+  // ── Scrolling: the message list follows new text only while the reader is at the bottom ──
+  /** The scrollable message area */
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  /** The message list inside it; its size changes as replies stream in */
+  const messageListRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** True while the reader is at (or near) the bottom of the conversation */
+  const atBottomRef = useRef(true);
+  /** Shown when new text arrives while the reader has scrolled up */
+  const [hasUnseen, setHasUnseen] = useState(false);
 
   // ── User-facing color preferences ──
   const [dialogColor, setDialogColor] = useState('#4f46e5');
   const [narrationColor, setNarrationColor] = useState('');
   const [chatBubbleColor, setChatBubbleColor] = useState('#4f46e5');
-  const [chatPaddingLeft, setChatPaddingLeft] = useState(16);
-  const [chatPaddingRight, setChatPaddingRight] = useState(16);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  // Load chat data on mount or when chatId changes
+  // Load chat data on mount or when chatId changes. A slower response for a
+  // previous chat is ignored, and a running AI request is stopped on leave.
   useEffect(() => {
-    if (chatId) {
-      loadChat(chatId);
-    }
-  }, [chatId, navigate]);
+    activeChatIdRef.current = chatId;
+    if (!chatId) return;
+    let cancelled = false;
+    loadChat(chatId, () => cancelled);
+    return () => {
+      cancelled = true;
+      abortRef.current?.abort();
+    };
+  }, [chatId]);
 
   // Load user color preferences and global LLM/memory settings on mount
   useEffect(() => {
@@ -96,20 +143,12 @@ export const ChatPage: React.FC = () => {
       } catch {
         // Use defaults
       }
-      // Load global LLM settings (memory intervals, padding, etc.)
+      // Load global LLM settings (memory limits)
       try {
         const llmSettings = await apiService.getLlmSettings();
-        if (llmSettings.chatPaddingLeft) setChatPaddingLeft(parseInt(llmSettings.chatPaddingLeft));
-        if (llmSettings.chatPaddingRight) setChatPaddingRight(parseInt(llmSettings.chatPaddingRight));
-        window.__memorySendInterval = llmSettings.memorySendInterval ? parseInt(llmSettings.memorySendInterval) : 25;
-        window.__memoryGenerateInterval = llmSettings.memoryGenerateInterval ? parseInt(llmSettings.memoryGenerateInterval) : 25;
-        window.__memoryWordCount = llmSettings.memoryWordCount ? parseInt(llmSettings.memoryWordCount) : 100;
         window.__memoryMaxCount = llmSettings.memoryMaxCount ? parseInt(llmSettings.memoryMaxCount) : 50;
       } catch {
         // Use defaults
-        window.__memorySendInterval = 25;
-        window.__memoryGenerateInterval = 25;
-        window.__memoryWordCount = 100;
         window.__memoryMaxCount = 50;
       }
     };
@@ -121,11 +160,21 @@ export const ChatPage: React.FC = () => {
    * Enforces access control: users can only access their own chats,
    * while admins can view any chat (in read-only mode).
    */
-  const loadChat = async (id: string) => {
+  const loadChat = async (id: string, isCancelled: () => boolean) => {
+    // Reset everything that belongs to the previous chat
     setLoading(true);
     setError(null);
+    setChat(null);
+    chatRef.current = null;
+    setScenario(null);
+    setIsReadOnly(false);
+    setScenarioDeleted(false);
+    setLastError(null);
+    setOverlay('none');
+    setIsTyping(false);
     try {
       const storedChat = await apiService.getChat(id);
+      if (isCancelled()) return;
       if (storedChat) {
         const user = apiService.getCurrentUser();
         // Determine if this chat belongs to another user
@@ -137,13 +186,21 @@ export const ChatPage: React.FC = () => {
         if (isOwnedByOther && user?.role === 'admin') {
           setIsReadOnly(true); // Admins view other users' chats read-only
         }
-        setChat(storedChat);
+        commitChat(storedChat);
+        if (!storedChat.scenarioId) {
+          // The scenario was permanently deleted; the chat stays readable
+          setScenarioDeleted(true);
+          setIsReadOnly(true);
+          return;
+        }
         try {
           const storedScenario = await apiService.getScenario(storedChat.scenarioId);
+          if (isCancelled()) return;
           if (storedScenario) {
             setScenario(storedScenario);
           }
         } catch (err: any) {
+          if (isCancelled()) return;
           // Scenario was soft-deleted by the creator — enter read-only mode
           if (err.response?.status === 404) {
             setScenarioDeleted(true);
@@ -156,42 +213,73 @@ export const ChatPage: React.FC = () => {
         setError('Chat not found.');
       }
     } catch (e: any) {
+      if (isCancelled()) return;
       if (e.response?.status === 403 || e.response?.status === 404) {
         setError('Chat not found or access denied.');
       } else {
         setError('Failed to load chat.');
       }
     } finally {
-      setLoading(false);
+      if (!isCancelled()) setLoading(false);
     }
   };
 
-  // Auto-scroll to bottom when new messages arrive
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  /** Jumps to the newest message and resumes following new text */
+  const scrollToBottom = () => {
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    atBottomRef.current = true;
+    setHasUnseen(false);
+  };
+
+  /** Tracks whether the reader is near the bottom (they may scroll up to reread) */
+  const handleScroll = () => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (atBottomRef.current) setHasUnseen(false);
+  };
+
+  // New or streamed text: follow it if the reader is at the bottom, otherwise
+  // leave them where they are and show the "new messages" button
+  useLayoutEffect(() => {
+    if (atBottomRef.current) {
+      const el = messagesContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    } else if (chat?.messages.length) {
+      setHasUnseen(true);
+    }
   }, [chat?.messages]);
 
-  // Initial scroll to bottom after loading completes
+  // The list or the visible area changes size (images load, the input grows,
+  // the window resizes): keep the bottom in view while following
   useEffect(() => {
-    if (!loading && chat && chat.messages.length > 0) {
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
-      }, 100);
-    }
-  }, [loading]);
+    const container = messagesContainerRef.current;
+    const list = messageListRef.current;
+    if (!container || !list || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (atBottomRef.current) container.scrollTop = container.scrollHeight;
+    });
+    observer.observe(container);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [loading, chat?.id]);
+
+  // Opening a chat starts at the newest message
+  useLayoutEffect(() => {
+    if (!loading) scrollToBottom();
+  }, [loading, chat?.id]);
+
+  // The input grows with its text, up to 40% of the screen, then scrolls inside
+  useLayoutEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight, Math.round(window.innerHeight * 0.4))}px`;
+  }, [input]);
 
   /**
-   * Core send logic — creates a user message with the given text and sends it to the AI.
-   * Handles streaming/non-streaming responses, memory generation, and saving.
-   * 
-   * Flow:
-   * 1. Creates a user message and adds it to the chat
-   * 2. Saves the user message to the server
-   * 3. If streaming is enabled: uses SSE to display the AI response in real-time
-   * 4. If streaming is disabled: waits for the complete response
-   * 5. Auto-generates a memory at the configured interval
-   * 6. Trims oldest non-pinned memories if the max count is exceeded
-   * 7. Saves the final chat state to the server
+   * Sends a user message, then asks the AI for a reply.
    */
   const sendMessage = async (text: string) => {
     if (!text || !chat || !scenario || isTyping || isReadOnly) return;
@@ -202,128 +290,146 @@ export const ChatPage: React.FC = () => {
       content: text,
       timestamp: Date.now(),
     };
+    const base = { ...chat, messages: [...chat.messages, userMessage] };
+    commitChat(base);
+    try {
+      // The server builds the AI prompt from the saved chat
+      await apiService.saveChat(base);
+    } catch {
+      setLastError('Could not save your message');
+      showToast('Could not save your message to the server', 'error');
+      return;
+    }
+    await generateReply(base);
+  };
 
-    const updatedMessages = [...chat.messages, userMessage];
-    const updatedChat = { ...chat, messages: updatedMessages };
-    setChat(updatedChat);
+  /**
+   * Gets an AI reply for a chat whose last message is the user's.
+   *
+   * - Streaming or not, depending on the chat setting.
+   * - Stop (or leaving the page) aborts the request. Text that already
+   *   arrived is kept and saved; an empty placeholder is removed.
+   * - On failure the error is shown with a Retry button.
+   * - The final save merges into the latest chat state, so a memory or
+   *   edit made while the reply was generating is not overwritten.
+   */
+  const generateReply = async (base: Chat) => {
+    if (!scenario) return;
+    const forChat = base.id;
+    const isCurrent = () => activeChatIdRef.current === forChat;
+
     setIsTyping(true);
+    setLastError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const replyId = uuidv4();
+    let partial = '';
+    const withReply = (content: string): Chat => ({
+      ...(isCurrent() && chatRef.current ? chatRef.current : base),
+      messages: [...base.messages, { id: replyId, role: 'assistant', content, timestamp: Date.now() }],
+    });
 
     try {
-      // Save user message to server
-      await apiService.saveChat(updatedChat);
-
-      if (chat.settings.streamResponse) {
-        // ── Streaming path ──
-        const assistantMessageId = uuidv4();
-        const assistantMessage: Message = {
-          id: assistantMessageId,
-          role: 'assistant',
-          content: '',
-          timestamp: Date.now(),
-        };
-
-        // Add placeholder message that will be updated in real-time
-        const messagesWithPlaceholder = [...updatedMessages, assistantMessage];
-        const chatWithPlaceholder = { ...updatedChat, messages: messagesWithPlaceholder };
-        setChat(chatWithPlaceholder);
-
-        // Stream the response, updating the placeholder message content via callback
-        const fullContent = await deepseek.chatStream(
-          updatedMessages,
-          chat.settings,
-          scenario,
-          updatedChat,
-          (chunk) => {
-            setChat(prevChat => {
-              if (!prevChat) return prevChat;
-              const newMessages = prevChat.messages.map(m =>
-                m.id === assistantMessageId
-                  ? { ...m, content: m.content + chunk }
-                  : m
-              );
-              return { ...prevChat, messages: newMessages };
-            });
-          }
-        );
-
-        const finalMessages = [...updatedMessages, {
-          ...assistantMessage,
-          content: fullContent,
-        }];
-        const finalChat = { ...updatedChat, messages: finalMessages };
-
-        // Auto-generate memory at configured interval
-        handleMemoryGeneration(finalChat, finalMessages);
-
-        setChat(finalChat);
-        await apiService.saveChat(finalChat);
+      let content: string;
+      if (base.settings.streamResponse) {
+        commitChat(withReply(''));
+        content = await deepseek.chatStream(base.id, (chunk) => {
+          partial += chunk;
+          if (!isCurrent()) return;
+          setChat(prev => prev && {
+            ...prev,
+            messages: prev.messages.map(m => (m.id === replyId ? { ...m, content: m.content + chunk } : m)),
+          });
+        }, controller.signal);
       } else {
-        // ── Non-streaming path ──
-        const response = await deepseek.chat(updatedMessages, chat.settings, scenario, updatedChat);
-        
-        const assistantMessage: Message = {
-          id: uuidv4(),
-          role: 'assistant',
-          content: response,
-          timestamp: Date.now(),
-        };
-
-        const finalMessages = [...updatedMessages, assistantMessage];
-        const finalChat = { ...updatedChat, messages: finalMessages };
-        
-        handleMemoryGeneration(finalChat, finalMessages);
-
-        setChat(finalChat);
-        await apiService.saveChat(finalChat);
+        content = await deepseek.chat(base.id, controller.signal);
       }
+
+      const final = withReply(content);
+      if (isCurrent()) commitChat(final);
+      await apiService.saveChat(final);
+      // Memory generation is a separate AI call; do not make the user wait for it
+      void maybeGenerateMemory(final);
     } catch (error: any) {
-      showToast(error.message || 'Error communicating with DeepSeek', 'error');
+      const aborted = controller.signal.aborted;
+      // Keep whatever text already arrived; drop an empty placeholder
+      const kept = partial.trim() ? withReply(partial) : { ...(isCurrent() && chatRef.current ? chatRef.current : base), messages: base.messages };
+      if (isCurrent()) commitChat(kept);
+      if (partial.trim()) {
+        apiService.saveChat(kept).catch(() => showToast('Could not save the partial reply', 'error'));
+      }
+      if (!aborted && isCurrent()) {
+        const message = error?.message || 'Error communicating with DeepSeek';
+        setLastError(message);
+        showToast(message, 'error');
+      }
     } finally {
-      setIsTyping(false);
+      if (abortRef.current === controller) abortRef.current = null;
+      if (isCurrent()) setIsTyping(false);
     }
+  };
+
+  /** Stops the AI reply that is being generated */
+  const stopGenerating = () => {
+    abortRef.current?.abort();
+  };
+
+  /**
+   * Asks for a new reply to the last user message, replacing any partial
+   * reply left by the failed attempt.
+   */
+  const retryLastReply = async () => {
+    const current = chatRef.current;
+    if (!current || isTyping || isReadOnly) return;
+    let end = current.messages.length;
+    while (end > 0 && current.messages[end - 1].role !== 'user') end--;
+    if (end === 0) return;
+    const base = { ...current, messages: current.messages.slice(0, end) };
+    commitChat(base);
+    try {
+      // Drop the failed partial reply on the server too, before asking again
+      await apiService.saveChat(base);
+    } catch {
+      showToast('Could not save the chat; try again', 'error');
+      return;
+    }
+    await generateReply(base);
   };
 
   /**
    * Public send handler — reads from the input state and sends.
+   * While the AI is replying, Enter does nothing (the text stays in the box).
    */
   const handleSend = async () => {
-    const text = input;
+    const text = input.trim();
+    if (!text || isTyping || isReadOnly) return;
     setInput('');
-    await sendMessage(text.trim());
+    scrollToBottom(); // Sending always brings the conversation back into view
+    await sendMessage(text);
   };
 
   /**
-   * Generates a new AI memory if the user message count aligns with the
-   * configured generate interval, then trims old memories if the max is exceeded.
-   * 
-   * @param chatObj - The chat object to potentially add a memory to
-   * @param messages - The current message list (used to count user messages)
+   * After each reply, lets the server add a memory if one is due (it counts
+   * the real user messages since the last memory). Runs in the background,
+   * merges into the latest chat state and trims old unpinned memories.
    */
-  const handleMemoryGeneration = async (chatObj: Chat, messages: Message[]) => {
-    const userMsgCount = messages.filter(m => m.role === 'user').length;
-    const genInterval = window.__memoryGenerateInterval || 25;
-    const wordCount = window.__memoryWordCount || 100;
-    if (userMsgCount > 0 && userMsgCount % genInterval === 0) {
-      const memoryContent = await deepseek.generateMemory(messages, wordCount);
-      if (memoryContent) {
-        chatObj.memories.push({
-          id: uuidv4(),
-          content: memoryContent,
-          pinned: false,
-          timestamp: Date.now()
-        });
-      }
-    }
+  const maybeGenerateMemory = async (snapshot: Chat) => {
+    const memory = await deepseek.generateMemory(snapshot.id, true);
+    if (!memory) return;
 
-    // Trim oldest non-pinned memories when exceeding max count
-    const maxMem = window.__memoryMaxCount || 50;
-    if (chatObj.memories.length > maxMem) {
-      const pinned = chatObj.memories.filter(m => m.pinned);
-      const nonPinned = chatObj.memories
-        .filter(m => !m.pinned)
-        .sort((a, b) => b.timestamp - a.timestamp)
-        .slice(0, maxMem - pinned.length);
-      chatObj.memories = [...pinned, ...nonPinned];
+    const isCurrent = activeChatIdRef.current === snapshot.id;
+    const latest = isCurrent && chatRef.current ? chatRef.current : snapshot;
+    const next: Chat = {
+      ...latest,
+      memories: trimMemories([...latest.memories, memory], window.__memoryMaxCount || 50),
+    };
+    if (isCurrent) commitChat(next);
+    try {
+      await apiService.saveChat(next);
+      if (isCurrent) showToast('Memory updated', 'info');
+    } catch {
+      showToast('Could not save the new memory', 'error');
     }
   };
 
@@ -332,7 +438,7 @@ export const ChatPage: React.FC = () => {
   if (error) return (
     <div className="p-8 flex flex-col items-center justify-center min-h-screen">
       <p className="text-zinc-400 mb-4">{error}</p>
-      <button 
+      <button
         onClick={() => navigate('/chats')}
         className="text-indigo-400 font-bold hover:underline"
       >
@@ -343,190 +449,240 @@ export const ChatPage: React.FC = () => {
   if (!chat) return <div className="p-8 text-white">Chat not found.</div>;
   if (!scenario && !scenarioDeleted) return <div className="p-8 text-white">Chat not found.</div>;
 
+  // Message actions (edit, rewind, delete), shown on hover and always on touch screens
+  const messageActions = (m: Message) => (
+    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity">
+      <button
+        onClick={async () => {
+          const newContent = prompt('Edit message:', m.content);
+          if (newContent !== null) {
+            const newMessages = chat.messages.map(msg => msg.id === m.id ? { ...msg, content: newContent } : msg);
+            const updatedChat = { ...chat, messages: newMessages };
+            setChat(updatedChat);
+            await apiService.saveChat(updatedChat);
+          }
+        }}
+        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors" title="Edit" aria-label="Edit message"
+      >
+        <Edit2 size={13} />
+      </button>
+      <button
+        onClick={async () => {
+          if (await showConfirm('Delete this and all messages after it? (Rewind)')) {
+            const index = chat.messages.findIndex(msg => msg.id === m.id);
+            const newMessages = chat.messages.slice(0, index + 1);
+            const updatedChat = { ...chat, messages: newMessages };
+            setChat(updatedChat);
+            await apiService.saveChat(updatedChat);
+          }
+        }}
+        className="p-1 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors" title="Rewind to here" aria-label="Rewind to this message"
+      >
+        <RefreshCw size={13} />
+      </button>
+      <button
+        onClick={async () => {
+          if (await showConfirm('Delete this message?')) {
+            const newMessages = chat.messages.filter(msg => msg.id !== m.id);
+            const updatedChat = { ...chat, messages: newMessages };
+            setChat(updatedChat);
+            await apiService.saveChat(updatedChat);
+          }
+        }}
+        className="p-1 rounded text-zinc-500 hover:text-red-400 hover:bg-red-900/30 transition-colors" title="Delete" aria-label="Delete message"
+      >
+        <Trash2 size={13} />
+      </button>
+    </div>
+  );
+
+  /** Opens the side panel on one of its tabs */
+  const openPanel = (tab: 'info' | 'matrix' | 'settings') => {
+    setOverlayTab(tab);
+    setOverlay(tab);
+  };
+
   return (
-    <div className="flex flex-1 min-h-0 h-screen bg-zinc-950 text-zinc-200">
+    // Fills the screen below the navbar (top bar on desktop, bottom bar on phones, both 4rem)
+    <div className="flex flex-col h-[calc(100dvh-4rem)] min-h-0 bg-zinc-950 text-zinc-200">
 
-      {/* ── Main Chat Area ── */}
-      <div className="flex-1 flex flex-col min-w-0 h-full">
-
-        {/* Read-Only Banner (shown when admin views another user's chat) */}
-        {isReadOnly && !scenarioDeleted && (
-          <div className="flex-shrink-0 bg-amber-600/10 border-b border-amber-600/20 px-4 py-2 text-center">
-            <span className="text-xs font-bold text-amber-500 uppercase tracking-wider flex items-center justify-center gap-2">
-              <User size={14} />
-              Viewing {chat.ownerUsername ? <>{chat.ownerUsername}'s</> : 'another user\'s'} chat — read-only
-            </span>
+      {/* ── Chat header: back, scenario, panels ── */}
+      <header className="flex-shrink-0 border-b border-zinc-800/80 bg-zinc-950/95">
+        <div className="mx-auto w-full max-w-3xl px-2 sm:px-4 h-12 flex items-center gap-2">
+          <button onClick={() => navigate('/chats')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Back to Chats" aria-label="Back to Chats">
+            <ChevronLeft size={18} />
+          </button>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-white truncate">{scenario?.name || chat.scenarioName || 'Chat'}</p>
+            {chat.userCharacter?.name && (
+              <p className="text-[11px] text-zinc-500 truncate">as {chat.userCharacter.name}</p>
+            )}
           </div>
-        )}
-
-        {/* Scenario Deleted Banner (shown when the scenario has been soft-deleted by its creator) */}
-        {scenarioDeleted && (
-          <div className="flex-shrink-0 bg-red-600/10 border-b border-red-600/20 px-4 py-2 text-center">
-            <span className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center justify-center gap-2">
-              <Info size={14} />
-              This scenario has been deleted by its creator — chat is now read-only
-            </span>
-          </div>
-        )}
-
-        {/* ── Messages Area ── */}
-        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-6 py-6 pb-40"
-          style={{ paddingLeft: chatPaddingLeft + 'px', paddingRight: chatPaddingRight + 'px' }}>
-          
-          {/* Empty state */}
-          {chat.messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full text-zinc-500 text-center px-8">
-              <MessageSquare size={48} className="mb-4 opacity-20" />
-              <p>No messages yet. Send a message to start the story!</p>
-            </div>
+          {scenario && (
+            <button onClick={() => openPanel('info')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Scenario Info" aria-label="Scenario Info">
+              <Info size={18} />
+            </button>
           )}
+          {scenario && (
+            <button onClick={() => openPanel('matrix')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Memories & Lore" aria-label="Memories and Lore">
+              <Brain size={18} />
+            </button>
+          )}
+          <button onClick={() => openPanel('settings')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Chat Settings" aria-label="Chat Settings">
+            <SettingsIcon size={18} />
+          </button>
+        </div>
+      </header>
 
-          {/* Message list */}
-          {chat.messages.map((m) => (
-            <div key={m.id} className={`group relative flex flex-col ${m.role === 'user' ? 'items-end mr-4' : 'items-start'} ${m.role === 'system' ? 'items-center !my-2' : ''}`}>
-              {m.role !== 'system' ? (
-                <>
-                  {/* Message header: avatar, name, timestamp */}
-                  <div className="flex items-center gap-2 mb-1 px-1">
-                    {m.role === 'assistant' && (
-                      <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-[10px] font-bold">
-                        AI
-                      </div>
-                    )}
-                    <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">
-                      {m.role === 'assistant' ? (m.characterName || scenario?.name || 'AI') : (chat.userCharacter?.name || 'YOU')}
-                    </span>
-                    <span className="text-[10px] text-zinc-600">
-                      {format(m.timestamp, 'HH:mm')}
-                    </span>
-                  </div>
+      {/* Read-Only Banner (shown when admin views another user's chat) */}
+      {isReadOnly && !scenarioDeleted && (
+        <div className="flex-shrink-0 bg-amber-600/10 border-b border-amber-600/20 px-4 py-2 text-center">
+          <span className="text-xs font-bold text-amber-500 uppercase tracking-wider flex items-center justify-center gap-2">
+            <User size={14} />
+            Viewing {chat.ownerUsername ? <>{chat.ownerUsername}'s</> : 'another user\'s'} chat — read-only
+          </span>
+        </div>
+      )}
 
-                  {/* Message bubble with dialog/narration color highlighting */}
-                  <div 
-                    className={`max-w-[85%] rounded-2xl p-4 shadow-sm relative ${
-                      m.role === 'user' 
-                        ? 'text-white rounded-tr-none' 
-                        : 'bg-zinc-900 border border-zinc-800 rounded-tl-none'
-                    }`}
-                    style={m.role === 'user' ? { backgroundColor: chatBubbleColor } : narrationColor ? { color: narrationColor } : {}}
-                  >
-                    {/* Parse *italic* and "dialogue" markers for color styling */}
-                    <div className="whitespace-pre-wrap leading-relaxed message-content">
-                      {m.content.split(/(\*[^*]+\*|"[^"]*")/g).map((part, i) => {
-                        if (part.startsWith('*') && part.endsWith('*')) {
-                          return <em key={i} style={{ color: narrationColor || undefined }}>{part.slice(1, -1)}</em>;
-                        }
-                        if (part.startsWith('"') && part.endsWith('"')) {
-                          return <span key={i} style={{ color: dialogColor }}>{part}</span>;
-                        }
-                        return part;
-                      })}
-                    </div>
+      {/* Scenario Deleted Banner (shown when the scenario has been soft-deleted by its creator) */}
+      {scenarioDeleted && (
+        <div className="flex-shrink-0 bg-red-600/10 border-b border-red-600/20 px-4 py-2 text-center">
+          <span className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center justify-center gap-2">
+            <Info size={14} />
+            This scenario has been deleted by its creator — chat is now read-only
+          </span>
+        </div>
+      )}
 
-                    {/* Message action buttons: Edit, Rewind, Delete (hidden in read-only) */}
-                    {!isReadOnly && (
-                      <div className={`absolute top-0 ${m.role === 'user' ? 'right-full mr-2' : 'left-full ml-2'} opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-lg shadow-xl z-10`}>
-                        <button 
-                          onClick={async () => {
-                            const newContent = prompt('Edit message:', m.content);
-                            if (newContent !== null) {
-                              const newMessages = chat.messages.map(msg => msg.id === m.id ? { ...msg, content: newContent } : msg);
-                              const updatedChat = { ...chat, messages: newMessages };
-                              setChat(updatedChat);
-                              await apiService.saveChat(updatedChat);
-                            }
-                          }}
-                          className="p-1.5 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors" title="Edit"
-                        >
-                          <Edit2 size={14} />
-                        </button>
-                        <button 
-                          onClick={async () => {
-                            if (await showConfirm('Delete this and all messages after it? (Rewind)')) {
-                              const index = chat.messages.findIndex(msg => msg.id === m.id);
-                              const newMessages = chat.messages.slice(0, index + 1);
-                              const updatedChat = { ...chat, messages: newMessages };
-                              setChat(updatedChat);
-                              await apiService.saveChat(updatedChat);
-                            }
-                          }}
-                          className="p-1.5 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white transition-colors" title="Rewind"
-                        >
-                          <RefreshCw size={14} />
-                        </button>
-                        <button 
-                          onClick={async () => {
-                            if (await showConfirm('Delete this message?')) {
-                              const newMessages = chat.messages.filter(msg => msg.id !== m.id);
-                              const updatedChat = { ...chat, messages: newMessages };
-                              setChat(updatedChat);
-                              await apiService.saveChat(updatedChat);
-                            }
-                          }}
-                          className="p-1.5 hover:bg-red-900/40 rounded text-zinc-400 hover:text-red-500 transition-colors" title="Delete"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </>
-              ) : (
-                // System messages (e.g., persona change notifications) rendered as pill badges
+      {/* ── Messages: scrolls on its own; the input below never covers it ── */}
+      <div className="relative flex-1 min-h-0">
+        <div ref={messagesContainerRef} onScroll={handleScroll} className="h-full overflow-y-auto overscroll-contain">
+          <div ref={messageListRef} className="mx-auto w-full max-w-3xl px-4 sm:px-6 py-6 space-y-6">
+
+            {/* Empty state */}
+            {chat.messages.length === 0 && (
+              <div className="flex flex-col items-center justify-center py-24 text-zinc-500 text-center px-8">
+                <MessageSquare size={48} className="mb-4 opacity-20" />
+                <p>No messages yet. Send a message to start the story!</p>
+              </div>
+            )}
+
+            {/* Message list */}
+            {chat.messages.map((m) => m.role === 'system' ? (
+              // System messages (e.g., persona change notifications) rendered as pill badges
+              <div key={m.id} className="flex justify-center !my-2">
                 <div className="px-4 py-1.5 bg-zinc-900/50 border border-zinc-800/50 rounded-full text-[10px] font-black text-zinc-600 uppercase tracking-widest italic">
                   {m.content}
                 </div>
-              )}
-            </div>
-          ))}
-
-          {/* Continue button — appears when last message is from the AI and not read-only/typing */}
-          {!isReadOnly && !isTyping && chat.messages.length > 0 && chat.messages[chat.messages.length - 1].role === 'assistant' && (
-            <div className="flex justify-center">
-              <button
-                onClick={() => sendMessage('*continue*')}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-purple-500/30 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:border-purple-500/50 hover:text-purple-300 transition-all text-xs font-bold"
-              >
-                <Play size={12} fill="currentColor" />
-                Continue
-              </button>
-            </div>
-          )}
-
-          {/* Typing indicator for non-streaming mode */}
-          {isTyping && !chat.settings.streamResponse && (
-            <div className="flex flex-col items-start">
-              <div className="flex items-center gap-2 mb-1 px-1">
-                <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center">
-                  <RefreshCw size={12} className="animate-spin" />
-                </div>
-                <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">AI is thinking...</span>
               </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-2xl rounded-tl-none p-4 w-16 flex justify-center">
-                <div className="flex gap-1">
-                  <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                  <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                  <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce"></div>
+            ) : (
+              <div key={m.id} className={`group flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+                {/* Message header: avatar, name, timestamp, actions */}
+                <div className={`flex items-center gap-2 mb-1.5 px-1 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                  <Avatar
+                    image={m.role === 'assistant' ? scenario?.image : chat.userCharacter?.avatar}
+                    name={m.role === 'assistant' ? (m.characterName || scenario?.name || 'AI') : (chat.userCharacter?.name || 'You')}
+                    accent={m.role === 'assistant'}
+                  />
+                  <span className="text-[11px] uppercase font-bold tracking-widest text-zinc-400">
+                    {m.role === 'assistant' ? (m.characterName || scenario?.name || 'AI') : (chat.userCharacter?.name || 'YOU')}
+                  </span>
+                  <span className="text-[10px] text-zinc-600">
+                    {format(m.timestamp, 'HH:mm')}
+                  </span>
+                  {!isReadOnly && messageActions(m)}
+                </div>
+
+                {/* Message bubble with dialog/narration color highlighting */}
+                <div
+                  className={`rounded-2xl px-4 py-3 sm:px-5 sm:py-4 ${
+                    m.role === 'user'
+                      ? 'max-w-[85%] text-white rounded-tr-md shadow-sm'
+                      : 'w-full bg-zinc-900/60 ring-1 ring-white/5 text-zinc-200 rounded-tl-md'
+                  }`}
+                  style={m.role === 'user' ? { backgroundColor: chatBubbleColor } : narrationColor ? { color: narrationColor } : {}}
+                >
+                  {/* Parse *italic* and "dialogue" markers for color styling */}
+                  <div className="whitespace-pre-wrap break-words text-[15px] sm:text-base leading-7 message-content">
+                    {m.content.split(/(\*[^*]+\*|"[^"]*")/g).map((part, i) => {
+                      if (part.startsWith('*') && part.endsWith('*')) {
+                        return <em key={i} style={{ color: narrationColor || undefined }}>{part.slice(1, -1)}</em>;
+                      }
+                      if (part.startsWith('"') && part.endsWith('"')) {
+                        return <span key={i} style={{ color: dialogColor }}>{part}</span>;
+                      }
+                      return part;
+                    })}
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
-          <div ref={messagesEndRef} />
+            ))}
+
+            {/* Retry button — after a failed AI request */}
+            {!isReadOnly && !isTyping && (lastError || chat.messages[chat.messages.length - 1]?.role === 'user') && (
+              <div className="flex justify-center">
+                <button
+                  onClick={retryLastReply}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:border-red-500/50 transition-all text-xs font-bold"
+                >
+                  <RotateCcw size={12} />
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {/* Continue button — appears when last message is from the AI and not read-only/typing */}
+            {!isReadOnly && !isTyping && chat.messages.length > 0 && chat.messages[chat.messages.length - 1].role === 'assistant' && (
+              <div className="flex justify-center">
+                <button
+                  onClick={() => sendMessage('*continue*')}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-full border border-indigo-500/30 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 hover:border-indigo-500/50 hover:text-indigo-200 transition-all text-xs font-bold"
+                >
+                  <Play size={12} fill="currentColor" />
+                  Continue
+                </button>
+              </div>
+            )}
+
+            {/* Typing indicator for non-streaming mode */}
+            {isTyping && !chat.settings.streamResponse && (
+              <div className="flex flex-col items-start">
+                <div className="flex items-center gap-2 mb-1 px-1">
+                  <div className="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center">
+                    <RefreshCw size={12} className="animate-spin" />
+                  </div>
+                  <span className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">AI is thinking...</span>
+                </div>
+                <div className="bg-zinc-900 border border-zinc-800 rounded-2xl rounded-tl-none p-4 w-16 flex justify-center">
+                  <div className="flex gap-1">
+                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                    <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce"></div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* New text arrived while the reader was scrolled up */}
+        {hasUnseen && (
+          <button
+            onClick={scrollToBottom}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-600 text-white text-xs font-bold shadow-lg hover:bg-indigo-500 transition-colors"
+          >
+            <ArrowDown size={14} />
+            New messages
+          </button>
+        )}
       </div>
 
-      {/* ── Floating Input Area (fixed at bottom) ── */}
-      <div className="fixed bottom-0 left-0 right-0 z-40">
-        {/* Footer bar with back button and scenario name */}
-        <div className="px-4 pb-2 flex items-center justify-center gap-2">
-          <button onClick={() => navigate('/chats')} className="text-zinc-500 hover:text-white transition-colors" title="Back to Chats">
-            <ChevronLeft size={16} />
-          </button>
-          <span className="text-xs text-zinc-500 font-bold truncate max-w-[200px]">{scenario?.name || 'Chat'}</span>
-        </div>
-        <div className="px-4 pb-4 bg-gradient-to-t from-zinc-950 via-zinc-950 to-transparent">
-          <div className="max-w-4xl mx-auto relative group">
+      {/* ── Input bar: part of the layout, grows with its text ── */}
+      <div className="flex-shrink-0 border-t border-zinc-800/80 bg-zinc-950">
+        <div className="mx-auto w-full max-w-3xl px-4 sm:px-6 py-3">
+          <div className="relative">
             <textarea
+              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -537,49 +693,63 @@ export const ChatPage: React.FC = () => {
               }}
               placeholder={scenarioDeleted ? "⚠ This scenario has been deleted by its creator — chat is read-only" : (isReadOnly ? "This chat is read-only" : "Write your response...")}
               disabled={isReadOnly}
-              className={`w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-4 pl-4 pr-28 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-h-[60px] max-h-[200px] resize-none transition-all ${scenarioDeleted ? 'placeholder:text-red-400/60 text-red-300/50 border-red-800/50' : ''} ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
+              aria-label="Your message"
+              className={`block w-full bg-zinc-900 border border-zinc-800 rounded-2xl py-3.5 pl-4 pr-14 text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none overflow-y-auto ${scenarioDeleted ? 'placeholder:text-red-400/60 text-red-300/50 border-red-800/50' : ''} ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
               rows={1}
             />
-            {/* Input action buttons */}
-            <div className="absolute right-2 bottom-2 flex items-center gap-1">
-              <button 
-                onClick={() => { setOverlay('settings'); setOverlayTab('settings'); }}
-                className="p-2 rounded-xl transition-colors text-purple-400 hover:text-white hover:bg-zinc-800" title="Chat Settings"
-              >
-                <SettingsIcon size={22} />
-              </button>
-              <button 
-                onClick={handleSend}
-                disabled={!input.trim() || isTyping || isReadOnly}
-                className={`p-2 rounded-xl transition-all ${
-                  input.trim() && !isTyping && !isReadOnly ? 'bg-indigo-600 text-white shadow-lg' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
-                }`}
-              >
-                <Send size={20} />
-              </button>
+            <div className="absolute right-2 bottom-2">
+              {isTyping ? (
+                <button
+                  onClick={stopGenerating}
+                  className="p-2 rounded-xl transition-all bg-red-600/80 text-white shadow-lg hover:bg-red-600"
+                  title="Stop generating"
+                  aria-label="Stop generating"
+                >
+                  <Square size={18} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  onClick={handleSend}
+                  disabled={!input.trim() || isReadOnly}
+                  className={`p-2 rounded-xl transition-all ${
+                    input.trim() && !isReadOnly ? 'bg-indigo-600 text-white shadow-lg hover:bg-indigo-500' : 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                  }`}
+                  title="Send"
+                  aria-label="Send"
+                >
+                  <Send size={18} />
+                </button>
+              )}
             </div>
           </div>
+          <p className="hidden sm:block mt-1.5 text-[10px] text-zinc-600 text-center">Enter to send · Shift+Enter for a new line</p>
         </div>
       </div>
 
       {/* ── Full-Screen Overlay (Memory Matrix, Settings, Info) ── */}
       {overlay !== 'none' && (
-        <div className="fixed inset-0 z-50 bg-zinc-950 flex flex-col">
+        <div
+          ref={overlayRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={overlayTab === 'matrix' ? 'Memory Matrix' : overlayTab === 'settings' ? 'Chat Settings' : 'Scenario Info'}
+          className="fixed inset-0 z-50 bg-zinc-950 flex flex-col"
+        >
           {/* Overlay header with tab navigation */}
           <div className="flex items-center justify-between p-4 border-b border-zinc-800">
             <div className="flex items-center gap-2">
-              {overlayTab === 'matrix' && <><Brain size={20} className="text-indigo-500" /> <span className="text-lg font-bold text-white">Memory Matrix</span></>}
-              {overlayTab === 'settings' && <><SettingsIcon size={20} className="text-zinc-400" /> <span className="text-lg font-bold text-white">Chat Settings</span></>}
-              {overlayTab === 'info' && <><Info size={20} className="text-blue-500" /> <span className="text-lg font-bold text-white">Scenario Info</span></>}
+              {overlayTab === 'matrix' && <><Brain size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Memory Matrix</span></>}
+              {overlayTab === 'settings' && <><SettingsIcon size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Chat Settings</span></>}
+              {overlayTab === 'info' && <><Info size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Scenario Info</span></>}
             </div>
             <div className="flex items-center gap-1">
-              <button onClick={() => setOverlayTab('info')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'info' ? 'bg-zinc-800 text-blue-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Scenario Info">
+              <button onClick={() => setOverlayTab('info')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'info' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Scenario Info">
                 <Info size={18} />
               </button>
               <button onClick={() => setOverlayTab('matrix')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'matrix' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Memory Matrix">
                 <Brain size={18} />
               </button>
-              <button onClick={() => setOverlayTab('settings')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'settings' ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Chat Settings">
+              <button onClick={() => setOverlayTab('settings')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'settings' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Chat Settings">
                 <SettingsIcon size={18} />
               </button>
               <button onClick={() => setOverlay('none')} className="p-2 hover:bg-zinc-800 rounded-full transition-colors">
@@ -614,7 +784,7 @@ export const ChatPage: React.FC = () => {
  * - **AI Memories**: Generated memories with pin/delete controls and manual generation
  */
 const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (chat: Chat) => void }> = ({ chat, scenario, setChat }) => {
-  const { showConfirm } = useNotifications();
+  const { showConfirm, showToast } = useNotifications();
   const [activeTab, setActiveTab] = useState<'lore' | 'memories'>('lore');
   const [expandedLoreIds, setExpandedLoreIds] = useState<Set<string>>(new Set());
 
@@ -631,13 +801,13 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
     <div className="space-y-6">
       {/* Tab toggle */}
       <div className="flex p-1 bg-zinc-900/50 rounded-xl border border-zinc-800/50 max-w-xs mx-auto">
-        <button 
+        <button
           onClick={() => setActiveTab('lore')}
           className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'lore' ? 'bg-zinc-800 text-white shadow' : 'text-zinc-500 hover:text-zinc-300'}`}
         >
           Lore Database
         </button>
-        <button 
+        <button
           onClick={() => setActiveTab('memories')}
           className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'memories' ? 'bg-zinc-800 text-white shadow' : 'text-zinc-500 hover:text-zinc-300'}`}
         >
@@ -649,7 +819,9 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
         /* Lore pieces from the scenario */
         <div className="space-y-3">
           {scenario.lorePieces.length === 0 && (
-            <p className="text-zinc-600 text-sm italic text-center py-8">No lore pieces defined for this scenario.</p>
+            <p className="text-zinc-600 text-sm italic text-center py-8">
+              {scenario.promptsHidden ? 'The creator keeps the lore private.' : 'No lore pieces defined for this scenario.'}
+            </p>
           )}
           {scenario.lorePieces.map(piece => {
             const isExpanded = expandedLoreIds.has(piece.id);
@@ -682,9 +854,11 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
             <h4 className="text-xs uppercase font-bold text-zinc-600 tracking-wider">Memories ({chat.memories.length})</h4>
             <button
               onClick={async () => {
-                const memoryContent = await deepseek.generateMemory(chat.messages);
-                if (memoryContent && await showConfirm(`Add this memory?\n\n"${memoryContent}"`)) {
-                  const newMemories = [...chat.memories, { id: uuidv4(), content: memoryContent, pinned: false, timestamp: Date.now() }];
+                const memory = await deepseek.generateMemory(chat.id);
+                if (!memory) {
+                  showToast('Could not generate a memory', 'error');
+                } else if (await showConfirm(`Add this memory?\n\n"${memory.content}"`)) {
+                  const newMemories = [...chat.memories, memory];
                   const newChat = { ...chat, memories: newMemories };
                   setChat(newChat);
                   await apiService.saveChat(newChat);
@@ -717,7 +891,7 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
                   >
                     <Trash2 size={14} />
                   </button>
-                  <button 
+                  <button
                     onClick={async () => {
                       const newMemories = chat.memories.map(m => m.id === memory.id ? { ...m, pinned: !m.pinned } : m);
                       const newChat = { ...chat, memories: newMemories };
@@ -758,6 +932,11 @@ const ChatSettingsView: React.FC<{
 }> = ({ chat, setChat }) => {
   const { showToast, showConfirm } = useNotifications();
   const [personas, setPersonas] = React.useState<Persona[]>([]);
+  // Edited locally and saved once when the field loses focus
+  const [instructionsDraft, setInstructionsDraft] = React.useState(chat.settings.customInstructions || '');
+  React.useEffect(() => {
+    setInstructionsDraft(chat.settings.customInstructions || '');
+  }, [chat.id]);
 
   // Load available personas on mount
   React.useEffect(() => {
@@ -1065,11 +1244,13 @@ const ChatSettingsView: React.FC<{
       <section>
         <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-3 px-1">Custom Instructions</label>
         <textarea
-          value={chat.settings.customInstructions || ''}
-          onChange={(e) => updateSettings('customInstructions', e.target.value)}
-          onBlur={(e) => {
-            if (e.target.value !== chat.settings.customInstructions) {
-              updateSettings('customInstructions', e.target.value, `[System: AI Instructions have been updated: ${e.target.value}]`);
+          value={instructionsDraft}
+          onChange={(e) => setInstructionsDraft(e.target.value)}
+          onBlur={() => {
+            if (instructionsDraft !== (chat.settings.customInstructions || '')) {
+              updateSettings('customInstructions', instructionsDraft)
+                .then(() => showToast('Instructions saved', 'success'))
+                .catch(() => showToast('Could not save instructions', 'error'));
             }
           }}
           placeholder="e.g. Always respond in third person, focus on dialogue..."
@@ -1082,7 +1263,7 @@ const ChatSettingsView: React.FC<{
       <section className="bg-zinc-800/20 border border-zinc-800/40 rounded-xl divide-y divide-zinc-800/50 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3">
           <span className="text-sm text-zinc-300 font-medium">Stream Text Response</span>
-          <button 
+          <button
             onClick={() => updateSettings('streamResponse', !chat.settings.streamResponse)}
             className={`w-10 h-5 rounded-full transition-colors relative flex-shrink-0 ${chat.settings.streamResponse ? 'bg-indigo-600' : 'bg-zinc-700'}`}
           >
@@ -1091,7 +1272,7 @@ const ChatSettingsView: React.FC<{
         </div>
         <div className="flex items-center justify-between px-4 py-3">
           <span className="text-sm text-zinc-300 font-medium">Show Suggestions</span>
-          <button 
+          <button
             onClick={() => updateSettings('showSuggestions', !chat.settings.showSuggestions)}
             className={`w-10 h-5 rounded-full transition-colors relative flex-shrink-0 ${chat.settings.showSuggestions ? 'bg-indigo-600' : 'bg-zinc-700'}`}
           >
@@ -1104,14 +1285,14 @@ const ChatSettingsView: React.FC<{
       <section>
         <label className="block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-3 px-1">Export Chat</label>
         <div className="flex gap-3">
-          <button 
+          <button
             onClick={exportAsJSON}
             className="flex-1 flex items-center justify-center gap-2 py-3 bg-emerald-600/10 text-emerald-400 border border-emerald-600/20 rounded-xl hover:bg-emerald-600/20 transition-colors text-sm font-bold"
           >
             <FileDown size={16} />
             Export JSON
           </button>
-          <button 
+          <button
             onClick={exportAsPDF}
             className="flex-1 flex items-center justify-center gap-2 py-3 bg-indigo-600/10 text-indigo-400 border border-indigo-600/20 rounded-xl hover:bg-indigo-600/20 transition-colors text-sm font-bold"
           >
@@ -1123,7 +1304,7 @@ const ChatSettingsView: React.FC<{
 
       {/* Danger zone: clear chat */}
       <div className="pt-2">
-        <button 
+        <button
           onClick={async () => {
             if (await showConfirm('Are you sure you want to clear all messages?')) {
               const newChat = { ...chat, messages: [] };
@@ -1165,7 +1346,9 @@ const ScenarioInfoView: React.FC<{ scenario: Scenario }> = ({ scenario }) => {
           Backstory
         </h4>
         <div className="bg-zinc-800/30 backdrop-blur-sm rounded-xl p-4 max-h-[220px] overflow-y-auto border border-zinc-700/50">
-          <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">{scenario.backstory}</p>
+          <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
+            {scenario.promptsHidden ? <span className="text-zinc-500 italic">The creator keeps the backstory private.</span> : scenario.backstory}
+          </p>
         </div>
       </div>
 
@@ -1199,3 +1382,14 @@ const ScenarioInfoView: React.FC<{ scenario: Scenario }> = ({ scenario }) => {
     </div>
   );
 };
+
+/** Round avatar: an image when there is one, otherwise the first letter of the name */
+const Avatar: React.FC<{ image?: string; name: string; accent?: boolean }> = ({ image, name, accent }) => (
+  image ? (
+    <img src={image} alt="" className="w-7 h-7 rounded-full object-cover ring-1 ring-white/10 flex-shrink-0" />
+  ) : (
+    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 ${accent ? 'bg-indigo-600 text-white' : 'bg-zinc-700 text-zinc-200'}`}>
+      {(name.trim()[0] || '?').toUpperCase()}
+    </div>
+  )
+);

@@ -13,7 +13,7 @@
  * When starting a chat:
  *   1. User selects a persona in the modal
  *   2. If the scenario has a greetingMessage, it becomes the first AI message
- *   3. If no greeting, an AI response is auto-generated via deepseek.chat() with "*continue*"
+ *   3. If no greeting, the chat is saved with a "*continue*" message and the server writes the opening
  *   4. The new chat is saved server-side, then the user is navigated to /chat/:id
  *
  * Import/Export uses a custom JSON format (Risuprompt-compatible) triggered manually.
@@ -28,6 +28,8 @@ import {
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek } from '../services/deepseek';
+import { sanitizeRichText } from '../utils/sanitize';
+import { useDialog } from '../utils/useDialog';
 import { Scenario, Persona, Message } from '../types';
 
 import { v4 as uuidv4 } from 'uuid';
@@ -49,6 +51,7 @@ export const ScenarioDetail: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [expandedLoreIds, setExpandedLoreIds] = useState<Set<string>>(new Set());
+  const personaDialogRef = useDialog(showPersonaSelect, () => setShowPersonaSelect(false));
 
   const toggleLoreExpand = (id: string) => {
     setExpandedLoreIds(prev => {
@@ -84,7 +87,7 @@ export const ScenarioDetail: React.FC = () => {
       }
     };
     loadScenario();
-    
+
     const loadPersonas = async () => {
       const data = await apiService.getPersonas();
       setPersonas(data);
@@ -135,7 +138,7 @@ export const ScenarioDetail: React.FC = () => {
       ] : [],
       memories: [],
       settings: {
-        model: 'deepseek-chat',
+        model: 'deepseek-flash',
         responseLength: 'medium' as const,
         streamResponse: true,
         showSuggestions: true,
@@ -147,34 +150,26 @@ export const ScenarioDetail: React.FC = () => {
     };
 
     try {
-      // If no greeting message exists, auto-generate a first response from the AI
-      if (!greeting) {
+      if (greeting) {
+        await apiService.saveChat(newChat);
+      } else {
+        // No greeting: save the chat with a "*continue*" prompt and let the
+        // server (which builds the prompt from the saved chat) write the opening
         showToast('Generating story opening...', 'info');
-        const response = await deepseek.chat([
-          {
-            id: uuidv4(),
-            role: 'user',
-            content: '*continue*',
-            timestamp: Date.now(),
-          }
-        ], newChat.settings, scenario, newChat);
-        newChat.messages = [
-          {
-            id: uuidv4(),
-            role: 'user' as const,
-            content: '*continue*',
-            timestamp: Date.now(),
-          },
-          {
-            id: uuidv4(),
-            role: 'assistant' as const,
-            content: response,
-            timestamp: Date.now(),
-          },
-        ];
+        newChat.messages = [{ id: uuidv4(), role: 'user' as const, content: '*continue*', timestamp: Date.now() }];
+        await apiService.saveChat(newChat);
+        try {
+          const response = await deepseek.chat(newChatId);
+          newChat.messages = [
+            ...newChat.messages,
+            { id: uuidv4(), role: 'assistant' as const, content: response, timestamp: Date.now() },
+          ];
+          await apiService.saveChat(newChat);
+        } catch (err: any) {
+          // The chat exists; it opens with a Retry button
+          showToast(err?.message || 'Could not generate the opening; use Retry in the chat', 'error');
+        }
       }
-      // Save and navigate to the new chat
-      await apiService.saveChat(newChat);
       navigate(`/chat/${newChatId}`);
     } catch (err) {
       showToast('Failed to start chat', 'error');
@@ -219,7 +214,7 @@ export const ScenarioDetail: React.FC = () => {
                 </span>
               ))}
             </div>
-            
+
             <div className="flex items-center gap-6 text-sm text-zinc-500 font-bold">
                <div className="flex items-center gap-2">
                   <Calendar size={16} />
@@ -252,7 +247,7 @@ export const ScenarioDetail: React.FC = () => {
               </div>
               <div
                 className="prose prose-invert max-w-none [&_img]:rounded-xl [&_img]:max-h-96 [&_img]:w-auto"
-                dangerouslySetInnerHTML={{ __html: scenario.introduction }}
+                dangerouslySetInnerHTML={{ __html: sanitizeRichText(scenario.introduction) }}
               />
             </div>
           )}
@@ -263,9 +258,13 @@ export const ScenarioDetail: React.FC = () => {
               <Book className="text-green-500" size={24} />
               <h2 className="text-xl font-bold text-white uppercase tracking-widest">The Backstory</h2>
             </div>
-            <p className="text-zinc-300 leading-relaxed whitespace-pre-wrap">
-              {scenario.backstory}
-            </p>
+            {scenario.promptsHidden ? (
+              <p className="text-zinc-500 italic">The creator keeps the backstory and lore private.</p>
+            ) : (
+              <p className="text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                {scenario.backstory}
+              </p>
+            )}
           </div>
 
           {/* Key Characters & Lore */}
@@ -316,11 +315,17 @@ export const ScenarioDetail: React.FC = () => {
              {/* ─── Persona Selection Modal ─── */}
              {showPersonaSelect && (
                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-                 <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl">
+                 <div
+                   ref={personaDialogRef}
+                   role="dialog"
+                   aria-modal="true"
+                   aria-labelledby="persona-dialog-title"
+                   className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl"
+                 >
                    {/* Modal header */}
                    <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
-                     <h3 className="text-xl font-bold text-white">Select Your Persona</h3>
-                     <button onClick={() => setShowPersonaSelect(false)} className="text-zinc-500 hover:text-white transition-colors">
+                     <h3 id="persona-dialog-title" className="text-xl font-bold text-white">Select Your Persona</h3>
+                     <button onClick={() => setShowPersonaSelect(false)} aria-label="Close" className="text-zinc-500 hover:text-white transition-colors">
                        <X size={24} />
                      </button>
                    </div>
@@ -395,7 +400,7 @@ export const ScenarioDetail: React.FC = () => {
                    </button>
                  )}
                </div>
-               
+
                {/* Owner/Admin actions: Export + Delete */}
                {(isOwner || isAdmin) && (
                  <>
