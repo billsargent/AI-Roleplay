@@ -1091,11 +1091,12 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const loreActiveMax = getSystemSetting('loreActiveMax');
   const lorePinnedMax = getSystemSetting('lorePinnedMax');
   const memoryPinnedMax = getSystemSetting('memoryPinnedMax');
+  const loreOverview = getSystemSetting('loreOverview') !== 'false';
   const utilityModel = getSystemSetting('utilityModel');
   const utilityTemperature = getSystemSetting('utilityTemperature');
   const stopOnPlayerLines = getSystemSetting('stopOnPlayerLines') !== 'false';
   const stopSequences = getSystemSetting('stopSequences');
-  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax, memoryPinnedMax, utilityModel, utilityTemperature, stopOnPlayerLines, stopSequences });
+  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax, memoryPinnedMax, loreOverview, utilityModel, utilityTemperature, stopOnPlayerLines, stopSequences });
 
 
 
@@ -1144,6 +1145,7 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
     if (Number.isFinite(t) && t >= 0 && t <= 2) setSystemSetting('utilityTemperature', String(t));
   }
   if (req.body.stopOnPlayerLines !== undefined) setSystemSetting('stopOnPlayerLines', req.body.stopOnPlayerLines ? 'true' : 'false');
+  if (req.body.loreOverview !== undefined) setSystemSetting('loreOverview', req.body.loreOverview ? 'true' : 'false');
   if (typeof req.body.stopSequences === 'string') {
     // One per line, at most 16, each up to 100 characters
     const lines = req.body.stopSequences.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim()).slice(0, 16).map(l => l.slice(0, 100));
@@ -1349,7 +1351,7 @@ app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
   const llm = readLlmSettings(getSystemSetting);
   // Prefix completion continues the text exactly; it needs thinking off
   const prefix = mode === 'continue' && getSystemSetting('deepseekThinking') === 'off';
-  const { messages, maxTokens, stop, loreIds, memoryIds, omitted } = buildChatPrompt({ messages: history, scenario, chat, llm, mode: promptMode, prefix });
+  const { messages, maxTokens, stop, loreIds, listedLoreIds, memoryIds, omitted } = buildChatPrompt({ messages: history, scenario, chat, llm, mode: promptMode, prefix });
   if (mode === 'continue') res.setHeader('X-Continue-Mode', prefix ? 'prefix' : 'instruct');
   // What the reply was given, for the player's context view. Lore the
   // player may not read (hidden pieces, hidden prompts) is only counted.
@@ -1359,6 +1361,7 @@ app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
     memoryIds,
     lore: used.filter(p => readable.has(p.id)).map(p => p.title),
     hiddenLore: used.filter(p => !readable.has(p.id)).length,
+    listed: listedLoreIds.length,
     omitted,
   })));
   await runCompletion(req, res, {

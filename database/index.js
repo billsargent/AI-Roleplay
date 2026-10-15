@@ -869,7 +869,7 @@ const MEMORY_SOURCES = new Set(['auto', 'manual', 'user']);
 
 /**
  * What the AI was given for a reply, as stored with the message:
- * { memoryIds: string[], lore: string[], hiddenLore: number, omitted: number }.
+ * { memoryIds: string[], lore: string[], hiddenLore: number, listed: number, omitted: number }.
  * Anything else becomes undefined (or is trimmed to these fields).
  */
 function parseContextInfo(value) {
@@ -881,7 +881,7 @@ function parseContextInfo(value) {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
   const strings = (a, n) => (Array.isArray(a) ? a.filter(x => typeof x === 'string').slice(0, n).map(x => x.slice(0, 200)) : []);
   const count = (x) => (Number.isFinite(Number(x)) ? Math.max(0, Math.round(Number(x))) : 0);
-  return { memoryIds: strings(v.memoryIds, 200), lore: strings(v.lore, 100), hiddenLore: count(v.hiddenLore), omitted: count(v.omitted) };
+  return { memoryIds: strings(v.memoryIds, 200), lore: strings(v.lore, 100), hiddenLore: count(v.hiddenLore), listed: count(v.listed), omitted: count(v.omitted) };
 }
 
 /** Live scenarios with the fields used to match re-imported files */

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import {
   buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, readLlmSettings, responseTokensFor,
   triggerMatches, selectLore, selectHistory, estimateTokens, memoryDue, messagesSinceLastMemory, htmlToText, stopSequencesFor,
-  parseLoreSuggestions, buildLoreSuggestPrompt, buildEnhancePrompt, cleanEnhanced,
+  parseLoreSuggestions, buildLoreSuggestPrompt, buildEnhancePrompt, cleanEnhanced, namedInInstructions, loreOverview,
 } from '../lib/prompt.js';
 
 const llm = readLlmSettings(() => '');
@@ -125,6 +125,40 @@ test('linked lore is sent right after the piece that brought it in', () => {
   // Links count toward the cap
   const capped = selectLore(pieces.slice(0, 2), [msg('user', 'ship')], [], { ...llm, loreActiveMax: 1 });
   assert.deepEqual(capped.triggered.map(p => p.title), ['Ship']);
+});
+
+// ── Lore named in the instructions, lore overview (#44) ──
+test('pieces the instructions name are always sent', () => {
+  const instructions = '- Follow the How the Group Talks piece when they are together.\n- Follow The Deal, Escalation and If She Refuses without rushing.\n- Eli stays present. Each character follows his routine.';
+  const pieces = [
+    lore('The Deal', { id: 'd', triggers: ['deal'] }),
+    lore('Escalation', { id: 'e', triggers: ['expand'] }),
+    lore('If She Refuses', { id: 'r', triggers: ['refuse'] }),
+    lore('How the Group Talks', { id: 'g', triggers: ['group'] }),
+    lore('Eli', { id: 'eli', type: 'character', triggers: ['eli'] }),
+    lore('Library', { id: 'l', triggers: ['library'] }),
+  ];
+  assert.deepEqual(namedInInstructions(pieces, instructions).map(p => p.title).sort(), ['Escalation', 'How the Group Talks', 'If She Refuses', 'The Deal'],
+    'a one-word title counts in a sentence about pieces; "Eli" in an ordinary sentence does not');
+  const { pinned } = selectLore(pieces, [msg('user', 'hello')], [], llm, instructions);
+  assert.ok(['d', 'e', 'r', 'g'].every(id => pinned.some(p => p.id === id)));
+  assert.ok(!pinned.some(p => p.id === 'eli' || p.id === 'l'));
+  assert.equal(selectLore(pieces, [], [], { ...llm, lorePinnedMax: 2 }, instructions).pinned.length, 2, 'within the always-on cap');
+});
+
+test('the lore overview lists what is not sent in full, within its budget', () => {
+  const pieces = [
+    lore('Lighthouse', { id: 'a', pinned: true, smartActivation: false }),
+    lore('Curse', { id: 'b', triggers: ['tide'], description: 'An old curse on the bay.', weight: 50 }),
+    lore('Market', { id: 'c', triggers: ['market'], content: 'Busy at dawn. Smells of fish.', weight: 90 }),
+    lore('Mara', { id: 'm', type: 'character', triggers: ['mara'] }),
+  ];
+  const { messages: out, listedLoreIds } = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario({ lorePieces: pieces }), chat: chat(), llm });
+  assert.deepEqual(listedLoreIds, ['c', 'b'], 'highest weight first; sent pieces and cast duplicates left out');
+  assert.match(out[0].content, /OTHER LORE IN THIS WORLD[^\n]*\n- Market: Busy at dawn\.\n- Curse: An old curse on the bay\./);
+  const off = buildChatPrompt({ messages: [msg('user', 'hi')], scenario: scenario({ lorePieces: pieces }), chat: chat(), llm: { ...llm, loreOverview: false } });
+  assert.ok(!off.messages[0].content.includes('OTHER LORE'));
+  assert.equal(loreOverview(pieces, [], [], 12).length, 1, 'the budget limits the list');
 });
 
 test('character lore that repeats a cast member is skipped', () => {

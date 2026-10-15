@@ -306,7 +306,7 @@ test('a reply says which memories and lore it was given', async () => {
   assert.equal(r.status, 200, r.text);
   const ctx = JSON.parse(decodeURIComponent(r.headers.get('x-reply-context')));
   // The author sees every title, hidden ones included
-  assert.deepEqual(ctx, { memoryIds: [memId], lore: ['Harbour', 'Secret Map'], hiddenLore: 0, omitted: 0 });
+  assert.deepEqual(ctx, { memoryIds: [memId], lore: ['Harbour', 'Secret Map'], hiddenLore: 0, listed: 0, omitted: 0 });
 
   // A player of someone else's scenario only gets a count for hidden lore
   const p = await srv.register();
@@ -318,7 +318,7 @@ test('a reply says which memories and lore it was given', async () => {
   } });
   const r2 = await reply(p.token, pChat);
   assert.equal(r2.status, 200, r2.text);
-  assert.deepEqual(JSON.parse(decodeURIComponent(r2.headers.get('x-reply-context'))), { memoryIds: [], lore: ['Harbour'], hiddenLore: 1, omitted: 0 });
+  assert.deepEqual(JSON.parse(decodeURIComponent(r2.headers.get('x-reply-context'))), { memoryIds: [], lore: ['Harbour'], hiddenLore: 1, listed: 0, omitted: 0 });
 });
 
 test('memory details and reply context are stored with the chat', async () => {
@@ -337,7 +337,7 @@ test('memory details and reply context are stored with the chat', async () => {
   assert.equal(byContent['Edited.'].source, 'manual');
   assert.equal(byContent['Mine'].source, 'user');
   assert.equal(byContent['Bad'].source, undefined, 'unknown sources are dropped');
-  assert.deepEqual(back.messages[back.messages.length - 1].contextInfo, { memoryIds: [m.id], lore: ['A'], hiddenLore: 2, omitted: 3 });
+  assert.deepEqual(back.messages[back.messages.length - 1].contextInfo, { memoryIds: [m.id], lore: ['A'], hiddenLore: 2, listed: 0, omitted: 3 });
   assert.equal(back.messages[0].contextInfo, undefined, 'user messages carry no context');
 });
 

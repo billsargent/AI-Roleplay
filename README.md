@@ -42,6 +42,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Priority** — Higher-priority pieces win when more pieces qualify than the caps allow
 - **Hidden from Players** — The AI uses the piece but other players cannot read it (also enforced by the scenario's *Hide Prompts* switch)
 - **Linked Pieces** — Pieces linked to another are sent right after it (a draft piece can exist just to be linked)
+- **Lore Overview** — Every reply lists the other lore by title and a one-line summary; pieces named in the scenario instructions are always sent
 
 ### 👤 User System
 - **JWT Authentication** — Secure token-based auth with 7-day session expiry; sessions survive server restarts

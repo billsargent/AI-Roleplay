@@ -62,6 +62,8 @@ export const AdminPage: React.FC = () => {
   const [loreScanDepth, setLoreScanDepth] = useState('10');
   const [loreActiveMax, setLoreActiveMax] = useState('5');
   const [lorePinnedMax, setLorePinnedMax] = useState('10');
+  /** A one-line index of the lore not sent in full */
+  const [loreOverview, setLoreOverview] = useState(true);
   const [memoryGenerateInterval, setMemoryGenerateInterval] = useState('25');
   const [memoryWordCount, setMemoryWordCount] = useState('100');
   const [memoryMaxCount, setMemoryMaxCount] = useState('50');
@@ -108,6 +110,7 @@ export const AdminPage: React.FC = () => {
         setLoreScanDepth(settings.loreScanDepth || '10');
         setLoreActiveMax(settings.loreActiveMax || '5');
         setLorePinnedMax(settings.lorePinnedMax || '10');
+        setLoreOverview(settings.loreOverview !== false);
         setMemoryGenerateInterval(settings.memoryGenerateInterval || '25');
         setMemoryWordCount(settings.memoryWordCount || '100');
         setMemoryMaxCount(settings.memoryMaxCount || '50');
@@ -207,7 +210,7 @@ export const AdminPage: React.FC = () => {
         globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong,
         frequencyPenalty, presencePenalty, siteName,
         memoryGenerateInterval, memoryWordCount, memoryMaxCount, memoryPinnedMax,
-        contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax,
+        contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax, loreOverview,
         deepseekModel,
         deepseekThinking,
         utilityModel, utilityTemperature, stopOnPlayerLines, stopSequences,
@@ -766,6 +769,17 @@ export const AdminPage: React.FC = () => {
                     onChange={(e) => setLorePinnedMax(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                 </div>
               </div>
+              <label className="flex items-start gap-3 mt-4 cursor-pointer">
+                <input type="checkbox" checked={loreOverview} onChange={(e) => setLoreOverview(e.target.checked)} className="mt-1 accent-indigo-500" />
+                <span>
+                  <span className="block text-sm font-bold text-zinc-300">Lore overview</span>
+                  <span className="block text-xs text-zinc-500 leading-relaxed">
+                    Each reply also lists the scenario's other lore pieces by title with a one-line summary (about 1,500 tokens
+                    at most), so the AI knows what exists before a trigger word comes up. Pieces named in the scenario's
+                    instructions are always sent in full (within Max Always-on Lore).
+                  </span>
+                </span>
+              </label>
             </div>
 
             {/* Save all LLM settings */}

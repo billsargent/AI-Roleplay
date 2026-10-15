@@ -1669,6 +1669,7 @@ const ContextChip: React.FC<{ context: ReplyContext; memories: Memory[]; open: b
   const parts = [
     `${context.memoryIds.length} memor${context.memoryIds.length === 1 ? 'y' : 'ies'}`,
     `${loreCount} lore`,
+    ...(context.listed ? [`${context.listed} more listed`] : []),
     ...(context.omitted ? [`${context.omitted} older messages summarised`] : []),
   ];
   return (
@@ -1694,6 +1695,7 @@ const ContextChip: React.FC<{ context: ReplyContext; memories: Memory[]; open: b
               {context.hiddenLore > 0 && `${context.lore.length ? ', plus ' : ''}${context.hiddenLore} hidden piece${context.hiddenLore === 1 ? '' : 's'}`}
             </p>
           )}
+          {(context.listed ?? 0) > 0 && <p>{context.listed} other lore piece{context.listed === 1 ? ' was' : 's were'} listed by title and a one-line summary.</p>}
           {context.omitted > 0 && <p>{context.omitted} older messages were left out; the memories cover them.</p>}
         </div>
       )}

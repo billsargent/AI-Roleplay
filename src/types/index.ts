@@ -170,6 +170,8 @@ export interface ReplyContext {
   memoryIds: string[];
   lore: string[];
   hiddenLore: number;
+  /** Other lore pieces given only as a one-line summary (lore overview) */
+  listed?: number;
   /** Older messages left out of the prompt (covered by memories) */
   omitted: number;
 }

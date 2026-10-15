@@ -72,6 +72,7 @@ function parseReplyContext(header: string | null | undefined): ReplyContext | un
       memoryIds: Array.isArray(v.memoryIds) ? v.memoryIds.filter((x: unknown) => typeof x === 'string') : [],
       lore: Array.isArray(v.lore) ? v.lore.filter((x: unknown) => typeof x === 'string') : [],
       hiddenLore: Number(v.hiddenLore) || 0,
+      listed: Number(v.listed) || 0,
       omitted: Number(v.omitted) || 0,
     };
   } catch {
