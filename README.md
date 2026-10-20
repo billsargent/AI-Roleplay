@@ -2,7 +2,7 @@
 
 An immersive, AI-powered roleplay platform where you create stories, build worlds, and chat with intelligent AI characters. Built with a modern React frontend and an Express + SQLite backend, powered by the DeepSeek language model.
 
-**Current version: 2.1.0.** See [CHANGELOG.md](CHANGELOG.md) for what changed, and its *Upgrading from 1.x* section before updating an existing install.
+**Current version: 2.2.0.** See [CHANGELOG.md](CHANGELOG.md) for what changed, and its *Upgrading from 1.x* section before updating an existing install.
 
 ---
 
@@ -11,22 +11,27 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 ### 📖 Scenario System
 - **Create & Edit Rich Scenarios** — Full-featured editor with backstory, cast of characters, lore pieces, and custom instructions
 - **AI-Powered Generation** — Describe a scenario in natural language and the AI builds a complete world with characters and lore
+- **Lore Suggestions** — The AI proposes lore cards from your story; pick and adjust the ones to add
+- **AI Enhance** — Fix spelling, grammar and clarity in any editor field; you see the changes before accepting
 - **Public / Private Scenarios** — Share your creations with the community or keep them private
 - **Copy & Customize** — Fork any public scenario and make it your own
 - **Tag-Based Discovery** — Search and browse community scenarios by name, tags, or creator
 - **Scenario Detail View** — Inspect full backstory, character profiles, and lore before playing
-- **Scenario Import** — Import scenarios from external sources (currently supports Fictionlab format)
+- **Scenario Import** — Import Fictionlab exports (every known export shape), keeping lore types, descriptions, traits, pictures and links; cards with no trigger words get AI suggestions straight away
+- **Update from Fictionlab file** — Refresh an existing scenario from its export file, keeping its chats (one at a time in the editor, or many at once in the admin panel)
 
 ### 🤖 AI Chat & Roleplay
 - **Real-Time Streaming** — AI responses stream character-by-character via Server-Sent Events (SSE) for instant feedback
 - **Context-Aware Responses** — The server builds each prompt from the world setting, characters, lore, memories and as much recent conversation as fits a token budget, so long chats keep working
 - **Smart Lore Activation** — Triggered lore is included when a trigger word appears as a whole word in the last few messages (5 at a time by default, highest priority first)
 - **Rolling Memories** — Every few user messages the AI writes a memory card summarising everything since the previous one; all memories are sent with every reply and pinned ones are never trimmed
+- **Memory Panel** — See where each memory was made, edit, pin (up to 10 "key facts") or write your own, and see what the AI was given for each reply
 - **Response Length Control** — Choose short, medium, or long AI responses
 - **Stop & Retry** — Stop a reply while it is being written (the text so far is kept), and retry a reply that failed
 - **Regenerate & Continue** — Regenerate the last reply and flip between versions; Continue extends a reply, picking up exactly where it stopped
 - **Message Editing** — Edit, delete, or rewind messages
 - **Reading Layout** — Centred reading column that fits any screen; the view follows new text while you are at the bottom and leaves you in place when you scroll up
+- **Scene Bar** — Shows the place, day and time from the scene line the AI writes, with a divider when the place changes
 
 ### 🧩 Characters & Personas
 - **Multi-Character Casts** — Scenarios can have any number of NPCs with names, descriptions, and personality profiles
@@ -39,6 +44,8 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Priority** — Higher-priority pieces win when more pieces qualify than the caps allow
 - **Hidden from Players** — The AI uses the piece but other players cannot read it (also enforced by the scenario's *Hide Prompts* switch)
 - **Linked Pieces** — Pieces linked to another are sent right after it (a draft piece can exist just to be linked)
+- **Lore Overview** — Every reply lists the other lore by title and a one-line summary; pieces named in the scenario instructions are always sent
+- **Check & Fix Lore** — Finds lore that never reaches the AI, repairs imported quirks, and asks the AI for trigger words; admin bulk "Lore Health"
 
 ### 👤 User System
 - **JWT Authentication** — Secure token-based auth with 7-day session expiry; sessions survive server restarts
@@ -49,7 +56,8 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 
 ### 🛠️ Admin Panel
 - **DeepSeek API Key Configuration** — Set or replace the AI provider key; the stored key is never sent back to the browser (only a masked form)
-- **Model & Thinking Mode** — Pick the DeepSeek model and whether it reasons before replying
+- **Model & Thinking Mode** — Pick the DeepSeek model for chats, a cheaper background model for memories and generation, and whether it reasons before replying
+- **Stop Sequences** — Stop a reply when the AI starts writing as the player, plus custom stops
 - **LLM Parameters** — Configure temperature, max tokens, frequency/presence penalties
 - **Response Token Limits** — Set short/medium/long response token caps
 - **Memory Management** — Configure how often memories are written, their length, and how many are kept
@@ -57,6 +65,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Site Branding** — Custom site name displayed throughout the app
 - **Rate Limit & Sign-ups** — Set the general API rate limit and turn new registrations on or off
 - **User Management** — View, create, edit, and delete users with role assignment (the last admin cannot be demoted)
+- **Backup & Restore** — One file with the database and every picture: make, download, upload and restore backups (a backup of the current state is made before each restore). Nightly backups keep the last 7 by default. Restoring a backup on a new server is how an installation moves.
 
 ### 🔒 Security
 - **Server-Side API Key** — DeepSeek API key is stored server-side and never sent to the browser
@@ -136,7 +145,13 @@ LLM_RATE_LIMIT=120                 # AI requests per user per window (admins exe
 LLM_RATE_WINDOW_MIN=15             # Length of that window in minutes
 DB_PATH=./database.sqlite          # Database file location
 UPLOADS_DIR=./uploads              # Uploaded images folder
+BACKUP_DIR=./backups               # Backups made in the admin panel (default: "backups" next to the database)
+MAX_BACKUP_UPLOAD=21474836480      # Largest backup file that can be uploaded, in bytes (default 20 GB)
+REQUEST_TIMEOUT_MS=3600000         # Longest a request may take, e.g. uploading a large backup (default 1 hour)
+FORCE_HTTPS=false                  # Set to true only when the site is served over HTTPS (tells browsers to use HTTPS only)
 ```
+
+The site works over plain HTTP on a home network by default. Turn on `FORCE_HTTPS` only once it is reached through HTTPS; on plain HTTP it would make browsers fail to load the page.
 
 ---
 
@@ -192,6 +207,9 @@ AI-Roleplay/
 ├── lib/
 │   ├── deepseek.js           # Server-side AI request validation and streaming relay
 │   ├── prompt.js             # Prompt builder: history budget, lore selection, memories
+│   ├── fictionlab.js         # Fictionlab export parser (all export shapes)
+│   ├── fictionlabReimport.js # Match export files to scenarios; merge in place
+│   ├── loreDoctor.js         # Lore health checks and safe fixes
 │   ├── imageType.js          # Detects image type from file bytes
 │   ├── safeImageFetch.js     # SSRF-safe remote image download (import flow)
 │   └── sanitizeHtml.js       # Server-side rich text sanitizing
@@ -201,7 +219,14 @@ AI-Roleplay/
 ├── uploads/                  # Uploaded images (created at startup, not in git)
 ├── src/
 │   ├── components/
+│   │   ├── AIEnhanceButton.tsx   # AI Enhance for editor fields (word diff, undo)
 │   │   ├── AIGeneratorModal.tsx  # AI scenario generation dialog
+│   │   ├── LoreFixModal.tsx      # Check & Fix lore dialog
+│   │   ├── LoreHealth.tsx        # Admin lore health
+│   │   ├── FictionlabReimport.tsx # Admin bulk re-import
+│   │   ├── LoreSuggestModal.tsx  # AI lore card suggestions for the editor
+│   │   ├── Traits.tsx            # Trait chips and editor input
+│   │   ├── MemoryPanel.tsx       # Chat memories: key facts, chapters, edit/pin/write
 │   │   ├── Navbar.tsx            # Responsive bottom/top navigation
 │   │   ├── PersonaManager.tsx    # User persona CRUD
 │   │   ├── RichtextEditor.tsx    # Tiptap editor for scenario introductions
@@ -224,7 +249,10 @@ AI-Roleplay/
 │   │   └── index.ts             # TypeScript interfaces
 │   ├── utils/
 │   │   ├── cn.ts                # Tailwind classname utility
+│   │   ├── diff.ts              # Word diff for AI Enhance
 │   │   ├── image.ts             # Image handling (camera/file, resize, import download)
+│   │   ├── memories.ts          # Memory chapters, covered messages, progress
+│   │   ├── scene.ts             # Reads the AI's scene line (place, day, time)
 │   │   ├── notifications.tsx    # Toast & confirm dialog system
 │   │   └── sanitize.ts          # Browser-side rich text sanitizing
 │   ├── vite-env.d.ts            # Build-time constants (app version)
@@ -262,6 +290,8 @@ AI-Roleplay/
 | GET | `/api/scenarios` | Auth | List accessible scenarios (`?page`, `?limit`, `?tab=explore\|mine-public\|mine-private`, `?q=` search) |
 | GET | `/api/scenarios/:id` | Auth | Get scenario with characters + lore |
 | POST | `/api/scenarios` | Auth | Create/update scenario |
+| POST | `/api/import/fictionlab` | Auth | Turn a Fictionlab export into a scenario draft (nothing saved) |
+| POST | `/api/scenarios/:id/reimport` | Owner | Update a scenario from its Fictionlab file in place (`apply: false` = preview) |
 | DELETE | `/api/scenarios/:id` | Auth | Delete own scenario (or admin) |
 
 ### Chats
@@ -280,7 +310,7 @@ AI-Roleplay/
 |--------|------|--------|-------------|
 | GET | `/api/system/settings` | Admin | Get all system settings (API key masked) |
 | POST | `/api/system/settings` | Admin | Update system settings |
-| GET | `/api/system/llm-settings` | Auth | Get LLM configuration |
+| GET | `/api/system/llm-settings` | Auth | Site name and memory limits for the browser |
 | GET | `/api/deepseek/models` | Admin | List models available to the configured key |
 
 ### User Settings
@@ -296,11 +326,19 @@ AI-Roleplay/
 | POST | `/api/admin/users` | Admin | Create user |
 | PUT | `/api/admin/users/:id` | Admin | Update user |
 | DELETE | `/api/admin/users/:id` | Admin | Delete user |
+| POST | `/api/admin/fictionlab/match` | Admin | Bulk re-import dry run: match files to scenarios |
+| POST | `/api/admin/fictionlab/apply` | Admin | Bulk re-import selected files (backs up the database first) |
+| GET | `/api/admin/lore-health` | Admin | Lore health of every scenario (dry run) |
+| POST | `/api/admin/lore-health/apply` | Admin | Apply the safe lore fixes everywhere (backs up first) |
 
 ### AI Generation
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
 | POST | `/api/deepseek/generate` | Auth | AI scenario generation from a description |
+| POST | `/api/deepseek/lore-suggest` | Auth | Lore card suggestions for a scenario draft |
+| POST | `/api/deepseek/enhance` | Auth | AI Enhance: fixed text for one editor field (`mode`: fix, vivid, condense) |
+| POST | `/api/lore/check` | Auth | Lore health of a draft and the safely fixed lore |
+| POST | `/api/deepseek/lore-fix` | Auth | AI trigger words, links and summaries for never-sent cards (15 per call) |
 
 Chat replies and memories use the chat endpoints above; the server builds every prompt.
 

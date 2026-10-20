@@ -12,6 +12,68 @@
  */
 
 import axios from 'axios';
+import { Scenario } from '../types';
+
+/** What a re-import changes (see lib/fictionlabReimport.js summarizeReimport) */
+/** A backup file kept on the server (error set when it cannot be restored) */
+export interface BackupInfo {
+  name: string;
+  size: number;
+  createdAt: string;
+  version?: string;
+  label?: string;
+  pictures?: number | null;
+  counts?: { users: number; scenarios: number; chats: number } | null;
+  error?: string;
+}
+
+/** Nightly backup: hour is server time; last is when it last ran (ms, 0 = never) */
+export interface BackupSchedule {
+  enabled: boolean;
+  hour: number;
+  keep: number;
+  last: number;
+  error?: string;
+}
+
+export interface ReimportSummary {
+  fields: string[];
+  /** The file is missing its lore text (hidden by its creator); it will not be applied */
+  hollow?: boolean;
+  /** The file has no lore cards (made before Fictionlab had lore): the scenario keeps its lore */
+  keepsLore?: boolean;
+  lore: {
+    before: number; after: number; added: string[]; removed: string[];
+    neverSentBefore: number; neverSentAfter: number; workingLinksBefore: number; workingLinksAfter: number;
+  };
+  characters: { before: number; after: number };
+}
+
+/** One file in the admin's bulk re-import dry run */
+export interface ReimportRow {
+  fileName: string;
+  title?: string;
+  status: 'source' | 'name' | 'ambiguous' | 'none' | 'not a scenario';
+  candidates?: Array<{ id: string; name: string }>;
+  summary?: ReimportSummary;
+}
+
+/** What the server makes of a Fictionlab export (see lib/fictionlab.js) */
+export interface FictionlabImport {
+  draft: Omit<Scenario, 'id' | 'createdAt' | 'image'> & { sourceId?: string };
+  report: {
+    pieces: number;
+    rescaledWeights: boolean;
+    mergedRules: string[];
+    noTriggers: string[];
+    subPieces: string[];
+    storyCards: number;
+    charReplaced: number;
+    droppedLinks: number;
+  };
+  /** Remote images to download: cover, avatars by character/lore id, introduction images */
+  imageUrls: { cover: string; characters: Record<string, string>; lore: Record<string, string>; introduction: string[] };
+}
 
 /**
  * Pre-configured Axios instance with base URL pointing to the server API.
@@ -278,6 +340,102 @@ export const apiService = {
    */
   saveScenario: async (scenario: any) => {
     const response = await api.post('/scenarios', scenario);
+    return response.data;
+  },
+
+  /**
+   * Turns a Fictionlab export (the parsed file) into a scenario draft on the
+   * server. Nothing is saved. Throws with the server's message if the file is
+   * not a scenario.
+   */
+  parseFictionlab: async (file: unknown): Promise<FictionlabImport> => {
+    try {
+      const response = await api.post('/import/fictionlab', { file });
+      return response.data;
+    } catch (e: any) {
+      throw new Error(e?.response?.data?.error || 'Could not read this file');
+    }
+  },
+
+  /**
+   * Updates an existing scenario from a Fictionlab export, keeping its id,
+   * chats, name, settings and pictures. Without apply, returns only what
+   * would change.
+   */
+  reimportScenario: async (scenarioId: string, file: unknown, apply: boolean): Promise<{ summary: ReimportSummary }> => {
+    try {
+      const response = await api.post(`/scenarios/${scenarioId}/reimport`, { file, apply });
+      return response.data;
+    } catch (e: any) {
+      throw new Error(e?.response?.data?.error || 'Could not update from this file');
+    }
+  },
+
+  /** Admin: lore health of every scenario (dry run) */
+  getLoreHealth: async (): Promise<{ totals: Record<string, number>; rows: Array<{ id: string; name: string; counts: Record<string, number>; safeChanges: string[] }> }> => {
+    const response = await api.get('/admin/lore-health');
+    return response.data;
+  },
+
+  /** Admin: applies the safe lore fixes to every scenario (backs up first) */
+  applyLoreHealth: async (): Promise<{ backup: string; changed: number; failed: Array<{ id: string; name: string; error: string }> }> => {
+    const response = await api.post('/admin/lore-health/apply');
+    return response.data;
+  },
+
+  /** Admin: backups kept on the server, newest first */
+  listBackups: async (): Promise<{ backups: BackupInfo[]; folder: string; schedule: BackupSchedule }> => {
+    const response = await api.get('/admin/backups');
+    return response.data;
+  },
+
+  /** Admin: nightly backup settings */
+  saveBackupSchedule: async (schedule: Partial<Pick<BackupSchedule, 'enabled' | 'hour' | 'keep'>>): Promise<void> => {
+    await api.post('/admin/backups/schedule', schedule);
+  },
+
+  /** Admin: makes a backup of the database and every picture */
+  createBackup: async (): Promise<BackupInfo> => {
+    const response = await api.post('/admin/backups', undefined, { timeout: 0 });
+    return response.data;
+  },
+
+  /** Admin: deletes a backup */
+  deleteBackup: async (name: string): Promise<void> => {
+    await api.delete(`/admin/backups/${encodeURIComponent(name)}`);
+  },
+
+  /** Admin: a one-time link that downloads a backup */
+  backupDownloadUrl: async (name: string): Promise<string> => {
+    const response = await api.post(`/admin/backups/${encodeURIComponent(name)}/link`);
+    return response.data.url;
+  },
+
+  /** Admin: replaces everything with a backup (a safety backup is made first) */
+  restoreBackup: async (name: string): Promise<{ safetyBackup: string; counts: { users: number; scenarios: number; chats: number } }> => {
+    const response = await api.post(`/admin/backups/${encodeURIComponent(name)}/restore`, undefined, { timeout: 0 });
+    return response.data;
+  },
+
+  /** Admin: uploads a backup file (checked, not restored); onProgress gets 0-1 */
+  uploadBackup: async (file: File, onProgress: (share: number) => void): Promise<BackupInfo> => {
+    const response = await api.post('/admin/backups/upload', file, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+      timeout: 0,
+      onUploadProgress: e => onProgress(e.total ? e.loaded / e.total : 0),
+    });
+    return response.data;
+  },
+
+  /** Admin: matches export files to scenarios (dry run) */
+  matchFictionlabFiles: async (files: Array<{ name: string; file: unknown }>): Promise<{ rows: ReimportRow[] }> => {
+    const response = await api.post('/admin/fictionlab/match', { files });
+    return response.data;
+  },
+
+  /** Admin: re-imports files into the chosen scenarios (send backup: true with the first batch) */
+  applyFictionlabFiles: async (items: Array<{ scenarioId: string; file: unknown }>, backup: boolean): Promise<{ backup?: string; results: Array<{ scenarioId: string; ok: boolean; error?: string; summary?: ReimportSummary }> }> => {
+    const response = await api.post('/admin/fictionlab/apply', { items, backup });
     return response.data;
   },
 

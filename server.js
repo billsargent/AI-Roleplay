@@ -63,12 +63,24 @@ import {
   getScenarioLabels,
   purgeExpiredScenarioTrash,
   purgeExpiredChatTrash,
+  countPinnedMemories,
+  listScenarioMatchKeys,
+  backupDatabase,
+  databasePath,
+  snapshotDatabase,
+  closeDb,
+  systemCounts,
 } from './database/index.js';
+import { matchScenario, summarizeReimport, mergeReimport } from './lib/fictionlabReimport.js';
+import { checkLore, applySafeFixes } from './lib/loreDoctor.js';
 
-import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
+import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath, uploadsRoot } from './database/images.js';
+import { createBackup, inspectBackup, restoreBackup, backupFileName, isBackupName, readSchedule, autoBackupDue, backupsToPrune, AUTO_LABEL } from './lib/backup.js';
+import { pipeline } from 'stream/promises';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
+import { parseFictionlab } from './lib/fictionlab.js';
 import { validateCompletionRequest, relayCompletion, completeOnce, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
-import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
+import { readLlmSettings, buildChatPrompt, buildMemoryPrompt, buildScenarioGenerationPrompt, buildLoreSuggestPrompt, parseLoreSuggestions, buildEnhancePrompt, cleanEnhanced, ENHANCE_FIELDS, MAX_ENHANCE_CHARS, buildLoreFixPrompt, parseLoreFixes, LORE_FIX_BATCH, memoryDue, messagesSinceLastMemory } from './lib/prompt.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -76,6 +88,8 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+/** FORCE_HTTPS=true once the site is served over HTTPS: browsers are then told to use HTTPS only */
+const FORCE_HTTPS = /^(1|true|yes)$/i.test(process.env.FORCE_HTTPS || '');
 /** Body limit for scenario saves/imports, which can embed many base64 images */
 const MAX_JSON_BODY_SIZE = process.env.MAX_JSON_BODY_SIZE || '250mb';
 /** Body limit for chats, personas (avatar) and AI requests */
@@ -95,12 +109,29 @@ const JWT_SECRET = process.env.JWT_SECRET || (() => {
   return secret;
 })();
 
+// Thinking is off unless an admin chooses otherwise: with it on, the reasoning
+// shares the reply's token budget and short replies can come back cut off or empty
+if (!getDb().prepare(`SELECT 1 FROM system_settings WHERE key = 'deepseekThinking'`).get()) {
+  setSystemSetting('deepseekThinking', 'off');
+}
+
 // Behind a reverse proxy, set TRUST_PROXY (e.g. "1" or "loopback") so rate
 // limits see each client's address instead of the proxy's
 if (process.env.TRUST_PROXY) {
   const v = process.env.TRUST_PROXY;
   app.set('trust proxy', /^\d+$/.test(v) ? Number(v) : v === 'true' ? true : v);
 }
+
+// While a backup is being restored the database and pictures are swapped:
+// everything else waits with a 503 (the restore request itself is already running)
+let restoring = false;
+app.use((req, res, next) => {
+  if (restoring && req.path.startsWith('/api/')) {
+    res.setHeader('Retry-After', '10');
+    return res.status(503).json({ error: 'A backup is being restored. Try again in a moment.' });
+  }
+  next();
+});
 
 // ─── Image Serving Endpoint (BEFORE rate limiter for performance) ─────
 
@@ -195,8 +226,13 @@ app.use(helmet({
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
       formAction: ["'self'"],
+      // Only when the site is served over HTTPS: on plain HTTP (a home network
+      // address) this would make the browser fetch every file over https and fail
+      upgradeInsecureRequests: FORCE_HTTPS ? [] : null,
     },
   },
+  // Same reason: HSTS tells browsers to use HTTPS only, so send it only with HTTPS
+  strictTransportSecurity: FORCE_HTTPS,
   crossOriginEmbedderPolicy: false,
 }));
 
@@ -217,6 +253,11 @@ const largeBody = express.json({ limit: MAX_JSON_BODY_SIZE });
 const mediumBody = express.json({ limit: MEDIUM_JSON_BODY_SIZE });
 const ROUTE_PARSED_BODIES = new Set([
   'POST /api/scenarios',
+  'POST /api/import/fictionlab',
+  'POST /api/admin/fictionlab/match',
+  'POST /api/admin/fictionlab/apply',
+  'POST /api/lore/check',
+  'POST /api/deepseek/lore-fix',
   'POST /api/chats',
   'POST /api/personas',
 ]);
@@ -225,6 +266,7 @@ app.use((req, res, next) => {
   // Express 5 leaves req.body undefined without a JSON body; routes destructure it
   if (req.body === undefined) req.body = {};
   if (ROUTE_PARSED_BODIES.has(`${req.method} ${req.path}`)) return next();
+  if (req.method === 'POST' && /^\/api\/scenarios\/[^/]+\/reimport$/.test(req.path)) return next();
   defaultBody(req, res, next);
 });
 
@@ -587,7 +629,11 @@ app.get('/api/scenarios/:id', auth, (req, res) => {
  */
 function scenarioForViewer(scenario) {
   if (scenario.settings?.allowCustomization) return scenario;
-  const visible = { ...scenario, lorePieces: (scenario.lorePieces || []).filter(p => !p.hidden) };
+  const visible = {
+    ...scenario,
+    lorePieces: (scenario.lorePieces || []).filter(p => !p.hidden),
+    characters: (scenario.characters || []).filter(c => !c.hidden),
+  };
   if (scenario.settings?.hidePrompts) {
     visible.backstory = '';
     visible.customInstructions = '';
@@ -596,6 +642,125 @@ function scenarioForViewer(scenario) {
   }
   return visible;
 }
+
+/**
+ * POST /api/import/fictionlab — Turns a Fictionlab export into a scenario draft.
+ * Body: { file: <the parsed export file> }. Nothing is saved; the editor shows
+ * the draft, downloads the listed images and saves as usual.
+ * Returns { draft, report, imageUrls } (see lib/fictionlab.js).
+ */
+app.post('/api/import/fictionlab', auth, mediumBody, (req, res) => {
+  const file = req.body?.file;
+  const result = parseFictionlab(file);
+  if (!result) {
+    const chatExport = file && typeof file === 'object' && Array.isArray(file.messages) && file.scenario && !file.scenario.lorePieces;
+    return res.status(400).json({
+      error: chatExport
+        ? 'This file is a chat export, not a scenario. Export the scenario itself from Fictionlab.'
+        : 'This file does not look like a Fictionlab scenario export.',
+    });
+  }
+  res.json(result);
+});
+
+/** Downloads a remote image (SSRF-safe) as a data URL, for re-imports */
+async function fetchDataUrl(url) {
+  const { contentType, buffer } = await fetchImage(url);
+  return `data:${contentType};base64,${buffer.toString('base64')}`;
+}
+
+/** Re-imports one parsed file into one scenario; returns the change summary */
+async function reimportScenario(existing, parsed) {
+  const summary = summarizeReimport(existing, parsed.draft);
+  // A hollow export (lore text hidden by its creator) would erase the scenario's lore
+  if (summary.hollow) {
+    throw new DataError('This export is missing its lore text (the creator probably hid it on Fictionlab). Re-importing it would erase the lore this scenario has, so it was not applied.', 422);
+  }
+  const merged = await mergeReimport(existing, parsed, { fetchDataUrl });
+  saveScenarioTransaction(merged);
+  return summary;
+}
+
+/**
+ * POST /api/scenarios/:id/reimport — Updates a scenario from a Fictionlab
+ * export, keeping its id (and its chats), name, settings and pictures.
+ * Body: { file, apply?: boolean }. Without apply, only the summary of what
+ * would change is returned.
+ */
+app.post('/api/scenarios/:id/reimport', auth, largeBody, async (req, res, next) => {
+  try {
+    const existing = getScenarioById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Scenario not found' });
+    const user = getUserById(req.userId);
+    if (existing.userId !== req.userId && user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Only the creator can update this scenario' });
+    }
+    const parsed = parseFictionlab(req.body?.file);
+    if (!parsed) return res.status(400).json({ error: 'This file does not look like a Fictionlab scenario export.' });
+    if (!req.body?.apply) return res.json({ summary: summarizeReimport(existing, parsed.draft), fileName: parsed.draft.name });
+    const summary = await reimportScenario(existing, parsed);
+    res.json({ summary, applied: true });
+  } catch (err) {
+    if (err instanceof DataError) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+/**
+ * POST /api/admin/fictionlab/match — Dry run of a bulk re-import.
+ * Body: { files: [{ name, file }] }. Returns one row per file: which
+ * scenario it matches (by Fictionlab id, else by name) and what would change.
+ */
+app.post('/api/admin/fictionlab/match', adminAuth, largeBody, (req, res) => {
+  const files = Array.isArray(req.body?.files) ? req.body.files : [];
+  if (files.length === 0 || files.length > 500) return res.status(400).json({ error: 'Send between 1 and 500 files' });
+  const scenarios = listScenarioMatchKeys();
+  const rows = files.map(({ name, file }) => {
+    const fileName = typeof name === 'string' ? name.slice(0, 200) : '';
+    const parsed = parseFictionlab(file);
+    if (!parsed) return { fileName, status: 'not a scenario' };
+    const { match, scenarioIds } = matchScenario(parsed.draft, scenarios);
+    const row = { fileName, title: parsed.draft.name, status: match, candidates: scenarioIds.map(id => ({ id, name: scenarios.find(s => s.id === id)?.name })) };
+    if (scenarioIds.length === 1) {
+      const existing = getScenarioById(scenarioIds[0]);
+      if (existing) row.summary = summarizeReimport(existing, parsed.draft);
+    }
+    return row;
+  });
+  res.json({ rows });
+});
+
+/**
+ * POST /api/admin/fictionlab/apply — Re-imports files into the scenarios
+ * the admin picked. Body: { items: [{ scenarioId, file }], backup?: boolean }.
+ * Send backup: true with the first batch: the database is copied first.
+ * Returns { backup?, results: [{ scenarioId, ok, error?, summary? }] }.
+ */
+app.post('/api/admin/fictionlab/apply', adminAuth, largeBody, async (req, res, next) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (items.length === 0 || items.length > 50) return res.status(400).json({ error: 'Send between 1 and 50 items per request' });
+  try {
+    const backup = req.body?.backup ? path.basename(await backupDatabase()) : undefined;
+    const results = [];
+    for (const { scenarioId, file } of items) {
+      const existing = typeof scenarioId === 'string' ? getScenarioById(scenarioId) : null;
+      const parsed = parseFictionlab(file);
+      if (!existing || !parsed) {
+        results.push({ scenarioId, ok: false, error: !existing ? 'Scenario not found' : 'Not a scenario file' });
+        continue;
+      }
+      try {
+        results.push({ scenarioId, ok: true, summary: await reimportScenario(existing, parsed) });
+      } catch (err) {
+        results.push({ scenarioId, ok: false, error: err instanceof DataError ? err.message : 'Could not save' });
+        if (!(err instanceof DataError)) console.error('Re-import failed:', err?.message || err);
+      }
+    }
+    res.json({ backup, results });
+  } catch (err) {
+    next(err);
+  }
+});
 
 /**
  * POST /api/scenarios
@@ -729,6 +894,15 @@ app.post('/api/chats', auth, mediumBody, (req, res) => {
       // New chat
       chat.userId = req.userId;
       chat.createdAt = chat.createdAt || Date.now();
+    }
+
+    // Pinned memories ("key facts") are capped; a chat already over the cap can still be saved, just not pin more
+    if (Array.isArray(chat.memories)) {
+      const pinned = chat.memories.filter(m => m && m.pinned).length;
+      const max = readLlmSettings(getSystemSetting).memoryPinnedMax;
+      if (pinned > max && pinned > (existing ? countPinnedMemories(chat.id) : 0)) {
+        return res.status(409).json({ error: `You can pin at most ${max} memories in a chat. Unpin one first.` });
+      }
     }
 
     saveChatTransaction(chat);
@@ -953,7 +1127,13 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
   const loreScanDepth = getSystemSetting('loreScanDepth');
   const loreActiveMax = getSystemSetting('loreActiveMax');
   const lorePinnedMax = getSystemSetting('lorePinnedMax');
-  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax });
+  const memoryPinnedMax = getSystemSetting('memoryPinnedMax');
+  const loreOverview = getSystemSetting('loreOverview') !== 'false';
+  const utilityModel = getSystemSetting('utilityModel');
+  const utilityTemperature = getSystemSetting('utilityTemperature');
+  const stopOnPlayerLines = getSystemSetting('stopOnPlayerLines') !== 'false';
+  const stopSequences = getSystemSetting('stopSequences');
+  res.json({ deepseekKey, deepseekKeySet, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking, contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax, memoryPinnedMax, loreOverview, utilityModel, utilityTemperature, stopOnPlayerLines, stopSequences });
 
 
 
@@ -963,7 +1143,7 @@ app.get('/api/system/settings', adminAuth, (req, res) => {
 app.post('/api/system/settings', adminAuth, (req, res) => {
   const { deepseekKey, globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel, debugLlmPrompt, registrationOpen, rateLimitMax, deepseekThinking } = req.body;
   // Engine limits: whole numbers within sensible ranges
-  for (const [key, min, max] of [['contextTokenBudget', 4000, 1000000], ['loreScanDepth', 1, 200], ['loreActiveMax', 0, 50], ['lorePinnedMax', 0, 100]]) {
+  for (const [key, min, max] of [['contextTokenBudget', 4000, 1000000], ['loreScanDepth', 1, 200], ['loreActiveMax', 0, 50], ['lorePinnedMax', 0, 100], ['memoryPinnedMax', 0, 100]]) {
     if (req.body[key] === undefined) continue;
     const n = Math.round(Number(req.body[key]));
     if (Number.isFinite(n) && n >= min && n <= max) setSystemSetting(key, String(n));
@@ -992,6 +1172,21 @@ app.post('/api/system/settings', adminAuth, (req, res) => {
   if (rateLimitMax !== undefined) {
     const n = Math.round(Number(rateLimitMax));
     if (Number.isFinite(n) && n >= 10 && n <= 100000) setSystemSetting('rateLimitMax', String(n));
+  }
+  // Background jobs may use another model ('' = the chat model)
+  if (typeof req.body.utilityModel === 'string' && req.body.utilityModel.length <= 100) {
+    setSystemSetting('utilityModel', req.body.utilityModel.trim());
+  }
+  if (req.body.utilityTemperature !== undefined) {
+    const t = Number(req.body.utilityTemperature);
+    if (Number.isFinite(t) && t >= 0 && t <= 2) setSystemSetting('utilityTemperature', String(t));
+  }
+  if (req.body.stopOnPlayerLines !== undefined) setSystemSetting('stopOnPlayerLines', req.body.stopOnPlayerLines ? 'true' : 'false');
+  if (req.body.loreOverview !== undefined) setSystemSetting('loreOverview', req.body.loreOverview ? 'true' : 'false');
+  if (typeof req.body.stopSequences === 'string') {
+    // One per line, at most 16, each up to 100 characters
+    const lines = req.body.stopSequences.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim()).slice(0, 16).map(l => l.slice(0, 100));
+    setSystemSetting('stopSequences', lines.join('\n'));
   }
 
   res.json({ success: true });
@@ -1103,7 +1298,29 @@ const llmLimiter = rateLimit({
  * The model, thinking mode and token cap come from admin settings
  * (lib/deepseek.js); the browser never supplies prompt text.
  */
-async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, label, stream = false, beta = false }) {
+/** Model for background jobs (memories, generator): the utility model, else the chat model */
+function utilityModel() {
+  return getSystemSetting('utilityModel') || getSystemSetting('deepseekModel') || DEFAULT_MODEL;
+}
+
+/**
+ * Background AI tools (generator, memories, lore suggestions and fixes, Enhance)
+ * run without thinking: they fill in structured answers, and with thinking on the
+ * reasoning can use the whole token budget before any answer is written.
+ */
+const UTILITY_THINKING = 'off';
+
+/** The AI's JSON answer, or an error when it was cut off or is not JSON (instead of silently "no results") */
+function readableJson(text) {
+  try {
+    JSON.parse(String(text).replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, ''));
+    return text;
+  } catch {
+    throw new LlmRequestError("The AI's answer was cut off or unreadable. Try again.", 502);
+  }
+}
+
+async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, stop, label, stream = false, beta = false, model, json = false, utility = false }) {
   const deepseekKey = getSystemSetting('deepseekKey');
   if (!deepseekKey) {
     return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
@@ -1111,12 +1328,14 @@ async function runCompletion(req, res, { messages, maxTokens, temperature, frequ
   let params;
   try {
     params = validateCompletionRequest(
-      { messages, max_tokens: maxTokens, temperature, frequency_penalty: frequencyPenalty, presence_penalty: presencePenalty },
+      { messages, max_tokens: maxTokens, temperature, frequency_penalty: frequencyPenalty, presence_penalty: presencePenalty, stop },
       {
-        model: getSystemSetting('deepseekModel') || DEFAULT_MODEL,
-        // Admin "Max Tokens Cap"
-        maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
-        thinking: getSystemSetting('deepseekThinking') || '',
+        model: model || getSystemSetting('deepseekModel') || DEFAULT_MODEL,
+        // Admin "Max Tokens Cap" is the length of a chat reply; tools that write
+        // JSON or whole fields size their own answer and must not be cut off by it
+        maxTokensCap: utility ? undefined : Number(getSystemSetting('maxTokens')) || undefined,
+        thinking: utility ? UTILITY_THINKING : getSystemSetting('deepseekThinking') || '',
+        json,
       }
     );
   } catch (err) {
@@ -1187,11 +1406,23 @@ app.post('/api/chats/:id/reply', auth, llmLimiter, async (req, res) => {
   const llm = readLlmSettings(getSystemSetting);
   // Prefix completion continues the text exactly; it needs thinking off
   const prefix = mode === 'continue' && getSystemSetting('deepseekThinking') === 'off';
-  const { messages, maxTokens } = buildChatPrompt({ messages: history, scenario, chat, llm, mode: promptMode, prefix });
+  const { messages, maxTokens, stop, loreIds, listedLoreIds, memoryIds, omitted } = buildChatPrompt({ messages: history, scenario, chat, llm, mode: promptMode, prefix });
   if (mode === 'continue') res.setHeader('X-Continue-Mode', prefix ? 'prefix' : 'instruct');
+  // What the reply was given, for the player's context view. Lore the
+  // player may not read (hidden pieces, hidden prompts) is only counted.
+  const readable = new Set((scenario.userId === req.userId ? scenario : scenarioForViewer(scenario)).lorePieces.map(p => p.id));
+  const used = loreIds.map(id => scenario.lorePieces.find(p => p.id === id)).filter(Boolean);
+  res.setHeader('X-Reply-Context', encodeURIComponent(JSON.stringify({
+    memoryIds,
+    lore: used.filter(p => readable.has(p.id)).map(p => p.title),
+    hiddenLore: used.filter(p => !readable.has(p.id)).length,
+    listed: listedLoreIds.length,
+    omitted,
+  })));
   await runCompletion(req, res, {
     messages, maxTokens,
     temperature: llm.temperature, frequencyPenalty: llm.frequencyPenalty, presencePenalty: llm.presencePenalty,
+    stop,
     label: `${req.body?.stream ? 'Chat Stream' : 'Chat'} (${mode})`,
     stream: !!req.body?.stream,
     beta: prefix,
@@ -1223,11 +1454,10 @@ app.post('/api/chats/:id/memory', auth, async (req, res, next) => {
     const deepseekKey = getSystemSetting('deepseekKey');
     if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
     try {
-      const { messages, maxTokens, temperature } = buildMemoryPrompt(source, llm.memoryWordCount);
-      const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature }, {
-        model: getSystemSetting('deepseekModel') || DEFAULT_MODEL,
-        maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
-        thinking: getSystemSetting('deepseekThinking') || '',
+      const { messages, maxTokens } = buildMemoryPrompt(source, llm.memoryWordCount);
+      const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature: llm.utilityTemperature }, {
+        model: utilityModel(),
+        thinking: UTILITY_THINKING,
       });
       debugLogLlmPrompt(req.userId, params, 'Memory');
       const content = (await completeOnce(params, { apiKey: deepseekKey })).trim();
@@ -1238,7 +1468,9 @@ app.post('/api/chats/:id/memory', auth, async (req, res, next) => {
           content,
           pinned: false,
           timestamp: Date.now(),
+          coveredFrom: Math.min(...source.map(m => Number(m.timestamp) || 0)),
           coveredUntil: Math.max(...source.map(m => Number(m.timestamp) || 0)),
+          source: req.body?.auto ? 'auto' : 'manual',
         },
       });
     } catch (err) {
@@ -1261,29 +1493,422 @@ app.post('/api/deepseek/generate', auth, llmLimiter, async (req, res) => {
     return res.status(413).json({ error: 'Description is too long (max 10,000 characters)' });
   }
   const { messages, maxTokens, temperature } = buildScenarioGenerationPrompt(description);
-  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate' });
+  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate', model: utilityModel(), json: true, utility: true });
 });
 
-/** GET /api/system/llm-settings — Returns LLM configuration (any authenticated user) */
+/**
+ * POST /api/deepseek/lore-suggest — Proposes lore cards for a scenario draft.
+ * Body: { draft: { name, description, backstory, introduction (plain text),
+ * customInstructions, characters: [{ name, description }], loreTitles },
+ * focus?: string }. Works on unsaved drafts; nothing is stored.
+ * Returns { suggestions: [{ title, type, content, triggers, mode }] }.
+ */
+app.post('/api/deepseek/lore-suggest', auth, llmLimiter, async (req, res, next) => {
+  const draft = req.body?.draft;
+  if (!draft || typeof draft !== 'object' || Array.isArray(draft)) {
+    return res.status(400).json({ error: 'Send the scenario draft' });
+  }
+  const text = (v) => (typeof v === 'string' ? v : '');
+  const clean = {
+    name: text(draft.name), description: text(draft.description), backstory: text(draft.backstory),
+    introduction: text(draft.introduction), customInstructions: text(draft.customInstructions),
+    characters: (Array.isArray(draft.characters) ? draft.characters : []).filter(c => c && typeof c === 'object').map(c => ({ name: text(c.name), description: text(c.description) })),
+    loreTitles: (Array.isArray(draft.loreTitles) ? draft.loreTitles : []).map(text).filter(Boolean),
+  };
+  if (!clean.backstory.trim() && !clean.description.trim() && !clean.introduction.trim()) {
+    return res.status(400).json({ error: 'Write a summary, backstory or introduction first, so there is a story to build lore from' });
+  }
+  const deepseekKey = getSystemSetting('deepseekKey');
+  if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+  try {
+    const { messages, maxTokens } = buildLoreSuggestPrompt(clean, text(req.body?.focus));
+    const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature: 0.7 }, {
+      model: utilityModel(),
+      thinking: UTILITY_THINKING,
+      json: true,
+    });
+    debugLogLlmPrompt(req.userId, params, 'Lore suggestions');
+    const suggestions = parseLoreSuggestions(readableJson(await completeOnce(params, { apiKey: deepseekKey })), clean.loreTitles);
+    if (suggestions.length === 0) return res.status(502).json({ error: 'The AI did not return any usable lore cards; try again' });
+    res.json({ suggestions });
+  } catch (err) {
+    if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+/**
+ * POST /api/deepseek/enhance — AI Enhance for one editor field.
+ * Body: { field, text, context?: { name, description }, mode?: 'fix' | 'vivid' }.
+ * "fix" corrects spelling, grammar and clarity only; "vivid" may also
+ * strengthen the wording. Returns { text } for the author to accept or not.
+ */
+app.post('/api/deepseek/enhance', auth, llmLimiter, async (req, res, next) => {
+  const { field, text, context, mode } = req.body || {};
+  if (!Object.hasOwn(ENHANCE_FIELDS, field)) return res.status(400).json({ error: 'This field cannot be enhanced' });
+  if (typeof text !== 'string' || !text.trim()) return res.status(400).json({ error: 'Write something first' });
+  if (text.length > MAX_ENHANCE_CHARS) return res.status(413).json({ error: `Text is too long to enhance (max ${MAX_ENHANCE_CHARS.toLocaleString('en')} characters)` });
+  const deepseekKey = getSystemSetting('deepseekKey');
+  if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+  try {
+    const safeContext = context && typeof context === 'object'
+      ? { name: typeof context.name === 'string' ? context.name : '', description: typeof context.description === 'string' ? context.description : '' }
+      : {};
+    const { messages, maxTokens, temperature } = buildEnhancePrompt(field, text, safeContext, ['vivid', 'condense'].includes(mode) ? mode : 'fix');
+    const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature }, {
+      model: utilityModel(),
+      thinking: UTILITY_THINKING,
+    });
+    debugLogLlmPrompt(req.userId, params, 'Enhance');
+    const result = cleanEnhanced(await completeOnce(params, { apiKey: deepseekKey }));
+    if (!result) return res.status(502).json({ error: 'The AI returned nothing; try again' });
+    res.json({ text: result });
+  } catch (err) {
+    if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+/** The lore fields the checks and AI fixes need (no images) */
+function loreDraft(draft) {
+  const text = (v) => (typeof v === 'string' ? v : '');
+  const d = draft && typeof draft === 'object' ? draft : {};
+  return {
+    name: text(d.name),
+    backstory: text(d.backstory),
+    customInstructions: text(d.customInstructions),
+    characters: (Array.isArray(d.characters) ? d.characters : []).filter(c => c && typeof c === 'object').map(c => ({ name: text(c.name) })),
+    lorePieces: (Array.isArray(d.lorePieces) ? d.lorePieces : []).filter(p => p && typeof p === 'object' && typeof p.id === 'string').slice(0, 1000).map(p => ({
+      id: p.id, type: text(p.type), title: text(p.title), content: text(p.content), description: text(p.description),
+      weight: Number.isFinite(Number(p.weight)) ? Number(p.weight) : 100, pinned: !!p.pinned, smartActivation: !!p.smartActivation, hidden: !!p.hidden,
+      triggers: (Array.isArray(p.triggers) ? p.triggers : []).filter(t => typeof t === 'string'),
+      linkedPieces: (Array.isArray(p.linkedPieces) ? p.linkedPieces : []).filter(t => typeof t === 'string'),
+    })),
+  };
+}
+
+/**
+ * POST /api/lore/check — Lore health of a scenario draft (saved or not).
+ * Body: { draft: { name, backstory, customInstructions, characters, lorePieces } }.
+ * Returns { issues, fixed: { lorePieces, customInstructions, changes } }: the
+ * problems found and the draft with the safe fixes applied (nothing saved).
+ */
+app.post('/api/lore/check', auth, mediumBody, (req, res) => {
+  const draft = loreDraft(req.body?.draft);
+  const llm = readLlmSettings(getSystemSetting);
+  res.json({ issues: checkLore(draft, llm), fixed: applySafeFixes(draft) });
+});
+
+/**
+ * POST /api/deepseek/lore-fix — AI suggestions for cards that are never sent.
+ * Body: { draft, ids: string[] } with at most 15 ids (LORE_FIX_BATCH) (the client sends batches).
+ * Returns { fixes: [{ id, triggers, mode, linkedPieces, description }] }.
+ */
+app.post('/api/deepseek/lore-fix', auth, mediumBody, llmLimiter, async (req, res, next) => {
+  const draft = loreDraft(req.body?.draft);
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(id => typeof id === 'string') : [];
+  const cards = draft.lorePieces.filter(p => ids.includes(p.id));
+  if (cards.length === 0) return res.status(400).json({ error: 'Choose the cards to fix' });
+  if (cards.length > LORE_FIX_BATCH) return res.status(400).json({ error: `At most ${LORE_FIX_BATCH} cards per request` });
+  const deepseekKey = getSystemSetting('deepseekKey');
+  if (!deepseekKey) return res.status(400).json({ error: 'DeepSeek API key is not configured.' });
+  try {
+    const { messages, maxTokens } = buildLoreFixPrompt(draft, cards);
+    const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature: 0.4 }, {
+      model: utilityModel(),
+      thinking: UTILITY_THINKING,
+      json: true,
+    });
+    debugLogLlmPrompt(req.userId, params, 'Lore fix');
+    res.json({ fixes: parseLoreFixes(readableJson(await completeOnce(params, { apiKey: deepseekKey })), cards, draft.lorePieces) });
+  } catch (err) {
+    if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
+/** Lore health of every live scenario: issues by kind and the safe fixes that would apply */
+function loreHealthReport() {
+  const llm = readLlmSettings(getSystemSetting);
+  return listScenarioMatchKeys().map(({ id }) => {
+    const scenario = getScenarioById(id);
+    if (!scenario) return null;
+    const issues = checkLore(scenario, llm);
+    const counts = {};
+    for (const i of issues) counts[i.kind] = (counts[i.kind] || 0) + 1;
+    return { id, name: scenario.name, counts, safeChanges: applySafeFixes(scenario).changes, scenario };
+  }).filter(Boolean);
+}
+
+/**
+ * GET /api/admin/lore-health — Dry run: lore issues of every scenario and
+ * the safe fixes that "apply" would make.
+ */
+app.get('/api/admin/lore-health', adminAuth, (req, res) => {
+  const rows = loreHealthReport().map(({ scenario, ...row }) => row);
+  const totals = {};
+  for (const r of rows) for (const [k, v] of Object.entries(r.counts)) totals[k] = (totals[k] || 0) + v;
+  res.json({ totals, rows });
+});
+
+/**
+ * POST /api/admin/lore-health/apply — Applies the safe lore fixes to every
+ * scenario that needs them, after a database backup.
+ * Returns { backup, changed, failed }.
+ */
+app.post('/api/admin/lore-health/apply', adminAuth, async (req, res, next) => {
+  try {
+    const backup = path.basename(await backupDatabase());
+    let changed = 0;
+    const failed = [];
+    for (const { scenario, safeChanges } of loreHealthReport()) {
+      if (safeChanges.length === 0) continue;
+      const { lorePieces, customInstructions } = applySafeFixes(scenario);
+      try {
+        saveScenarioTransaction({ ...scenario, lorePieces, customInstructions });
+        changed++;
+      } catch (err) {
+        failed.push({ id: scenario.id, name: scenario.name, error: err instanceof DataError ? err.message : 'Could not save' });
+      }
+    }
+    res.json({ backup, changed, failed });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Backup and restore (admin) ───────────────────────────────────────
+
+/** Where backups are kept: BACKUP_DIR, or a "backups" folder next to the database */
+const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(path.dirname(databasePath()), 'backups'));
+/** Largest backup file that can be uploaded (bytes; default 20 GB) */
+const MAX_BACKUP_UPLOAD = Number(process.env.MAX_BACKUP_UPLOAD) || 20 * 1024 ** 3;
+const APP_VERSION = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version; } catch { return ''; }
+})();
+/** One-time download links: token -> { name, expires } */
+const backupLinks = new Map();
+/** Only one backup or restore at a time */
+let backupBusy = false;
+
+const backupFile = (name) => path.join(BACKUP_DIR, name);
+
+/** Runs a backup or restore job, one at a time */
+async function exclusiveBackupJob(res, job) {
+  if (backupBusy) return res.status(409).json({ error: 'A backup or restore is already running' });
+  backupBusy = true;
+  try {
+    return await job();
+  } finally {
+    backupBusy = false;
+  }
+}
+
+/** Describes a backup file for the list (manifest, or the error that makes it unusable) */
+async function describeBackup(name) {
+  const stat = fs.statSync(backupFile(name));
+  try {
+    const { manifest } = await inspectBackup(backupFile(name), isValidImagePath);
+    // The label in the file name says how this copy got here (an uploaded copy keeps the original manifest)
+    const label = /Z-([a-z-]+)\.tar$/.exec(name)?.[1] || manifest.label || '';
+    return { name, size: stat.size, createdAt: manifest.createdAt, version: manifest.version || '', counts: manifest.counts || null, pictures: manifest.pictures ?? null, label };
+  } catch (err) {
+    return { name, size: stat.size, createdAt: new Date(stat.mtimeMs).toISOString(), error: err.message };
+  }
+}
+
+/** Makes a backup now; label goes into the file name and manifest */
+async function makeBackup(label = '') {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const name = backupFileName(label);
+  await createBackup({
+    outFile: backupFile(name),
+    snapshotDb: snapshotDatabase,
+    uploadsDir: uploadsRoot(),
+    isUpload: isValidImagePath,
+    info: { version: APP_VERSION, label, counts: systemCounts() },
+  });
+  return name;
+}
+
+/**
+ * Nightly backup: checked every 10 minutes, runs once a day at the chosen hour
+ * (server time), then deletes automatic backups beyond the number to keep.
+ * A failure is recorded and shown in the admin panel; it is tried again the next day.
+ */
+async function runScheduledBackup() {
+  const schedule = readSchedule(getSystemSetting);
+  if (!autoBackupDue(schedule) || backupBusy || restoring) return;
+  backupBusy = true;
+  setSystemSetting('autoBackupLast', String(Date.now()));
+  try {
+    const name = await makeBackup(AUTO_LABEL);
+    for (const old of backupsToPrune(fs.readdirSync(BACKUP_DIR), schedule.keep)) fs.rmSync(backupFile(old), { force: true });
+    setSystemSetting('autoBackupError', '');
+    console.log(`[BACKUP] Nightly backup ${name}`);
+  } catch (err) {
+    setSystemSetting('autoBackupError', String(err?.message || err).slice(0, 300));
+    console.error('[BACKUP] Nightly backup failed:', err?.message || err);
+  } finally {
+    backupBusy = false;
+  }
+}
+setInterval(() => { void runScheduledBackup(); }, 10 * 60 * 1000).unref();
+// Also shortly after start, so a server that was off at the hour catches up
+setTimeout(() => { void runScheduledBackup(); }, 2 * 60 * 1000).unref();
+
+/** GET /api/admin/backups — Backups kept on the server, newest first, and the nightly schedule */
+app.get('/api/admin/backups', adminAuth, async (req, res, next) => {
+  try {
+    const names = fs.existsSync(BACKUP_DIR) ? fs.readdirSync(BACKUP_DIR).filter(isBackupName) : [];
+    const list = await Promise.all(names.map(describeBackup));
+    list.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    const schedule = { ...readSchedule(getSystemSetting), error: getSystemSetting('autoBackupError') || '' };
+    res.json({ backups: list, folder: path.basename(BACKUP_DIR), schedule });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** POST /api/admin/backups/schedule — { enabled, hour (0-23), keep (1-60) } */
+app.post('/api/admin/backups/schedule', adminAuth, (req, res) => {
+  const { enabled, hour, keep } = req.body || {};
+  if (typeof enabled === 'boolean') setSystemSetting('autoBackupEnabled', String(enabled));
+  if (Number.isInteger(hour) && hour >= 0 && hour <= 23) setSystemSetting('autoBackupHour', String(hour));
+  if (Number.isInteger(keep) && keep >= 1 && keep <= 60) setSystemSetting('autoBackupKeep', String(keep));
+  res.json({ schedule: readSchedule(getSystemSetting) });
+});
+
+/** POST /api/admin/backups — Makes a backup of the database and every picture */
+app.post('/api/admin/backups', adminAuth, async (req, res, next) => {
+  try {
+    await exclusiveBackupJob(res, async () => {
+      const name = await makeBackup();
+      res.json(await describeBackup(name));
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** DELETE /api/admin/backups/:name */
+app.delete('/api/admin/backups/:name', adminAuth, (req, res) => {
+  const { name } = req.params;
+  if (!isBackupName(name) || !fs.existsSync(backupFile(name))) return res.status(404).json({ error: 'Backup not found' });
+  fs.rmSync(backupFile(name));
+  res.json({ ok: true });
+});
+
+/**
+ * POST /api/admin/backups/:name/link — A one-time download link (valid 2
+ * minutes), so the browser can download a large file without holding it in memory.
+ */
+app.post('/api/admin/backups/:name/link', adminAuth, (req, res) => {
+  const { name } = req.params;
+  if (!isBackupName(name) || !fs.existsSync(backupFile(name))) return res.status(404).json({ error: 'Backup not found' });
+  const now = Date.now();
+  for (const [t, v] of backupLinks) if (v.expires < now) backupLinks.delete(t);
+  const token = crypto.randomBytes(24).toString('hex');
+  backupLinks.set(token, { name, expires: now + 2 * 60 * 1000 });
+  res.json({ url: `/api/admin/backup-download/${token}` });
+});
+
+/** GET /api/admin/backup-download/:token — Sends the backup file (link from /link) */
+app.get('/api/admin/backup-download/:token', (req, res) => {
+  const link = backupLinks.get(req.params.token);
+  backupLinks.delete(req.params.token);
+  if (!link || link.expires < Date.now() || !fs.existsSync(backupFile(link.name))) return res.status(404).json({ error: 'Download link expired; try again' });
+  res.download(backupFile(link.name), link.name);
+});
+
+/**
+ * POST /api/admin/backups/upload — Stores an uploaded backup file (raw body,
+ * application/octet-stream) after checking it. It is not restored yet.
+ */
+app.post('/api/admin/backups/upload', adminAuth, async (req, res, next) => {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const part = backupFile(`.upload-${crypto.randomBytes(6).toString('hex')}.part`);
+  try {
+    const declared = Number(req.headers['content-length']);
+    if (declared > MAX_BACKUP_UPLOAD) return res.status(413).json({ error: 'The backup file is too large' });
+    let received = 0;
+    await pipeline(req, async function* (source) {
+      for await (const chunk of source) {
+        received += chunk.length;
+        if (received > MAX_BACKUP_UPLOAD) throw Object.assign(new Error('too large'), { status: 413 });
+        yield chunk;
+      }
+    }, fs.createWriteStream(part));
+    try {
+      await inspectBackup(part, isValidImagePath);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const name = backupFileName('uploaded');
+    fs.renameSync(part, backupFile(name));
+    res.json(await describeBackup(name));
+  } catch (err) {
+    if (err?.status === 413) return res.status(413).json({ error: 'The backup file is too large' });
+    if (req.aborted || err?.code === 'ERR_STREAM_PREMATURE_CLOSE') return res.status(400).json({ error: 'The upload was interrupted' });
+    next(err);
+  } finally {
+    fs.rmSync(part, { force: true });
+  }
+});
+
+/**
+ * POST /api/admin/backups/:name/restore — Replaces the database and every
+ * picture with the backup's. A backup of the current state is made first.
+ * Logins keep working: the running session secret is kept in the restored database.
+ * Returns { safetyBackup, counts }.
+ */
+app.post('/api/admin/backups/:name/restore', adminAuth, async (req, res, next) => {
+  const { name } = req.params;
+  if (!isBackupName(name) || !fs.existsSync(backupFile(name))) return res.status(404).json({ error: 'Backup not found' });
+  try {
+    await exclusiveBackupJob(res, async () => {
+      // Refuse a bad file before making the safety backup or pausing anything
+      try {
+        await inspectBackup(backupFile(name), isValidImagePath);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      const safetyBackup = await makeBackup('before-restore');
+      restoring = true;
+      try {
+        const { counts } = await restoreBackup({
+          file: backupFile(name),
+          dbPath: databasePath(),
+          uploadsDir: uploadsRoot(),
+          workDir: BACKUP_DIR,
+          isUpload: isValidImagePath,
+          closeDb,
+          openDb: () => { getDb(); ensureUploadsDirs(); },
+          afterOpen: () => { if (!process.env.JWT_SECRET) setSystemSetting('jwtSecret', JWT_SECRET); },
+        });
+        console.log(`[BACKUP] Restored ${name} (safety backup ${safetyBackup})`);
+        res.json({ safetyBackup, counts });
+      } catch (err) {
+        console.error('[BACKUP] Restore failed, nothing was changed:', err?.message || err);
+        res.status(400).json({ error: `Restore failed, nothing was changed: ${err.message}`, safetyBackup });
+      } finally {
+        restoring = false;
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** GET /api/system/llm-settings — Site name and memory limits the browser needs (any logged-in user; no prompt text) */
 app.get('/api/system/llm-settings', auth, (req, res) => {
-  const globalInstructions = getSystemSetting('globalInstructions');
-  const temperature = getSystemSetting('temperature');
-  const maxTokens = getSystemSetting('maxTokens');
-  const tokenShort = getSystemSetting('tokenShort');
-  const tokenMedium = getSystemSetting('tokenMedium');
-  const tokenLong = getSystemSetting('tokenLong');
-  const frequencyPenalty = getSystemSetting('frequencyPenalty');
-  const presencePenalty = getSystemSetting('presencePenalty');
-  const siteName = getSystemSetting('siteName');
-  const memorySendInterval = getSystemSetting('memorySendInterval');
-  const memoryGenerateInterval = getSystemSetting('memoryGenerateInterval');
-  const memoryWordCount = getSystemSetting('memoryWordCount');
-  const memoryMaxCount = getSystemSetting('memoryMaxCount');
-  const deepseekModel = getSystemSetting('deepseekModel');
-  res.json({ globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong, frequencyPenalty, presencePenalty, siteName, memorySendInterval, memoryGenerateInterval, memoryWordCount, memoryMaxCount, deepseekModel });
-
-
-
+  const llm = readLlmSettings(getSystemSetting);
+  res.json({
+    siteName: getSystemSetting('siteName'),
+    memoryGenerateInterval: llm.memoryGenerateInterval,
+    memoryMaxCount: llm.memoryMaxCount,
+    memoryPinnedMax: llm.memoryPinnedMax,
+  });
 });
 
 // ─── Change Password ──────────────────────────────────────────────────
@@ -1512,6 +2137,8 @@ app.use((err, req, res, next) => {
 });
 
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+// Uploading a large backup can take longer than Node's default 5 minutes
+server.requestTimeout = Number(process.env.REQUEST_TIMEOUT_MS) || 60 * 60 * 1000;

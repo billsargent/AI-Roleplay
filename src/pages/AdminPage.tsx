@@ -19,11 +19,14 @@ import { useNavigate } from 'react-router-dom';
 import {
   Key, Shield, BookOpen, Thermometer, Save, CheckCircle,
   ExternalLink, AlignLeft, Brain, ChevronLeft, Users,
-  Settings, Cpu, RefreshCw, Loader, Bug, Terminal
+  Settings, Cpu, RefreshCw, Loader, Bug, Terminal, FileJson, Stethoscope, Archive
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useNotifications } from '../utils/notifications';
 import { UserEditor } from '../components/UserEditor';
+import { FictionlabReimport } from '../components/FictionlabReimport';
+import { LoreHealth } from '../components/LoreHealth';
+import { Backups } from '../components/Backups';
 
 /** Fallback instructions template used if nothing is saved */
 const DEFAULT_GLOBAL_INSTRUCTIONS = `Maintain immersive roleplay, focusing on sensory details and character consistency. Always write in the style of literary fiction, balancing dialogue, action, and internal monologue.`;
@@ -51,7 +54,7 @@ export const AdminPage: React.FC = () => {
 
   // ─── LLM settings ───
   const [globalInstructions, setGlobalInstructions] = useState('');
-  const [temperature, setTemperature] = useState('1.3');
+  const [temperature, setTemperature] = useState('1.0');
   const [maxTokens, setMaxTokens] = useState('4096');
   const [tokenShort, setTokenShort] = useState('300');
   const [tokenMedium, setTokenMedium] = useState('800');
@@ -61,14 +64,24 @@ export const AdminPage: React.FC = () => {
   const [loreScanDepth, setLoreScanDepth] = useState('10');
   const [loreActiveMax, setLoreActiveMax] = useState('5');
   const [lorePinnedMax, setLorePinnedMax] = useState('10');
+  /** A one-line index of the lore not sent in full */
+  const [loreOverview, setLoreOverview] = useState(true);
   const [memoryGenerateInterval, setMemoryGenerateInterval] = useState('25');
   const [memoryWordCount, setMemoryWordCount] = useState('100');
   const [memoryMaxCount, setMemoryMaxCount] = useState('50');
+  const [memoryPinnedMax, setMemoryPinnedMax] = useState('10');
   const [frequencyPenalty, setFrequencyPenalty] = useState('0');
   const [presencePenalty, setPresencePenalty] = useState('0');
   const [deepseekModel, setDeepseekModel] = useState('deepseek-flash');
   /** '' = model default, 'off', or a thinking effort level */
   const [deepseekThinking, setDeepseekThinking] = useState('');
+  /** Model for memories and the scenario generator ('' = same as the chat model) */
+  const [utilityModel, setUtilityModel] = useState('');
+  const [utilityTemperature, setUtilityTemperature] = useState('0.5');
+  /** Stop a reply when the AI starts a line for the player */
+  const [stopOnPlayerLines, setStopOnPlayerLines] = useState(true);
+  /** Extra stop sequences, one per line */
+  const [stopSequences, setStopSequences] = useState('');
   const [availableModels, setAvailableModels] = useState<Array<{ id: string }>>([]);
   const [loadingModels, setLoadingModels] = useState(false);
 
@@ -87,7 +100,7 @@ export const AdminPage: React.FC = () => {
         // Only a masked form of the stored key is returned (e.g. "sk-…abcd")
         setMaskedKey(settings.deepseekKeySet ? settings.deepseekKey || 'set' : '');
         setGlobalInstructions(settings.globalInstructions || DEFAULT_GLOBAL_INSTRUCTIONS);
-        setTemperature(settings.temperature || '1.3');
+        setTemperature(settings.temperature || '1.0');
         setMaxTokens(settings.maxTokens || '4096');
         setTokenShort(settings.tokenShort || '300');
         setTokenMedium(settings.tokenMedium || '800');
@@ -99,13 +112,19 @@ export const AdminPage: React.FC = () => {
         setLoreScanDepth(settings.loreScanDepth || '10');
         setLoreActiveMax(settings.loreActiveMax || '5');
         setLorePinnedMax(settings.lorePinnedMax || '10');
+        setLoreOverview(settings.loreOverview !== false);
         setMemoryGenerateInterval(settings.memoryGenerateInterval || '25');
         setMemoryWordCount(settings.memoryWordCount || '100');
         setMemoryMaxCount(settings.memoryMaxCount || '50');
+        setMemoryPinnedMax(settings.memoryPinnedMax || '10');
         setRateLimitMax(settings.rateLimitMax || '1000');
         setRegistrationOpen(settings.registrationOpen !== false);
         setDeepseekModel(settings.deepseekModel || 'deepseek-flash');
         setDeepseekThinking(settings.deepseekThinking || '');
+        setUtilityModel(settings.utilityModel || '');
+        setUtilityTemperature(settings.utilityTemperature || '0.5');
+        setStopOnPlayerLines(settings.stopOnPlayerLines !== false);
+        setStopSequences(settings.stopSequences || '');
         setDebugLlmPrompt(settings.debugLlmPrompt === 'true');
       } catch (e) {
         console.error('Failed to load settings', e);
@@ -192,10 +211,11 @@ export const AdminPage: React.FC = () => {
       await apiService.updateSystemSettings({
         globalInstructions, temperature, maxTokens, tokenShort, tokenMedium, tokenLong,
         frequencyPenalty, presencePenalty, siteName,
-        memoryGenerateInterval, memoryWordCount, memoryMaxCount,
-        contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax,
+        memoryGenerateInterval, memoryWordCount, memoryMaxCount, memoryPinnedMax,
+        contextTokenBudget, loreScanDepth, loreActiveMax, lorePinnedMax, loreOverview,
         deepseekModel,
         deepseekThinking,
+        utilityModel, utilityTemperature, stopOnPlayerLines, stopSequences,
       });
       setLlmSaved(true);
       setTimeout(() => setLlmSaved(false), 3000);
@@ -410,6 +430,39 @@ export const AdminPage: React.FC = () => {
               {debugSaved ? 'Saved' : 'Save Debug Setting'}
             </button>
           </section>
+
+          {/* Backup and restore */}
+          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-sky-600/20 text-sky-500 rounded-lg">
+                <Archive size={20} />
+              </div>
+              <h2 className="text-xl font-bold text-white">Backups</h2>
+            </div>
+            <Backups />
+          </section>
+
+          {/* Fictionlab re-import */}
+          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-amber-600/20 text-amber-500 rounded-lg">
+                <FileJson size={20} />
+              </div>
+              <h2 className="text-xl font-bold text-white">Fictionlab Re-import</h2>
+            </div>
+            <FictionlabReimport />
+          </section>
+
+          {/* Lore health across all scenarios */}
+          <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-emerald-600/20 text-emerald-500 rounded-lg">
+                <Stethoscope size={20} />
+              </div>
+              <h2 className="text-xl font-bold text-white">Lore Health</h2>
+            </div>
+            <LoreHealth />
+          </section>
         </div>
       )}
 
@@ -475,8 +528,27 @@ export const AdminPage: React.FC = () => {
                 </button>
               </div>
               <p className="mt-2 text-xs text-zinc-500">
-                Select which DeepSeek model to use for all AI responses. Click refresh to fetch the latest available models from the DeepSeek API.
-                The older names deepseek-chat and deepseek-reasoner were scheduled for retirement by DeepSeek in July 2026.
+                The model that writes chat replies. Refresh fetches the models your API key can use. deepseek-flash is fast and
+                cheap; deepseek-v4-pro writes better but costs more. The older names deepseek-chat and deepseek-reasoner were
+                scheduled for retirement by DeepSeek in July 2026.
+              </p>
+            </div>
+            <div className="mt-4">
+              <label className="block text-sm font-bold text-zinc-400 mb-2" htmlFor="utility-model">Background model</label>
+              <select
+                id="utility-model"
+                value={utilityModel}
+                onChange={(e) => setUtilityModel(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none cursor-pointer"
+              >
+                <option value="">Same as the chat model</option>
+                {(availableModels.length > 0 ? availableModels.map(m => m.id) : ['deepseek-flash', 'deepseek-v4-pro'])
+                  .concat(utilityModel && !availableModels.some(m => m.id === utilityModel) && !['deepseek-flash', 'deepseek-v4-pro'].includes(utilityModel) ? [utilityModel] : [])
+                  .map(id => <option key={id} value={id}>{id}</option>)}
+              </select>
+              <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+                Used for work players do not read directly: memory summaries and the AI scenario generator. A cheaper model
+                such as deepseek-flash is usually good enough here, even when chats use deepseek-v4-pro.
               </p>
             </div>
             <div className="mt-4">
@@ -493,9 +565,12 @@ export const AdminPage: React.FC = () => {
                 <option value="high">On, high effort</option>
                 <option value="max">On, maximum effort</option>
               </select>
-              <p className="mt-2 text-xs text-zinc-500">
-                When thinking is on, DeepSeek ignores temperature and the frequency/presence penalties, and the
-                reply budget is raised to leave room for the reasoning. deepseek-flash thinks by default.
+              <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+                <strong className="text-zinc-400">Off (the default) is recommended for roleplay:</strong> replies start sooner, cost less, and
+                Continue can pick up exactly where a reply stopped. With thinking on, the model reasons before it writes: slower,
+                more tokens, and it ignores temperature and the penalties (the reply budget is raised to leave room for the
+                reasoning). "Model default" sends nothing and lets DeepSeek decide; deepseek-flash then thinks. This applies to chat
+                replies only: the editor's AI tools, memories and the generator always run with thinking off.
               </p>
             </div>
           </div>
@@ -517,8 +592,20 @@ export const AdminPage: React.FC = () => {
               <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
                 <span>Precise (0)</span><span>Creative (2)</span>
               </div>
-              <p className="mt-2 text-xs text-zinc-500">
-                DeepSeek recommends 1.3 for conversation and 1.5 for creative writing. Ignored while thinking mode is on.
+              <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+                How adventurous the wording is. <strong className="text-zinc-400">0.8–1.2 suits roleplay.</strong> Lower is
+                safer and more predictable; above about 1.3 replies start to ramble or fall apart. Ignored while thinking is on.
+              </p>
+            </div>
+
+            {/* Background temperature */}
+            <div className="mb-6">
+              <label className="block text-sm font-bold text-zinc-400 mb-2" htmlFor="utility-temperature">Background temperature: {utilityTemperature}</label>
+              <input id="utility-temperature" type="range" min="0" max="2" step="0.1" value={utilityTemperature}
+                onChange={(e) => setUtilityTemperature(e.target.value)} className="w-full accent-indigo-500" />
+              <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+                Temperature for memory summaries. Low values (about 0.3–0.6) keep summaries factual. The scenario generator
+                uses its own setting.
               </p>
             </div>
 
@@ -530,6 +617,10 @@ export const AdminPage: React.FC = () => {
               <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
                 <span>256</span><span>8192</span>
               </div>
+              <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+                Hard ceiling for a single reply, whatever length the player picked. With thinking on, extra room for the
+                reasoning is added on top.
+              </p>
             </div>
 
             {/* Response Length Tokens — short/medium/long presets */}
@@ -557,11 +648,48 @@ export const AdminPage: React.FC = () => {
                     className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                 </div>
               </div>
+              <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+                Token budget for each chat's Short, Medium and Long reply setting. The AI is asked for about 70% of this in
+                words and to finish at a natural stopping point; a reply that still hits the limit can be continued.
+              </p>
+            </div>
+
+            {/* Stop sequences */}
+            <div className="border-t border-zinc-800 pt-4 mb-6">
+              <h3 className="text-sm font-bold text-zinc-400 mb-3">Stop Sequences</h3>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input type="checkbox" checked={stopOnPlayerLines} onChange={(e) => setStopOnPlayerLines(e.target.checked)} className="mt-1 accent-indigo-500" />
+                <span>
+                  <span className="block text-sm font-bold text-zinc-300">Stop when the AI starts writing as the player</span>
+                  <span className="block text-xs text-zinc-500">
+                    Ends the reply as soon as a new line starts with the player's persona name (for example "Rin:"), so the
+                    AI cannot take the player's turn.
+                  </span>
+                </span>
+              </label>
+              <label className="block text-xs font-bold text-zinc-500 mt-4 mb-1 uppercase tracking-wider" htmlFor="stop-sequences">Extra stop sequences</label>
+              <textarea
+                id="stop-sequences"
+                value={stopSequences}
+                onChange={(e) => setStopSequences(e.target.value)}
+                rows={3}
+                placeholder={'One per line, for example:\n[OOC]\n\\n{{user}} says'}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+              <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+                The reply stops right before any of these texts (up to 16 in total). Write <code>\n</code> for a line break and
+                <code> {'{{user}}'}</code> for the player's persona name. Leave empty if unsure.
+              </p>
             </div>
 
             {/* Frequency & Presence Penalties */}
             <div className="border-t border-zinc-800 pt-4 mb-6">
-              <h3 className="text-sm font-bold text-zinc-400 mb-3">Penalty Parameters</h3>
+              <h3 className="text-sm font-bold text-zinc-400 mb-1">Penalty Parameters</h3>
+              <p className="text-xs text-zinc-500 mb-3 leading-relaxed">
+                <strong className="text-zinc-400">0 is recommended.</strong> Negative values make the AI repeat itself more.
+                Small positive values (0.1–0.5) can reduce repeated phrases in long chats; large ones make the wording odd.
+                Ignored while thinking is on.
+              </p>
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider">
@@ -570,7 +698,7 @@ export const AdminPage: React.FC = () => {
                   <input type="range" min="-2" max="2" step="0.1" value={frequencyPenalty}
                     onChange={(e) => setFrequencyPenalty(e.target.value)} className="w-full accent-indigo-500" />
                   <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
-                    <span>Less repetitive (-2)</span><span>Default (0)</span><span>More varied (+2)</span>
+                    <span>Repeats words (-2)</span><span>Off (0)</span><span>Avoids repeated words (+2)</span>
                   </div>
                 </div>
                 <div>
@@ -580,7 +708,7 @@ export const AdminPage: React.FC = () => {
                   <input type="range" min="-2" max="2" step="0.1" value={presencePenalty}
                     onChange={(e) => setPresencePenalty(e.target.value)} className="w-full accent-indigo-500" />
                   <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
-                    <span>More focused (-2)</span><span>Default (0)</span><span>New topics (+2)</span>
+                    <span>Sticks to what was said (-2)</span><span>Off (0)</span><span>Brings in new things (+2)</span>
                   </div>
                 </div>
               </div>
@@ -619,7 +747,17 @@ export const AdminPage: React.FC = () => {
                     onChange={(e) => setMemoryMaxCount(e.target.value)}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                 </div>
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 mb-1 uppercase tracking-wider" htmlFor="memory-pinned-max">Max Pinned Memories</label>
+                  <input id="memory-pinned-max" type="number" min="0" max="100" value={memoryPinnedMax}
+                    onChange={(e) => setMemoryPinnedMax(e.target.value)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
               </div>
+              <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+                Target Word Count is the length of each memory. Max Memories is how many unpinned memories a chat keeps (the
+                oldest are dropped). Players can pin up to Max Pinned Memories as "key facts"; pinned ones are never dropped.
+              </p>
             </div>
 
             {/* Context & lore engine */}
@@ -656,6 +794,17 @@ export const AdminPage: React.FC = () => {
                     onChange={(e) => setLorePinnedMax(e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                 </div>
               </div>
+              <label className="flex items-start gap-3 mt-4 cursor-pointer">
+                <input type="checkbox" checked={loreOverview} onChange={(e) => setLoreOverview(e.target.checked)} className="mt-1 accent-indigo-500" />
+                <span>
+                  <span className="block text-sm font-bold text-zinc-300">Lore overview</span>
+                  <span className="block text-xs text-zinc-500 leading-relaxed">
+                    Each reply also lists the scenario's other lore pieces by title with a one-line summary (about 1,500 tokens
+                    at most), so the AI knows what exists before a trigger word comes up. Pieces named in the scenario's
+                    instructions are always sent in full (within Max Always-on Lore).
+                  </span>
+                </span>
+              </label>
             </div>
 
             {/* Save all LLM settings */}

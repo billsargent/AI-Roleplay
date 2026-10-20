@@ -13,6 +13,8 @@ export interface Scenario {
   userId?: string;
   /** Display name of the scenario creator (for Explore tab attribution) */
   creatorName?: string;
+  /** Id of the Fictionlab scenario it was imported from (matches re-imports) */
+  sourceId?: string;
   name: string;
   description: string;
   /** Image URL: "/api/images/..." for uploaded files, a web URL, or a base64 data URL before saving */
@@ -44,6 +46,10 @@ export interface StoryCharacter {
   avatar?: string;
   /** Relative file path of the uploaded avatar (set by the server) */
   avatarPath?: string;
+  /** Short descriptive tags (imported from Fictionlab) */
+  traits?: string[];
+  /** Known to the AI, not shown to other players */
+  hidden?: boolean;
 }
 
 /** A registered user (returned by the API, includes personas) */
@@ -66,16 +72,20 @@ export interface Persona {
   avatarPath?: string;
 }
 
-/** Thematic category for a lore piece */
-export type LorePieceType = 'character' | 'location' | 'object' | 'event' | 'other';
+/** Thematic category for a lore piece; imports may bring others (e.g. rule, premise, routine, faction) */
+export type LorePieceType = 'character' | 'location' | 'object' | 'event' | 'other' | (string & {});
 
 /** A single piece of world lore — can be pinned (always sent) or smart-activated (triggered by keywords) */
 export interface LorePiece {
   id: string;
   type: LorePieceType;
   title: string;
-  /** Not stored by the server; kept for imported files */
+  /** One-line summary (imported from Fictionlab, or written by the lore fix) */
   description?: string;
+  /** Short descriptive tags (imported from Fictionlab) */
+  traits?: string[];
+  /** The scene starts here (Fictionlab start location) */
+  isStartLocation?: boolean;
   content: string;
   /** Priority weight (higher = more important) */
   weight: number;
@@ -151,6 +161,19 @@ export interface Message {
   versions?: string[];
   /** Index of the currently active version (stored by the server) */
   currentVersionIndex?: number;
+  /** For AI replies: what the AI was given when it wrote this */
+  contextInfo?: ReplyContext;
+}
+
+/** What an AI reply was given (lore the player may not read is only counted) */
+export interface ReplyContext {
+  memoryIds: string[];
+  lore: string[];
+  hiddenLore: number;
+  /** Other lore pieces given only as a one-line summary (lore overview) */
+  listed?: number;
+  /** Older messages left out of the prompt (covered by memories) */
+  omitted: number;
 }
 
 /** An AI-generated memory about the conversation */
@@ -162,6 +185,12 @@ export interface Memory {
   timestamp: number;
   /** Time of the last message this memory summarises; the next memory starts after it */
   coveredUntil?: number;
+  /** Time of the first message this memory summarises */
+  coveredFrom?: number;
+  /** auto: written after a reply; manual: requested; user: written by the player */
+  source?: 'auto' | 'manual' | 'user';
+  /** When the player last edited it */
+  editedAt?: number;
 }
 
 /** The persona the user chose to play as in a chat session */

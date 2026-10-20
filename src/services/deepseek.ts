@@ -15,7 +15,7 @@
  */
 
 import { api } from './api';
-import { Memory } from '../types';
+import { Memory, ReplyContext, LorePiece } from '../types';
 
 /**
  * Interface for the JSON structure returned by the LLM during scenario generation.
@@ -59,6 +59,83 @@ export interface ReplyResult {
    * means it is a new piece of text that may need a space before it
    */
   continueMode?: 'prefix' | 'instruct';
+  /** What the AI was given for this reply */
+  context?: ReplyContext;
+}
+
+/** Reads the X-Reply-Context header (URI-encoded JSON) */
+function parseReplyContext(header: string | null | undefined): ReplyContext | undefined {
+  if (!header) return undefined;
+  try {
+    const v = JSON.parse(decodeURIComponent(header));
+    return {
+      memoryIds: Array.isArray(v.memoryIds) ? v.memoryIds.filter((x: unknown) => typeof x === 'string') : [],
+      lore: Array.isArray(v.lore) ? v.lore.filter((x: unknown) => typeof x === 'string') : [],
+      hiddenLore: Number(v.hiddenLore) || 0,
+      listed: Number(v.listed) || 0,
+      omitted: Number(v.omitted) || 0,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** What the lore check and AI fixes read from the editor (no images) */
+export interface LoreFixDraft {
+  name: string;
+  backstory: string;
+  customInstructions: string;
+  characters: Array<{ name: string }>;
+  lorePieces: Array<Pick<LorePiece, 'id' | 'type' | 'title' | 'content' | 'description' | 'weight' | 'pinned' | 'smartActivation' | 'hidden' | 'triggers' | 'linkedPieces'>>;
+}
+
+/** One problem the lore check found */
+export interface LoreIssue {
+  kind: 'brokenLinks' | 'neverSent' | 'ruleCard' | 'weightScale' | 'castDuplicate' | 'empty' | 'tooLong' | 'overAlwaysCap' | 'badTriggers' | 'charPlaceholder';
+  pieceId?: string;
+  title?: string;
+  message: string;
+  /** Repaired by the automatic fixes */
+  safe: boolean;
+}
+
+export interface LoreCheckResult {
+  issues: LoreIssue[];
+  /** The draft's lore with the automatic fixes applied */
+  fixed: { lorePieces: LoreFixDraft['lorePieces']; customInstructions: string; changes: string[] };
+}
+
+/** An AI suggestion for a card that is never sent */
+export interface LoreFix {
+  id: string;
+  triggers: string[];
+  mode: 'triggered' | 'always';
+  linkedPieces: string[];
+  description: string;
+}
+
+/** Editor fields AI Enhance works on (the server keeps the same list) */
+export type EnhanceField = 'description' | 'backstory' | 'greeting' | 'customInstructions' | 'characterDescription' | 'characterPersonality' | 'loreContent';
+
+/** What the lore suggester reads from the editor */
+export interface LoreSuggestDraft {
+  name: string;
+  description: string;
+  backstory: string;
+  /** Plain text of the introduction (no HTML or images) */
+  introduction: string;
+  customInstructions: string;
+  characters: Array<{ name: string; description: string }>;
+  loreTitles: string[];
+}
+
+/** A lore card proposed by the AI (validated by the server) */
+export interface LoreSuggestion {
+  title: string;
+  type: 'location' | 'event' | 'object' | 'character' | 'other';
+  content: string;
+  triggers: string[];
+  mode: 'triggered' | 'always';
 }
 
 /** A trimmed string, or '' for anything that is not a string (AI output is untrusted) */
@@ -141,6 +218,7 @@ export const deepseek = {
         content: choice?.message?.content || '',
         finishReason: choice?.finish_reason,
         continueMode: response.headers?.['x-continue-mode'],
+        context: parseReplyContext(response.headers?.['x-reply-context']),
       };
     } catch (error: any) {
       console.error('DeepSeek API error:', error.response?.data || error.message);
@@ -231,10 +309,61 @@ export const deepseek = {
         }
       }
 
-      return { content: fullContent, finishReason, continueMode };
+      return { content: fullContent, finishReason, continueMode, context: parseReplyContext(response.headers.get('X-Reply-Context')) };
     } catch (error: any) {
       console.error('DeepSeek streaming error:', error.message);
       throw new Error(error.message || 'Failed to connect to DeepSeek API');
+    }
+  },
+
+  /**
+   * Asks the AI to propose lore cards for a scenario draft (saved or not).
+   * Nothing is stored; the author picks which cards to add.
+   *
+   * @param draft - The editor's current fields; introduction as plain text
+   * @param focus - Optional wish, e.g. "factions" or "the harbour"
+   * @throws With the server's message if nothing usable came back
+   */
+  async suggestLore(draft: LoreSuggestDraft, focus = ''): Promise<LoreSuggestion[]> {
+    try {
+      const response = await api.post('/deepseek/lore-suggest', { draft, focus });
+      return Array.isArray(response.data?.suggestions) ? response.data.suggestions : [];
+    } catch (error: any) {
+      throw new Error(errorMessage(error, 'Could not get lore suggestions'));
+    }
+  },
+
+  /**
+   * AI Enhance: returns an improved version of one editor field for the
+   * author to accept or not ("fix" = spelling, grammar, clarity only).
+   * @throws With the server's message on failure
+   */
+  async enhanceText(field: EnhanceField, text: string, context: { name?: string; description?: string }, mode: 'fix' | 'vivid' | 'condense' = 'fix'): Promise<string> {
+    try {
+      const response = await api.post('/deepseek/enhance', { field, text, context, mode });
+      return String(response.data?.text || '');
+    } catch (error: any) {
+      throw new Error(errorMessage(error, 'Could not enhance the text'));
+    }
+  },
+
+  /** Lore health of a draft: issues and the safely fixed lore (nothing saved) */
+  async checkLore(draft: LoreFixDraft): Promise<LoreCheckResult> {
+    try {
+      const response = await api.post('/lore/check', { draft });
+      return response.data;
+    } catch (error: any) {
+      throw new Error(errorMessage(error, 'Could not check the lore'));
+    }
+  },
+
+  /** AI suggestions for cards that are never sent (at most 15 ids per call) */
+  async loreFix(draft: LoreFixDraft, ids: string[]): Promise<LoreFix[]> {
+    try {
+      const response = await api.post('/deepseek/lore-fix', { draft, ids });
+      return Array.isArray(response.data?.fixes) ? response.data.fixes : [];
+    } catch (error: any) {
+      throw new Error(errorMessage(error, 'Could not get suggestions'));
     }
   },
 

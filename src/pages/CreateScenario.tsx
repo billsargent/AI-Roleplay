@@ -15,10 +15,10 @@ import {
   X, Image as ImageIcon, Info, BookOpen, Brain, 
   Settings as SettingsIcon, Save, Plus, Trash2, 
   UserPlus, ChevronLeft, Globe, Lock, Upload,
-  FileJson, Sparkles, FileText
+  FileJson, Sparkles, FileText, RefreshCw, Stethoscope
 } from 'lucide-react';
 import { apiService } from '../services/api';
-import { AiGeneratedScenarioData } from '../services/deepseek';
+import { AiGeneratedScenarioData, LoreSuggestDraft, LoreSuggestion } from '../services/deepseek';
 
 import { Scenario, LorePiece, StoryCharacter } from '../types';
 import { v4 as uuidv4 } from 'uuid';
@@ -26,6 +26,10 @@ import { fileToBase64, urlToBase64 } from '../utils/image';
 import { useLocation } from 'react-router-dom';
 import { useNotifications } from '../utils/notifications';
 import { AIGeneratorModal } from '../components/AIGeneratorModal';
+import { LoreSuggestModal } from '../components/LoreSuggestModal';
+import { AIEnhanceButton } from '../components/AIEnhanceButton';
+import { LoreFixModal } from '../components/LoreFixModal';
+import { TraitsInput } from '../components/Traits';
 import { RichtextEditor } from '../components/RichtextEditor';
 
 
@@ -60,6 +64,7 @@ export const CreateScenario: React.FC = () => {
           ...initialScenario,
           id: uuidv4(),
           name: `${initialScenario.name} (Copy)`,
+          sourceId: undefined,
           userId: user?.id,
           creatorName: user?.username,
           createdAt: Date.now(),
@@ -96,6 +101,10 @@ export const CreateScenario: React.FC = () => {
 
   const [newTag, setNewTag] = useState('');
   const [showAiGenerator, setShowAiGenerator] = useState(false);
+  const [showLoreSuggest, setShowLoreSuggest] = useState(false);
+  const [showLoreFix, setShowLoreFix] = useState(false);
+  // Opened by an import: asks the AI about cards with no trigger words straight away
+  const [loreFixAuto, setLoreFixAuto] = useState(false);
   const [triggerInputs, setTriggerInputs] = useState<Record<string, string>>({});
   const [rteKey, setRteKey] = useState(0);
   /** Problems found when saving, shown under the fields (cleared as they are edited) */
@@ -118,6 +127,55 @@ export const CreateScenario: React.FC = () => {
     navigate('/');
   };
   const importInputRef = React.useRef<HTMLInputElement>(null);
+  const reimportInputRef = React.useRef<HTMLInputElement>(null);
+  /** Editing a saved scenario of one's own (not a new one or a copy): it can be updated from its export file */
+  const isSavedScenario = !!initialScenario && (initialScenario.userId === user?.id || user?.role === 'admin');
+
+  /**
+   * Updates this saved scenario from a Fictionlab export: shows what would
+   * change, then re-imports on the server (id, chats, name, settings and
+   * pictures are kept) and reloads the editor.
+   */
+  const handleReimport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    let json: unknown;
+    try {
+      json = JSON.parse(await file.text());
+    } catch {
+      showToast('This file is not valid JSON', 'error');
+      return;
+    }
+    try {
+      const { summary } = await apiService.reimportScenario(scenario.id, json, false);
+      if (summary.hollow) {
+        showToast('This export is missing its lore text (the creator probably hid it on Fictionlab). Updating from it would erase your lore, so nothing was changed.', 'error');
+        return;
+      }
+      const lines = [
+        `Lore: ${summary.lore.before} → ${summary.lore.after} cards${summary.lore.added.length ? ` (${summary.lore.added.length} new)` : ''}${summary.lore.removed.length ? `, ${summary.lore.removed.length} not in the file` : ''}`,
+        `Never sent to the AI: ${summary.lore.neverSentBefore} → ${summary.lore.neverSentAfter}`,
+        `Working lore links: ${summary.lore.workingLinksBefore} → ${summary.lore.workingLinksAfter}`,
+        `Characters: ${summary.characters.before} → ${summary.characters.after}`,
+        summary.fields.length ? `Also replaced: ${summary.fields.join(', ')}` : '',
+        summary.keepsLore ? 'The file has no lore cards (made before Fictionlab had lore), so your lore is kept.' : '',
+      ].filter(Boolean);
+      const warning = dirty ? '\n\nYour unsaved changes in the editor will be lost.' : '';
+      if (!(await showConfirm(`Update "${scenario.name}" from this file?\n\n${lines.join('\n')}\n\nThe name, settings, pictures and chats are kept.${warning}`))) return;
+      showToast('Updating from the file…', 'info');
+      await apiService.reimportScenario(scenario.id, json, true);
+      const fresh = await apiService.getScenario(scenario.id);
+      if (fresh) {
+        setScenario(fresh);
+        setRteKey(prev => prev + 1);
+        setDirty(false);
+      }
+      showToast('Scenario updated from the file', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Could not update from this file', 'error');
+    }
+  };
 
   /**
    * Handles clicking the AI Generate button.
@@ -198,120 +256,51 @@ export const CreateScenario: React.FC = () => {
 
     showToast('📥 Importing scenario with images...', 'info');
 
-    // Imported files are untrusted: coerce every field to the expected type
-    const str = (v: unknown): string => (typeof v === 'string' ? v : '');
-    const strArr = (v: unknown): string[] =>
-      Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-    const arr = (v: unknown): any[] => (Array.isArray(v) ? v.filter(x => x && typeof x === 'object') : []);
-
     const reader = new FileReader();
     reader.onload = async (ev) => {
+      let json: unknown;
       try {
-        const data = JSON.parse(ev.target?.result as string);
-        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Not a scenario object');
+        json = JSON.parse(ev.target?.result as string);
+      } catch {
+        showToast('Import failed: the file is not valid JSON', 'error');
+        return;
+      }
+      try {
+        // The server reads every Fictionlab export shape (see lib/fictionlab.js)
+        const { draft, report, imageUrls } = await apiService.parseFictionlab(json);
+        const download = async (url?: string) => (url ? urlToBase64(flImageUrl(url)).catch(() => '') : '');
         const imported: Scenario = {
+          ...draft,
           id: uuidv4(),
           userId: user?.id,
           creatorName: user?.username,
-          name: str(data.displayName) || str(data.name) || 'Imported Scenario',
-          description: str(data.description),
-          tags: strArr(data.genres).length ? strArr(data.genres) : strArr(data.tags),
-          backstory: str(data.backStory),
-          greetingMessage: str(data.customGreeting),
-          customInstructions: str(data.customInstructions),
-          lorePieces: [],
-          characters: [],
-          settings: {
-            separateUserCharacter: data.separateUser !== undefined ? !!data.separateUser : true,
-            sensitiveContent: !!data.sensitiveContent,
-            isPublic: data.isPublic !== undefined ? !!data.isPublic : true,
-            allowCustomization: data.allowEditing !== undefined ? !!data.allowEditing : true,
-            hidePrompts: !!data.hidePrompts,
-            allowCommenting: data.allowComments !== undefined ? !!data.allowComments : true,
-          },
           createdAt: Date.now(),
+          image: await download(imageUrls.cover),
+          introduction: draft.introduction ? await embedImagesInHtml(draft.introduction) : '',
+          characters: await Promise.all(draft.characters.map(async c => ({ ...c, avatar: await download(imageUrls.characters[c.id]) }))),
+          lorePieces: await Promise.all(draft.lorePieces.map(async p => ({ ...p, avatar: await download(imageUrls.lore[p.id]) }))),
         };
-
-        // ── 1. Download scenario cover image ──
-        if (str(data.mainImage)) {
-          imported.image = await urlToBase64(flImageUrl(data.mainImage));
-        }
-        if (!imported.image && str(data.avatarURL)) {
-          imported.image = await urlToBase64(flImageUrl(data.avatarURL));
-        }
-
-        // ── 2. Download and embed introduction images ──
-        if (str(data.customIntroduction)) {
-          imported.introduction = await embedImagesInHtml(data.customIntroduction);
-        }
-
-        // ── 3. Import lore pieces ──
-        const loreTypes = ['character', 'location', 'object', 'event', 'other'];
-        const loreData = arr(data.lorePieces);
-        // Pieces get new ids; links in the file point at the old ones
-        const newLoreId = new Map<string, string>(loreData.map((lp: any) => [str(lp.id), uuidv4()]));
-        imported.lorePieces = loreData.map((lp: any) => ({
-          id: newLoreId.get(str(lp.id)) || uuidv4(),
-          type: loreTypes.includes(lp.type) ? lp.type : 'other',
-          title: str(lp.title),
-          description: str(lp.description),
-          content: str(lp.content),
-          weight: typeof lp.weight === 'number' && Number.isFinite(lp.weight) ? lp.weight : 100,
-          pinned: !!lp.pinned,
-          smartActivation: lp.smartActivation !== undefined ? !!lp.smartActivation : true,
-          triggers: strArr(lp.triggers),
-          linkedPieces: strArr(lp.linkedPieces).map(id => newLoreId.get(id)).filter((id): id is string => !!id),
-        }));
-
-        // ── 4. Import characters from "characters" array ──
-        const charData = arr(data.characters);
-        if (charData.length > 0) {
-          imported.characters = await Promise.all(
-            charData.map(async (c: any) => {
-              let avatar = '';
-              if (str(c.avatarURL)) {
-                avatar = await urlToBase64(flImageUrl(c.avatarURL));
-              }
-              return {
-                id: uuidv4(),
-                name: str(c.displayName) || str(c.name) || 'Unknown',
-                description: str(c.description),
-                personality: str(c.personality) || strArr(c.traits).join(', '),
-                avatar,
-              };
-            })
-          );
-        }
-
-        // ── 5. Create character entries from lore pieces of type 'character' ──
-        const charLorePieces = loreData.filter((lp: any) => lp.type === 'character');
-        for (const lp of charLorePieces) {
-          if (!imported.characters.find(c => c.name === lp.title)) {
-            let avatar = '';
-            if (str(lp.avatarURL)) {
-              avatar = await urlToBase64(flImageUrl(lp.avatarURL));
-            }
-            imported.characters.push({
-              id: uuidv4(),
-              name: str(lp.title) || 'Unknown',
-              description: str(lp.content),
-              personality: strArr(lp.traits).join(', '),
-              avatar,
-            });
-          }
-        }
 
         setScenario(imported);
         setRteKey(prev => prev + 1);
         setDirty(true);
-        showToast('✅ Import successful! All images downloaded and embedded.', 'success');
-      } catch (err) {
-        showToast('Import failed: Invalid JSON file', 'error');
+        const notes = [
+          `${imported.lorePieces.length} lore cards, ${imported.characters.length} characters`,
+          report.mergedRules.length ? `${report.mergedRules.length} rule card(s) moved into Custom AI Instructions` : '',
+          report.noTriggers.length ? `${report.noTriggers.length} card(s) with no trigger words: asking the AI` : '',
+        ].filter(Boolean);
+        showToast(`✅ Imported: ${notes.join('; ')}. Review, then save.`, 'success');
+        // Cards with no trigger words never reach the AI: get suggestions for them now
+        if (report.noTriggers.length) {
+          setLoreFixAuto(true);
+          setShowLoreFix(true);
+        }
+      } catch (err: any) {
+        showToast(`Import failed: ${err?.message || 'unknown error'}`, 'error');
         console.error('Import error:', err);
       }
     };
     reader.readAsText(file);
-    e.target.value = '';
   };
 
   /** Updates a subset of scenario fields. */
@@ -430,6 +419,35 @@ export const CreateScenario: React.FC = () => {
     updateScenario({ characters: [...scenario.characters, char] });
   };
 
+  /** The editor's current fields for the lore suggester (introduction as plain text) */
+  const loreSuggestDraft = (): LoreSuggestDraft => ({
+    name: scenario.name,
+    description: scenario.description,
+    backstory: scenario.backstory,
+    introduction: new DOMParser().parseFromString(scenario.introduction || '', 'text/html').body.textContent || '',
+    customInstructions: scenario.customInstructions || '',
+    characters: scenario.characters.map(c => ({ name: c.name || '', description: c.description || '' })),
+    loreTitles: scenario.lorePieces.map(p => p.title).filter(Boolean),
+  });
+
+  /** Adds the lore cards the author picked from the suggestions */
+  const addSuggestedLore = (cards: LoreSuggestion[]) => {
+    const pieces: LorePiece[] = cards.map(c => ({
+      id: uuidv4(),
+      type: c.type,
+      title: c.title,
+      description: '',
+      content: c.content,
+      weight: 100,
+      pinned: c.mode === 'always',
+      smartActivation: c.mode !== 'always',
+      triggers: c.mode === 'always' ? [] : c.triggers,
+      linkedPieces: [],
+    }));
+    updateScenario({ lorePieces: [...scenario.lorePieces, ...pieces] });
+    showToast(`Added ${pieces.length} lore card${pieces.length === 1 ? '' : 's'}. Review them, then save.`, 'success');
+  };
+
   /** Adds a new lore piece with default values. */
   const addLorePiece = () => {
     const piece: LorePiece = {
@@ -511,6 +529,23 @@ export const CreateScenario: React.FC = () => {
   // ── Render ──
   const inputClass = 'w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-1 focus:ring-indigo-500';
   const labelClass = 'block text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2';
+  const enhanceContext = { name: scenario.name, description: scenario.description };
+  /** Problems shown on each lore card (the full check is in "Check & fix lore") */
+  const loreIds = new Set(scenario.lorePieces.map(p => p.id));
+  const linkedTo = new Set(scenario.lorePieces.flatMap(p => p.linkedPieces || []));
+  const castNames = new Set(scenario.characters.map(c => (c.name || '').trim().toLowerCase()));
+  const loreBadges = (p: LorePiece): string[] => [
+    ...(!p.pinned && !(p.smartActivation && (p.triggers || []).length) && !linkedTo.has(p.id) ? ['Never sent'] : []),
+    ...((p.linkedPieces || []).some(id => !loreIds.has(id)) ? ['Broken link'] : []),
+    ...(p.type === 'character' && castNames.has((p.title || '').trim().toLowerCase()) ? ['Same as a cast member'] : []),
+  ];
+  /** A field label with the Enhance button on the right */
+  const labelRow = (label: React.ReactNode, enhance: React.ReactNode, htmlFor?: string, small = false) => (
+    <div className={`flex items-center justify-between gap-2 ${small ? 'mb-1' : 'mb-2'}`}>
+      <label className={small ? 'text-[10px] font-black text-zinc-500 uppercase' : labelClass.replace(' mb-2', '')} htmlFor={htmlFor}>{label}</label>
+      {enhance}
+    </div>
+  );
   const sectionClass = 'scroll-mt-32 bg-zinc-900/60 ring-1 ring-white/5 rounded-2xl p-5 sm:p-8 space-y-6';
 
   return (
@@ -540,6 +575,18 @@ export const CreateScenario: React.FC = () => {
           >
             <FileJson size={16} /> Import
           </button>
+          {isSavedScenario && (
+            <>
+              <input type="file" accept=".json" ref={reimportInputRef} className="hidden" onChange={handleReimport} />
+              <button
+                onClick={() => reimportInputRef.current?.click()}
+                className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-4 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all"
+                title="Update this scenario from its Fictionlab export file (chats are kept)"
+              >
+                <RefreshCw size={16} /> Update from file
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -597,7 +644,7 @@ export const CreateScenario: React.FC = () => {
             </div>
           </div>
           <div>
-            <label className={labelClass} htmlFor="scenario-summary">Brief Summary</label>
+            {labelRow('Brief Summary', <AIEnhanceButton field="description" label="Brief Summary" value={scenario.description} onChange={v => updateScenario({ description: v })} context={enhanceContext} />, 'scenario-summary')}
             <AutoTextarea id="scenario-summary" minRows={3} className={`${inputClass} ${errors.description ? 'ring-1 ring-red-500 border-red-500/60' : ''}`} placeholder="A short hook to grab players' attention..." value={scenario.description} onChange={v => { updateScenario({ description: v }); if (errors.description) setErrors(p => ({ ...p, description: undefined })); }} />
             {errors.description && <p className="text-xs text-red-400 mt-1">{errors.description}</p>}
             <p className="text-[11px] text-zinc-600 mt-1 flex justify-between gap-4">
@@ -626,18 +673,18 @@ export const CreateScenario: React.FC = () => {
         <section id="editor-story" className={sectionClass}>
           <h2 className="text-xl font-bold flex items-center gap-3"><BookOpen className="text-emerald-400" /> Story Foundation</h2>
           <div>
-            <label className={labelClass} htmlFor="scenario-backstory">Main Backstory & World Details</label>
+            {labelRow('Main Backstory & World Details', <AIEnhanceButton field="backstory" label="Backstory" value={scenario.backstory} onChange={v => updateScenario({ backstory: v })} context={enhanceContext} />, 'scenario-backstory')}
             <AutoTextarea id="scenario-backstory" minRows={10} className={`${inputClass} font-serif text-lg leading-relaxed ${errors.backstory ? 'ring-1 ring-red-500 border-red-500/60' : ''}`} placeholder="Describe the environment, the history, and the current situation. Use {{user}} to refer to the player's character." value={scenario.backstory} onChange={v => { updateScenario({ backstory: v }); if (errors.backstory) setErrors(p => ({ ...p, backstory: undefined })); }} />
             {errors.backstory && <p className="text-xs text-red-400 mt-1">{errors.backstory}</p>}
             <p className="text-[11px] text-zinc-600 mt-1">Sent to the AI with every reply. Use <strong className="text-zinc-400">{'{{user}}'}</strong> for the player's persona name.</p>
           </div>
           <div>
-            <label className={labelClass} htmlFor="scenario-greeting">Greeting Message</label>
+            {labelRow('Greeting Message', <AIEnhanceButton field="greeting" label="Greeting Message" value={scenario.greetingMessage || ''} onChange={v => updateScenario({ greetingMessage: v })} context={enhanceContext} />, 'scenario-greeting')}
             <AutoTextarea id="scenario-greeting" minRows={5} className={`${inputClass} text-sm text-zinc-300`} placeholder="The first message sent to the player. Set the tone here." value={scenario.greetingMessage} onChange={v => updateScenario({ greetingMessage: v })} />
             <p className="text-[11px] text-zinc-600 mt-1">Becomes the AI's first message in every new chat.</p>
           </div>
           <div>
-            <label className={labelClass} htmlFor="scenario-instructions">Custom AI Instructions</label>
+            {labelRow('Custom AI Instructions', <AIEnhanceButton field="customInstructions" label="Custom AI Instructions" value={scenario.customInstructions || ''} onChange={v => updateScenario({ customInstructions: v })} context={enhanceContext} />, 'scenario-instructions')}
             <AutoTextarea id="scenario-instructions" minRows={4} className={`${inputClass} text-sm text-zinc-300`} placeholder="Special rules for the AI (e.g., 'Joe always speaks in rhymes')" value={scenario.customInstructions} onChange={v => updateScenario({ customInstructions: v })} />
             <p className="text-[11px] text-zinc-600 mt-1">Sent to the AI with every reply. The site's global rules still take priority.</p>
           </div>
@@ -677,12 +724,18 @@ export const CreateScenario: React.FC = () => {
                   <button onClick={() => updateScenario({ characters: scenario.characters.filter(c => c.id !== char.id) })} className="text-zinc-600 hover:text-red-500 p-2" title="Remove character" aria-label="Remove character"><Trash2 size={18} /></button>
                 </div>
                 <div>
-                  <label className="text-[10px] font-black text-zinc-500 uppercase mb-1 block">Role & Appearance</label>
+                  {labelRow('Role & Appearance', <AIEnhanceButton field="characterDescription" label={`${char.name || 'Character'}: Role & Appearance`} value={char.description || ''} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, description: v } : c) })} context={enhanceContext} />, undefined, true)}
                   <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Who they are and what they look like" value={char.description} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, description: v } : c) })} />
                 </div>
                 <div>
-                  <label className="text-[10px] font-black text-zinc-500 uppercase mb-1 block">Personality & Mannerisms</label>
+                  {labelRow('Personality & Mannerisms', <AIEnhanceButton field="characterPersonality" label={`${char.name || 'Character'}: Personality`} value={char.personality || ''} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, personality: v } : c) })} context={enhanceContext} />, undefined, true)}
                   <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="How they think, speak and behave" value={char.personality} onChange={v => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, personality: v } : c) })} />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3 items-end">
+                  <TraitsInput traits={char.traits} onChange={traits => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, traits } : c) })} />
+                  <label className="flex items-center gap-2 text-[10px] font-black text-zinc-500 uppercase cursor-pointer pb-2" title="The AI still plays them; other players do not see them unless you allow customization">
+                    <input type="checkbox" checked={!!char.hidden} onChange={e => updateScenario({ characters: scenario.characters.map(c => c.id === char.id ? { ...c, hidden: e.target.checked } : c) })} /> Hidden from players
+                  </label>
                 </div>
               </div>
             ))}
@@ -698,9 +751,19 @@ export const CreateScenario: React.FC = () => {
         <section id="editor-lore" className={sectionClass}>
           <div className="flex items-center justify-between gap-4">
             <h2 className="text-xl font-bold flex items-center gap-3"><Brain className="text-indigo-400" /> World Lore</h2>
-            <button onClick={addLorePiece} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors">
-              <Plus size={16} /> Add Lore
-            </button>
+            <div className="flex flex-wrap justify-end gap-2">
+              {scenario.lorePieces.length > 0 && (
+                <button onClick={() => setShowLoreFix(true)} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors" title="Find and fix lore that never reaches the AI">
+                  <Stethoscope size={16} /> Check &amp; Fix
+                </button>
+              )}
+              <button onClick={() => setShowLoreSuggest(true)} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors" title="Let the AI propose lore cards from your story">
+                <Sparkles size={16} /> Suggest Lore
+              </button>
+              <button onClick={addLorePiece} className="bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 px-4 py-1.5 rounded-xl text-xs font-black flex items-center gap-2 hover:bg-indigo-600/20 transition-colors">
+                <Plus size={16} /> Add Lore
+              </button>
+            </div>
           </div>
           <p className="text-xs text-zinc-500">
             "Always" pieces are sent every turn (up to 10). Triggered pieces are sent when a trigger word appears as a
@@ -713,6 +776,28 @@ export const CreateScenario: React.FC = () => {
                   <input aria-label="Lore title" placeholder="Lore title" className="bg-transparent text-lg font-bold text-white outline-none focus:border-b border-indigo-500 flex-1 min-w-0" value={piece.title} onChange={e => { updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, title: e.target.value } : p) }); }} />
                   <button onClick={() => removeLorePiece(piece.id)} className="text-zinc-600 hover:text-red-500 p-2" title="Remove lore" aria-label="Remove lore"><Trash2 size={16} /></button>
                 </div>
+                {loreBadges(piece).length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 -mt-2">
+                    {loreBadges(piece).map(b => (
+                      <button key={b} onClick={() => setShowLoreFix(true)} className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/30 hover:bg-amber-500/20" title="Open Check & Fix">
+                        {b}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="flex items-end gap-3">
+                  <div className="w-14 h-14 flex-shrink-0 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center relative overflow-hidden group/lore">
+                    {piece.avatar ? <img src={piece.avatar} className="w-full h-full object-cover" alt="" /> : <ImageIcon size={18} className="text-zinc-700" />}
+                    <label className="absolute inset-0 bg-black/60 opacity-0 group-hover/lore:opacity-100 group-focus-within/lore:opacity-100 pointer-coarse:opacity-100 flex items-center justify-center cursor-pointer transition-opacity" title="Picture">
+                      <Upload size={14} className="text-white" />
+                      <input type="file" accept="image/*" className="hidden" aria-label="Lore picture" onChange={async (e) => { const file = e.target.files?.[0]; if (file) { const base64 = await fileToBase64(file); updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, avatar: base64 } : p) }); } }} />
+                    </label>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <TraitsInput traits={piece.traits} onChange={traits => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, traits } : p) })} />
+                  </div>
+                </div>
+                {labelRow('Content', <AIEnhanceButton field="loreContent" label={piece.title || 'Lore'} value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} context={enhanceContext} />, undefined, true)}
                 <AutoTextarea minRows={3} className="w-full bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-sm text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500" placeholder="Describe this location, object, or event..." value={piece.content} onChange={v => updateScenario({ lorePieces: scenario.lorePieces.map(p => p.id === piece.id ? { ...p, content: v } : p) })} />
                 {/* How this lore reaches the AI: one mode instead of three checkboxes */}
                 <div className="flex flex-wrap items-end gap-4">
@@ -876,6 +961,23 @@ export const CreateScenario: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Lore health for this draft */}
+      <LoreFixModal
+        isOpen={showLoreFix}
+        onClose={() => { setShowLoreFix(false); setLoreFixAuto(false); }}
+        scenario={scenario}
+        onChange={changes => updateScenario(changes)}
+        autoAsk={loreFixAuto}
+      />
+
+      {/* AI lore suggestions for this draft */}
+      <LoreSuggestModal
+        isOpen={showLoreSuggest}
+        onClose={() => setShowLoreSuggest(false)}
+        getDraft={loreSuggestDraft}
+        onAdd={addSuggestedLore}
+      />
 
       {/* AI Scenario Generator Modal */}
       <AIGeneratorModal

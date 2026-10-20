@@ -175,6 +175,20 @@ function initTables() {
   addColumnIfMissing('messages', 'current_version_index', 'INTEGER DEFAULT 0');
   // Time of the last message a memory summarises (rolling memories)
   addColumnIfMissing('memories', 'covered_until', 'INTEGER DEFAULT NULL');
+  // Memory details shown to players: first message covered, how it was made, last edit
+  addColumnIfMissing('memories', 'covered_from', 'INTEGER DEFAULT NULL');
+  addColumnIfMissing('memories', 'source', "TEXT DEFAULT ''");
+  addColumnIfMissing('memories', 'edited_at', 'INTEGER DEFAULT NULL');
+  // What the AI was given for a reply (memory ids, visible lore titles, omitted count)
+  addColumnIfMissing('messages', 'context_info', "TEXT DEFAULT ''");
+  // Imported from Fictionlab: one-line lore summaries, traits, start location,
+  // hidden characters, and the source id used to match re-imports
+  addColumnIfMissing('lore_pieces', 'description', "TEXT DEFAULT ''");
+  addColumnIfMissing('lore_pieces', 'traits', "TEXT DEFAULT '[]'");
+  addColumnIfMissing('lore_pieces', 'is_start_location', 'INTEGER DEFAULT 0');
+  addColumnIfMissing('characters', 'traits', "TEXT DEFAULT '[]'");
+  addColumnIfMissing('characters', 'hidden', 'INTEGER DEFAULT 0');
+  addColumnIfMissing('scenarios', 'source_id', "TEXT DEFAULT ''");
 
   // ── Indexes for the lookups every page makes ──
   db.exec(`
@@ -395,8 +409,22 @@ function scenarioToCamelCase(s) {
     customInstructions: s.custom_instructions,
     settings: (() => { try { return JSON.parse(s.settings); } catch { return {}; } })(),
     createdAt: s.created_at,
+    sourceId: s.source_id || undefined,
   };
 }
+
+/** A JSON list of strings from a text column ([] for anything else) */
+function stringList(value) {
+  try {
+    const v = JSON.parse(value || '[]');
+    return Array.isArray(v) ? v.filter(x => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Traits as stored: trimmed strings, at most 20 */
+const cleanTraits = (v) => JSON.stringify((Array.isArray(v) ? v : []).filter(x => typeof x === 'string').map(x => x.trim().slice(0, 60)).filter(Boolean).slice(0, 20));
 
 /** Columns needed for scenario list cards (excludes heavy content fields) */
 const SCENARIO_LIST_COLUMNS = `
@@ -521,6 +549,8 @@ export function getScenarioById(id) {
     ...c,
     avatar: c.avatar_path ? `/api/images/${c.avatar_path.replace(/\\/g, '/')}` : (c.avatar || ''),
     avatarPath: c.avatar_path || '',
+    traits: stringList(c.traits),
+    hidden: !!c.hidden,
   }));
   scenario.lorePieces = lorePieces.map(p => ({
     ...p,
@@ -532,7 +562,10 @@ export function getScenarioById(id) {
     hidden: !!p.hidden,
     triggers: JSON.parse(p.triggers || '[]'),
     linkedPieces: JSON.parse(p.linked_pieces || '[]'),
-    weight: p.weight || 100,
+    weight: p.weight ?? 100,
+    description: p.description || '',
+    traits: stringList(p.traits),
+    isStartLocation: !!p.is_start_location,
   }));
   return scenario;
 }
@@ -581,18 +614,19 @@ export function saveScenarioTransaction(scenario) {
     // If image is a plain URL (e.g., Unsplash), keep it in image field — no file to save
 
     if (existing) {
-      db.prepare(`UPDATE scenarios SET name=?, description=?, image=?, image_path=?, tags=?, backstory=?, introduction=?, greeting_message=?, custom_instructions=?, settings=?, creator_name=? WHERE id=?`)
+      db.prepare(`UPDATE scenarios SET name=?, description=?, image=?, image_path=?, tags=?, backstory=?, introduction=?, greeting_message=?, custom_instructions=?, settings=?, creator_name=?, source_id=COALESCE(?, source_id) WHERE id=?`)
         .run(
           scenario.name, scenario.description || '', legacyImageValue(scenario.image, imagePath), imagePath, tagsJson,
           scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '', scenario.customInstructions || '',
-          settingsJson, scenario.creatorName || '', scenario.id
+          settingsJson, scenario.creatorName || '', typeof scenario.sourceId === 'string' ? scenario.sourceId.slice(0, 100) : null, scenario.id
         );
     } else {
-      db.prepare(`INSERT INTO scenarios (id, user_id, creator_name, name, description, image, image_path, tags, backstory, introduction, greeting_message, custom_instructions, settings, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      db.prepare(`INSERT INTO scenarios (id, user_id, creator_name, name, description, image, image_path, tags, backstory, introduction, greeting_message, custom_instructions, settings, created_at, source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(
           scenario.id, scenario.userId, scenario.creatorName || '', scenario.name, scenario.description || '',
           legacyImageValue(scenario.image, imagePath), imagePath, tagsJson, scenario.backstory || '', extractIntroImages(scenario.id, scenario.introduction), scenario.greetingMessage || '',
-          scenario.customInstructions || '', settingsJson, scenario.createdAt || Date.now()
+          scenario.customInstructions || '', settingsJson, scenario.createdAt || Date.now(),
+          typeof scenario.sourceId === 'string' ? scenario.sourceId.slice(0, 100) : ''
         );
     }
 
@@ -605,7 +639,7 @@ export function saveScenarioTransaction(scenario) {
     if (scenario.characters && scenario.characters.length > 0) {
       // Plain INSERT: this scenario's rows were just deleted, so an id that still
       // exists belongs to another scenario (or is duplicated) and must not be replaced
-      const insertChar = db.prepare(`INSERT INTO characters (id, scenario_id, name, description, personality, avatar, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      const insertChar = db.prepare(`INSERT INTO characters (id, scenario_id, name, description, personality, avatar, avatar_path, traits, hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const charTaken = db.prepare(`SELECT 1 FROM characters WHERE id = ?`);
       for (const c of scenario.characters) {
         if (charTaken.get(c.id)) throw new DataError('Character id conflicts with an existing character', 409);
@@ -616,14 +650,14 @@ export function saveScenarioTransaction(scenario) {
         } else if (c.avatar && c.avatar.startsWith('/api/images/')) {
           charAvatarPath = adoptImage(c.avatar, 'characters', c.id) || '';
         }
-        insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', legacyImageValue(c.avatar, charAvatarPath), charAvatarPath);
+        insertChar.run(c.id, scenario.id, c.name, c.description || '', c.personality || '', legacyImageValue(c.avatar, charAvatarPath), charAvatarPath, cleanTraits(c.traits), c.hidden ? 1 : 0);
       }
     }
 
     // Replace all lore pieces for this scenario
     db.prepare(`DELETE FROM lore_pieces WHERE scenario_id = ?`).run(scenario.id);
     if (scenario.lorePieces && scenario.lorePieces.length > 0) {
-      const insertLore = db.prepare(`INSERT INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden, avatar_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insertLore = db.prepare(`INSERT INTO lore_pieces (id, scenario_id, type, title, content, weight, pinned, smart_activation, triggers, linked_pieces, playable, hidden, avatar_path, description, traits, is_start_location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const loreTaken = db.prepare(`SELECT 1 FROM lore_pieces WHERE id = ?`);
       for (const p of scenario.lorePieces) {
         if (loreTaken.get(p.id)) throw new DataError('Lore id conflicts with an existing lore piece', 409);
@@ -635,10 +669,12 @@ export function saveScenarioTransaction(scenario) {
           loreAvatarPath = adoptImage(p.avatar, 'lore-pieces', p.id) || '';
         }
         insertLore.run(
-          p.id, scenario.id, p.type || 'other', p.title || '', p.content || '', p.weight || 100,
+          p.id, scenario.id, String(p.type || 'other').slice(0, 40), p.title || '', p.content || '',
+          Number.isFinite(Number(p.weight)) ? Math.round(Number(p.weight)) : 100,
           p.pinned ? 1 : 0, p.smartActivation ? 1 : 0,
           JSON.stringify(p.triggers || []), JSON.stringify(p.linkedPieces || []),
-          p.playable ? 1 : 0, p.hidden ? 1 : 0, loreAvatarPath
+          p.playable ? 1 : 0, p.hidden ? 1 : 0, loreAvatarPath,
+          typeof p.description === 'string' ? p.description.slice(0, 1000) : '', cleanTraits(p.traits), p.isStartLocation ? 1 : 0
         );
       }
     }
@@ -813,6 +849,7 @@ function enrichChat(chat) {
       characterName: m.character_name || undefined,
       versions: parseVersions(m.versions),
       currentVersionIndex: m.current_version_index ?? 0,
+      contextInfo: parseContextInfo(m.context_info),
     })),
     memories: memories.map(m => ({
       id: m.id,
@@ -820,8 +857,73 @@ function enrichChat(chat) {
       pinned: !!m.pinned,
       timestamp: m.timestamp,
       coveredUntil: m.covered_until || undefined,
+      coveredFrom: m.covered_from || undefined,
+      source: MEMORY_SOURCES.has(m.source) ? m.source : undefined,
+      editedAt: m.edited_at || undefined,
     })),
   };
+}
+
+/** How a memory was made: by the app after a reply, on request, or written by the player */
+const MEMORY_SOURCES = new Set(['auto', 'manual', 'user']);
+
+/**
+ * What the AI was given for a reply, as stored with the message:
+ * { memoryIds: string[], lore: string[], hiddenLore: number, listed: number, omitted: number }.
+ * Anything else becomes undefined (or is trimmed to these fields).
+ */
+function parseContextInfo(value) {
+  let v = value;
+  if (typeof v === 'string') {
+    if (!v) return undefined;
+    try { v = JSON.parse(v); } catch { return undefined; }
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const strings = (a, n) => (Array.isArray(a) ? a.filter(x => typeof x === 'string').slice(0, n).map(x => x.slice(0, 200)) : []);
+  const count = (x) => (Number.isFinite(Number(x)) ? Math.max(0, Math.round(Number(x))) : 0);
+  return { memoryIds: strings(v.memoryIds, 200), lore: strings(v.lore, 100), hiddenLore: count(v.hiddenLore), listed: count(v.listed), omitted: count(v.omitted) };
+}
+
+/** Live scenarios with the fields used to match re-imported files */
+export function listScenarioMatchKeys() {
+  return db.prepare(`SELECT id, name, source_id AS sourceId, user_id AS userId FROM scenarios WHERE deleted_at IS NULL`).all();
+}
+
+/**
+ * Writes a consistent copy of the database next to it
+ * ("<database file>.backup-<timestamp>") and returns its file name.
+ */
+/** The database file's path */
+export const databasePath = () => DB_PATH;
+
+/** Writes a consistent copy of the live database to a file (SQLite online backup) */
+export async function snapshotDatabase(file) {
+  await getDb().backup(file);
+}
+
+/** Closes the database; the next getDb() opens it again (used by restore) */
+export function closeDb() {
+  if (db) {
+    db.close();
+    db = undefined;
+  }
+}
+
+/** Row counts shown in a backup's description */
+export function systemCounts() {
+  const count = (t) => getDb().prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
+  return { users: count('users'), scenarios: count('scenarios'), chats: count('chats') };
+}
+
+export async function backupDatabase() {
+  const file = `${db.name}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  await db.backup(file);
+  return file;
+}
+
+/** Number of pinned memories a chat has stored (for the pinned cap) */
+export function countPinnedMemories(chatId) {
+  return db.prepare(`SELECT COUNT(*) AS n FROM memories WHERE chat_id = ? AND pinned = 1`).get(chatId).n;
 }
 
 /**
@@ -858,14 +960,16 @@ export function saveChatTransaction(chat) {
     // Replace all messages for this chat
     if (chat.messages) {
       db.prepare(`DELETE FROM messages WHERE chat_id = ?`).run(chat.id);
-      const insertMsg = db.prepare(`INSERT INTO messages (id, chat_id, role, content, timestamp, character_name, versions, current_version_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insertMsg = db.prepare(`INSERT INTO messages (id, chat_id, role, content, timestamp, character_name, versions, current_version_index, context_info) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const m of chat.messages) {
         const versions = parseVersions(m.versions);
         const index = Number.isInteger(m.currentVersionIndex) ? m.currentVersionIndex : 0;
+        const context = m.role === 'assistant' ? parseContextInfo(m.contextInfo) : undefined;
         insertMsg.run(
           m.id, chat.id, m.role, m.content || '', m.timestamp || Date.now(),
           m.characterName || '', JSON.stringify(versions),
-          Math.min(Math.max(index, 0), Math.max(versions.length - 1, 0))
+          Math.min(Math.max(index, 0), Math.max(versions.length - 1, 0)),
+          context ? JSON.stringify(context) : ''
         );
       }
     }
@@ -873,10 +977,12 @@ export function saveChatTransaction(chat) {
     // Replace all memories for this chat
     if (chat.memories) {
       db.prepare(`DELETE FROM memories WHERE chat_id = ?`).run(chat.id);
-      const insertMem = db.prepare(`INSERT INTO memories (id, chat_id, content, pinned, timestamp, covered_until) VALUES (?, ?, ?, ?, ?, ?)`);
+      const insertMem = db.prepare(`INSERT INTO memories (id, chat_id, content, pinned, timestamp, covered_until, covered_from, source, edited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const time = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
       for (const m of chat.memories) {
         insertMem.run(m.id, chat.id, m.content || '', m.pinned ? 1 : 0, m.timestamp || Date.now(),
-          Number.isFinite(Number(m.coveredUntil)) ? Number(m.coveredUntil) : null);
+          time(m.coveredUntil), time(m.coveredFrom),
+          MEMORY_SOURCES.has(m.source) ? m.source : '', time(m.editedAt));
       }
     }
   });

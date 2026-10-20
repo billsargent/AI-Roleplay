@@ -1,5 +1,49 @@
 # Changelog
 
+## [v2.2.0] - 2026-10-20
+
+Fictionlab import and lore repair, AI authoring tools, memories you can shape, and backup and restore (#30, #41, #48).
+
+### Added
+- **Backup and restore** (#50): Admin › System › Backups makes one file with the database and every picture, and can download, upload, delete and restore backups. A restore checks the file first, makes a backup of the current state, pauses other requests for the few seconds of the swap, and rolls back if anything fails; you stay logged in. **Nightly backups** run at a chosen hour (default 03:00 server time) and keep the last 7; backups made by hand or uploaded are never deleted automatically. Settings: `BACKUP_DIR`, `MAX_BACKUP_UPLOAD`, `REQUEST_TIMEOUT_MS`.
+- **Importing a Fictionlab file asks the AI straight away** (#49) for trigger words for cards that have none, and shows the suggestions for review before anything is saved.
+- **LLM options with explanations** (#34): every LLM Config setting now says what it does and what to choose.
+  - **Stop sequences**: a reply stops when the AI starts a line as the player (on by default), plus up to 16 custom stops (`\n` and `{{user}}` supported).
+  - **Background model and temperature** for memory summaries and the scenario generator (default: the chat model, 0.5).
+- **Suggest Lore** in the scenario editor (#35): the AI reads the draft (saved or not) and proposes up to 8 lore cards with trigger words; you tick, adjust and add the ones you want. Uses JSON output mode and the background model.
+- The AI scenario generator asks DeepSeek for JSON output, so its replies parse reliably.
+- **Memories you can see and shape** (#36):
+  - A divider appears in the chat where each memory was saved; click it to read the memory.
+  - A ring in the chat header fills up toward the next memory.
+  - The Memories panel shows the story so far: pinned "key facts" (up to 10 by default, admin setting "Max Pinned Memories") and every memory as a chapter with the messages it covers. Memories can be edited, pinned and deleted, you can write your own or make one now, and "Jump to" scrolls to that part of the chat.
+  - Under each AI reply, a small line shows what the AI was given: how many memories and which lore (hidden lore only as a count), and how many older messages were summarised.
+
+- **AI Enhance** (#37): an Enhance button beside the editor's text fields fixes spelling, grammar and clarity while keeping your wording, facts, names and `{{user}}`; "Also make it more vivid" is opt-in. You see every change word by word and nothing is replaced until you accept; Undo puts the old text back for a minute.
+
+- **Fictionlab import rewritten** (#42): one server-side parser reads every export shape (top level, wrapped in `scenario`/`data`, and saved sessions) and both old and new field names. Lore keeps its type, one-line description, traits, start location, pictures and working links; Fictionlab weights 1-5 become 20-100; `{{char}}` is replaced with the character name; very old story cards become lore; rule cards that could never trigger move into Custom AI Instructions; character sub-pieces ("Name: ...") stay lore instead of becoming always-sent cast members. Chat exports are recognised and refused with a clear message.
+- **Re-import from Fictionlab files in place** (#43): "Update from file" in the editor, and Admin › System › Fictionlab Re-import for many files at once (dry run with matching by Fictionlab id or name, then apply after a database backup). The scenario id, name, settings, pictures and chats are kept; lore, cast, backstory, greeting, instructions and introduction come from the file. A rehearsal on a copy of real data updated 129 scenarios with no failures and kept every chat attached.
+- **Lore overview** (#44): each reply also lists the scenario's other lore pieces by title and a one-line summary (median about 70 tokens, at most about 1,500), so the AI knows what exists before a trigger word comes up. Admin switch under Context & Lore; the context line under replies counts them.
+- **Lore named in the instructions is always sent** (#44): when a scenario's instructions say e.g. "Follow The Deal, Escalation and If She Refuses", those pieces are sent in full every turn (within Max Always-on Lore). On real data this affected 49 scenarios.
+- **Check & Fix lore** (#45): in the editor, finds lore that never reaches the AI or was imported badly, applies the safe fixes (broken links, Fictionlab priorities, empty cards, rule cards into the instructions, `{{char}}`, trigger words), lists what needs a decision (cast duplicates, very long cards with "Condense with AI", too many always-on cards), and asks the AI for trigger words, links and a one-line summary for cards that are never sent; you review each suggestion. Lore cards show badges such as "Never sent" and "Broken link". Admin › System › Lore Health checks every scenario and applies the safe fixes to all of them after a backup.
+- **Scene bar** (#46): when the AI starts its replies with a scene line such as "[Day 1 ✦ Monday 6:42 PM ✦ Gym Storage Room]" (common in Fictionlab scenarios, in many formats), the chat shows the current place, day and time under the header, and a small divider where the place changes. Before the first scene line it shows the scenario's start location.
+- **Traits and lore pictures** (#47): characters and lore show their traits as chips (scenario page, chat panels, editor, where they can be edited) and lore cards can have a picture. The chat's Scenario Info lists the characters. Characters can be hidden from other players like lore.
+- Scenarios remember the Fictionlab id they came from (for re-imports); characters can be hidden from other players like lore.
+
+### Changed
+- The default temperature is 1.0 (was 1.3); the help text recommends 0.8–1.2 for roleplay.
+- **Thinking is off by default.** An install that never chose a thinking setting now has it off, so chat replies are not cut short by reasoning that shares their token budget. It can still be turned on in LLM Config.
+- The "duplicates the cast" lore warning only appears when the lore card has text the cast member lacks (Fictionlab stores each character both ways).
+- The site works over plain HTTP from other machines on a home network. The HTTPS-only browser headers (upgrade insecure requests, HSTS) are sent only with `FORCE_HTTPS=true`.
+
+### Security
+- `GET /api/system/llm-settings` sent the global instructions, sampling settings and model to every logged-in user. It now returns only the site name and memory limits.
+
+### Fixed
+- The penalty slider labels were reversed for negative values (they called -2 "less repetitive"; negative values make the AI repeat itself more).
+- The AI tools (lore fixes and suggestions, Enhance, memories, the scenario generator) were limited by the chat reply length and could spend their whole budget on reasoning, so lore fixes reported "0 of N" and Enhance could cut text short. They now size their own answer, always run with thinking off, and report an empty or cut-off answer as an error.
+- Re-importing an export that has no lore (older Fictionlab files) keeps the scenario's existing lore; an export with nothing in it is refused instead of emptying the scenario.
+- Trigger words wrapped in quotes or backticks, or with trailing spaces, are cleaned up by Check & Fix and saved trimmed.
+
 ## [v2.1.0] - 2026-10-15
 
 Chat replies you can steer, linked lore, and a more honest scenario editor (#14, #15, #18, #19, #23, #24, #25, #39).

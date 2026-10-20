@@ -23,12 +23,16 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   Send, Settings as SettingsIcon, Brain, Info,
   ChevronLeft, MessageSquare, RefreshCw, Trash2,
-  X, Pin, User, Edit2, FileDown, Play, Square, RotateCcw, ArrowDown,
-  ChevronRight, RefreshCcw, Undo2
+  X, User, Edit2, FileDown, Play, Square, RotateCcw, ArrowDown,
+  ChevronRight, RefreshCcw, Undo2, MapPin, CalendarDays, Clock
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { deepseek, ReplyMode, ReplyResult } from '../services/deepseek';
-import { Chat, Message, Scenario, Persona } from '../types';
+import { Chat, Message, Scenario, Persona, Memory, ReplyContext } from '../types';
+import { MemoryPanel } from '../components/MemoryPanel';
+import { chapters, messagesSinceLastMemory } from '../utils/memories';
+import { parseSceneHeader, latestScene } from '../utils/scene';
+import { TraitChips } from '../components/Traits';
 import { v4 as uuidv4 } from 'uuid';
 import { format } from 'date-fns';
 import { useNotifications } from '../utils/notifications';
@@ -88,6 +92,15 @@ export const ChatPage: React.FC = () => {
   const [scenarioDeleted, setScenarioDeleted] = useState(false);
   /** Error from the last AI request, shown with a Retry button */
   const [lastError, setLastError] = useState<string | null>(null);
+  /** Memory limits from the server */
+  const [memoryInterval, setMemoryInterval] = useState(25);
+  const [memoryPinnedMax, setMemoryPinnedMax] = useState(10);
+  /** Which tab the Memories & Lore panel opens on */
+  const [matrixTab, setMatrixTab] = useState<'lore' | 'memories'>('memories');
+  /** Memory markers in the chat that are expanded */
+  const [openMarkers, setOpenMarkers] = useState<Set<string>>(new Set());
+  /** AI message whose "what the AI was given" details are open */
+  const [openContextId, setOpenContextId] = useState<string | null>(null);
   /** Id of the message the AI is writing into (shows the typing dots there) */
   const [writingId, setWritingId] = useState<string | null>(null);
   /** Id of the AI message that stopped at the length limit (offer Continue) */
@@ -159,6 +172,8 @@ export const ChatPage: React.FC = () => {
       try {
         const llmSettings = await apiService.getLlmSettings();
         window.__memoryMaxCount = llmSettings.memoryMaxCount ? parseInt(llmSettings.memoryMaxCount) : 50;
+        if (Number(llmSettings.memoryGenerateInterval) > 0) setMemoryInterval(Number(llmSettings.memoryGenerateInterval));
+        if (llmSettings.memoryPinnedMax !== undefined) setMemoryPinnedMax(Number(llmSettings.memoryPinnedMax) || 0);
       } catch {
         // Use defaults
         window.__memoryMaxCount = 50;
@@ -349,6 +364,8 @@ export const ChatPage: React.FC = () => {
     setWritingId(mode === 'regenerate' || mode === 'continue' ? target.id : replyId);
     let partial = '';
     let continueMode: ReplyResult['continueMode'];
+    /** What the AI was given (known when the reply has finished) */
+    let replyContext: ReplyContext | undefined;
 
     /** The conversation with `text` applied for this mode */
     const withText = (text: string): Chat => {
@@ -357,7 +374,7 @@ export const ChatPage: React.FC = () => {
       if (mode === 'regenerate') {
         const versions = target.versions?.length ? target.versions : [target.content];
         messages = base.messages.map(m => m.id === target.id
-          ? { ...m, content: text, versions: [...versions, text], currentVersionIndex: versions.length, timestamp: Date.now() }
+          ? { ...m, content: text, versions: [...versions, text], currentVersionIndex: versions.length, timestamp: Date.now(), contextInfo: replyContext ?? m.contextInfo }
           : m);
       } else if (mode === 'continue') {
         const joined = joinContinuation(target.content, text, continueMode);
@@ -365,10 +382,10 @@ export const ChatPage: React.FC = () => {
           if (m.id !== target.id) return m;
           const versions = m.versions?.length ? [...m.versions] : undefined;
           if (versions) versions[Math.min(m.currentVersionIndex ?? 0, versions.length - 1)] = joined;
-          return { ...m, content: joined, ...(versions ? { versions } : {}) };
+          return { ...m, content: joined, ...(versions ? { versions } : {}), contextInfo: replyContext ?? m.contextInfo };
         });
       } else {
-        messages = [...base.messages, { id: replyId, role: 'assistant', content: text, timestamp: Date.now() }];
+        messages = [...base.messages, { id: replyId, role: 'assistant', content: text, timestamp: Date.now(), ...(replyContext ? { contextInfo: replyContext } : {}) }];
       }
       return { ...latest, messages };
     };
@@ -386,6 +403,7 @@ export const ChatPage: React.FC = () => {
         result = await deepseek.chat(base.id, controller.signal, mode);
       }
       continueMode = result.continueMode;
+      replyContext = result.context;
 
       const final = withText(result.content);
       if (isCurrent()) {
@@ -539,6 +557,48 @@ export const ChatPage: React.FC = () => {
     }
   };
 
+  /**
+   * Saves a new memory list (edit, pin, delete, add). Returns false and
+   * keeps the old list if the server refuses it (e.g. too many pins).
+   */
+  const saveMemories = async (memories: Memory[]): Promise<boolean> => {
+    const current = chatRef.current;
+    if (!current || isReadOnly) return false;
+    const next = { ...current, memories };
+    commitChat(next);
+    try {
+      await apiService.saveChat(next);
+      return true;
+    } catch (err: any) {
+      const latest = chatRef.current;
+      if (latest) commitChat({ ...latest, memories: current.memories });
+      showToast(err?.response?.data?.error || 'Could not save the memories', 'error');
+      return false;
+    }
+  };
+
+  /** Writes a memory now (covering everything since the previous one) */
+  const generateMemoryNow = async () => {
+    const current = chatRef.current;
+    if (!current || isReadOnly) return;
+    const memory = await deepseek.generateMemory(current.id);
+    if (!memory) {
+      showToast('Could not write a memory right now', 'error');
+      return;
+    }
+    const latest = chatRef.current || current;
+    if (await saveMemories(trimMemories([...latest.memories, memory], window.__memoryMaxCount || 50))) {
+      showToast('Memory saved', 'success');
+    }
+  };
+
+  /** Closes the panel and scrolls the chat to a message */
+  const jumpToMessage = (messageId: string) => {
+    setOverlay('none');
+    atBottomRef.current = false;
+    requestAnimationFrame(() => document.getElementById(`msg-${messageId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  };
+
   // ── Render states ──
   if (loading) return <div className="p-8 text-white">Loading...</div>;
   if (error) return (
@@ -649,6 +709,28 @@ export const ChatPage: React.FC = () => {
     );
   };
 
+  /** Scene: the latest scene line the AI wrote, and where the place changed */
+  const currentScene = latestScene(chat.messages);
+  const startPlace = scenario?.lorePieces.find(p => p.isStartLocation)?.title || '';
+  const placeChanges = new Map<string, string>();
+  {
+    let previous = '';
+    for (const m of chat.messages) {
+      if (m.role !== 'assistant') continue;
+      const place = parseSceneHeader(m.content)?.place;
+      if (!place) continue;
+      if (previous && place.toLowerCase() !== previous.toLowerCase()) placeChanges.set(m.id, place);
+      previous = place;
+    }
+  }
+
+  /** Memory markers: each memory follows the last message it covers */
+  const markersByMessage = new Map<string, ReturnType<typeof chapters>>();
+  for (const c of chapters(chat.memories, chat.messages)) {
+    if (!c.anchorMessageId) continue;
+    markersByMessage.set(c.anchorMessageId, [...(markersByMessage.get(c.anchorMessageId) || []), c]);
+  }
+
   /** Opens the side panel on one of its tabs */
   const openPanel = (tab: 'info' | 'matrix' | 'settings') => {
     setOverlayTab(tab);
@@ -677,15 +759,29 @@ export const ChatPage: React.FC = () => {
             </button>
           )}
           {scenario && (
-            <button onClick={() => openPanel('matrix')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Memories & Lore" aria-label="Memories and Lore">
-              <Brain size={18} />
-            </button>
+            <MemoryRing
+              count={messagesSinceLastMemory(chat.memories, chat.messages)}
+              interval={memoryInterval}
+              memories={chat.memories.length}
+              onClick={() => { setMatrixTab('memories'); openPanel('matrix'); }}
+            />
           )}
           <button onClick={() => openPanel('settings')} className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors" title="Chat Settings" aria-label="Chat Settings">
             <SettingsIcon size={18} />
           </button>
         </div>
       </header>
+
+      {/* Scene bar: where and when the story is (from the AI's scene line, else the start location) */}
+      {(currentScene || startPlace) && (
+        <div className="flex-shrink-0 border-b border-zinc-800/60 bg-zinc-900/40" aria-label="Current scene">
+          <div className="mx-auto w-full max-w-3xl px-4 sm:px-6 py-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zinc-400">
+            {(currentScene?.place || startPlace) && <span className="flex items-center gap-1.5 font-bold text-zinc-200"><MapPin size={12} className="text-indigo-400" /> {currentScene?.place || startPlace}</span>}
+            {currentScene?.day && <span className="flex items-center gap-1.5"><CalendarDays size={12} /> {currentScene.day}</span>}
+            {currentScene?.time && <span className="flex items-center gap-1.5"><Clock size={12} /> {currentScene.time}</span>}
+          </div>
+        </div>
+      )}
 
       {/* Read-Only Banner (shown when admin views another user's chat) */}
       {isReadOnly && !scenarioDeleted && (
@@ -729,7 +825,14 @@ export const ChatPage: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <div key={m.id} className={`group flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+              <div key={m.id} id={`msg-${m.id}`} className={`group flex flex-col scroll-mt-4 ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
+                {placeChanges.has(m.id) && (
+                  <div className="self-stretch flex items-center gap-3 mb-4 text-[11px] font-bold text-zinc-500" role="separator">
+                    <span className="flex-1 h-px bg-zinc-800" />
+                    <span className="flex items-center gap-1.5"><MapPin size={12} /> {placeChanges.get(m.id)}</span>
+                    <span className="flex-1 h-px bg-zinc-800" />
+                  </div>
+                )}
                 {/* Message header: avatar, name, timestamp */}
                 <div className={`flex items-center gap-2 mb-1.5 px-1 ${m.role === 'user' ? 'flex-row-reverse' : ''}`}>
                   <Avatar
@@ -769,7 +872,25 @@ export const ChatPage: React.FC = () => {
                   {isTyping && m.id === writingId && <TypingDots className={m.content ? 'mt-2' : 'py-1'} />}
                 </div>
 
+                {m.role === 'assistant' && m.contextInfo && !(isTyping && m.id === writingId) && (
+                  <ContextChip
+                    context={m.contextInfo}
+                    memories={chat.memories}
+                    open={openContextId === m.id}
+                    onToggle={() => setOpenContextId(openContextId === m.id ? null : m.id)}
+                  />
+                )}
                 {messageActionRow(m, m.role === 'assistant' && idx === chat.messages.length - 1)}
+                {(markersByMessage.get(m.id) || []).map(c => (
+                  <MemoryMarker
+                    key={c.memory.id}
+                    chapter={c.number}
+                    memory={c.memory}
+                    open={openMarkers.has(c.memory.id)}
+                    onToggle={() => setOpenMarkers(prev => { const n = new Set(prev); if (n.has(c.memory.id)) n.delete(c.memory.id); else n.add(c.memory.id); return n; })}
+                    onOpenPanel={() => { setMatrixTab('memories'); openPanel('matrix'); }}
+                  />
+                ))}
               </div>
             ))}
 
@@ -883,13 +1004,13 @@ export const ChatPage: React.FC = () => {
           ref={overlayRef}
           role="dialog"
           aria-modal="true"
-          aria-label={overlayTab === 'matrix' ? 'Memory Matrix' : overlayTab === 'settings' ? 'Chat Settings' : 'Scenario Info'}
+          aria-label={overlayTab === 'matrix' ? 'Memories and Lore' : overlayTab === 'settings' ? 'Chat Settings' : 'Scenario Info'}
           className="fixed inset-0 z-50 bg-zinc-950 flex flex-col"
         >
           {/* Overlay header with tab navigation */}
           <div className="flex items-center justify-between p-4 border-b border-zinc-800">
             <div className="flex items-center gap-2">
-              {overlayTab === 'matrix' && <><Brain size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Memory Matrix</span></>}
+              {overlayTab === 'matrix' && <><Brain size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Memories &amp; Lore</span></>}
               {overlayTab === 'settings' && <><SettingsIcon size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Chat Settings</span></>}
               {overlayTab === 'info' && <><Info size={20} className="text-indigo-400" /> <span className="text-lg font-bold text-white">Scenario Info</span></>}
             </div>
@@ -897,7 +1018,7 @@ export const ChatPage: React.FC = () => {
               <button onClick={() => setOverlayTab('info')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'info' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Scenario Info">
                 <Info size={18} />
               </button>
-              <button onClick={() => setOverlayTab('matrix')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'matrix' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Memory Matrix">
+              <button onClick={() => setOverlayTab('matrix')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'matrix' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Memories & Lore">
                 <Brain size={18} />
               </button>
               <button onClick={() => setOverlayTab('settings')} className={`p-2 rounded-lg transition-colors ${overlayTab === 'settings' ? 'bg-zinc-800 text-indigo-400' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Chat Settings">
@@ -912,7 +1033,25 @@ export const ChatPage: React.FC = () => {
           {/* Scrollable overlay content */}
           <div className="flex-1 overflow-y-auto p-6">
             <div className="max-w-xl mx-auto">
-              {overlayTab === 'matrix' && scenario && <MemoryMatrixView chat={chat} scenario={scenario} setChat={setChat} />}
+              {overlayTab === 'matrix' && scenario && (
+                <MemoryMatrixView
+                  scenario={scenario}
+                  tab={matrixTab}
+                  onTab={setMatrixTab}
+                  memories={
+                    <MemoryPanel
+                      memories={chat.memories}
+                      messages={chat.messages}
+                      pinnedMax={memoryPinnedMax}
+                      interval={memoryInterval}
+                      readOnly={isReadOnly}
+                      onSave={saveMemories}
+                      onGenerate={generateMemoryNow}
+                      onJump={jumpToMessage}
+                    />
+                  }
+                />
+              )}
               {overlayTab === 'settings' && <ChatSettingsView chat={chat} setChat={setChat} />}
               {overlayTab === 'info' && scenario && <ScenarioInfoView scenario={scenario} />}
             </div>
@@ -928,15 +1067,18 @@ export const ChatPage: React.FC = () => {
 // ============================================================================
 
 /**
- * Memory Matrix View
- * 
- * Two-tab view showing:
- * - **Lore Database**: All lore pieces from the scenario with type badges and pin status
- * - **AI Memories**: Generated memories with pin/delete controls and manual generation
+ * Memories & Lore View
+ *
+ * Two tabs:
+ * - **Memories**: the MemoryPanel (story so far, key facts, chapters)
+ * - **Lore**: the scenario's lore pieces the player may read
  */
-const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (chat: Chat) => void }> = ({ chat, scenario, setChat }) => {
-  const { showConfirm, showToast } = useNotifications();
-  const [activeTab, setActiveTab] = useState<'lore' | 'memories'>('lore');
+const MemoryMatrixView: React.FC<{
+  scenario: Scenario;
+  tab: 'lore' | 'memories';
+  onTab: (tab: 'lore' | 'memories') => void;
+  memories: React.ReactNode;
+}> = ({ scenario, tab, onTab, memories }) => {
   const [expandedLoreIds, setExpandedLoreIds] = useState<Set<string>>(new Set());
 
   const toggleLoreExpand = (id: string) => {
@@ -951,22 +1093,26 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
   return (
     <div className="space-y-6">
       {/* Tab toggle */}
-      <div className="flex p-1 bg-zinc-900/50 rounded-xl border border-zinc-800/50 max-w-xs mx-auto">
+      <div className="flex p-1 bg-zinc-900/50 rounded-xl border border-zinc-800/50 max-w-xs mx-auto" role="tablist">
         <button
-          onClick={() => setActiveTab('lore')}
-          className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'lore' ? 'bg-zinc-800 text-white shadow' : 'text-zinc-500 hover:text-zinc-300'}`}
+          role="tab"
+          aria-selected={tab === 'memories'}
+          onClick={() => onTab('memories')}
+          className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${tab === 'memories' ? 'bg-zinc-800 text-white shadow' : 'text-zinc-500 hover:text-zinc-300'}`}
         >
-          Lore Database
+          Memories
         </button>
         <button
-          onClick={() => setActiveTab('memories')}
-          className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === 'memories' ? 'bg-zinc-800 text-white shadow' : 'text-zinc-500 hover:text-zinc-300'}`}
+          role="tab"
+          aria-selected={tab === 'lore'}
+          onClick={() => onTab('lore')}
+          className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${tab === 'lore' ? 'bg-zinc-800 text-white shadow' : 'text-zinc-500 hover:text-zinc-300'}`}
         >
-          AI Memories
+          Lore
         </button>
       </div>
 
-      {activeTab === 'lore' ? (
+      {tab === 'memories' ? memories : (
         /* Lore pieces from the scenario */
         <div className="space-y-3">
           {scenario.lorePieces.length === 0 && (
@@ -977,15 +1123,24 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
           {scenario.lorePieces.map(piece => {
             const isExpanded = expandedLoreIds.has(piece.id);
             return (
-              <div key={piece.id} className="bg-zinc-800/50 backdrop-blur-sm border border-zinc-700/50 rounded-xl p-4 hover:border-zinc-600/50 transition-colors">
+              <div key={piece.id} className="bg-zinc-900/60 ring-1 ring-white/5 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
-                  <span className={`text-[10px] uppercase font-black px-2 py-0.5 rounded-full ${piece.type === 'character' ? 'bg-blue-900/50 text-blue-300' : 'bg-zinc-700/50 text-zinc-400'}`}>
+                  <span className="text-[10px] uppercase font-black px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">
                     {piece.type}
                   </span>
-                  {piece.pinned && <Pin size={14} className="text-indigo-400 fill-indigo-400" />}
+                  <span className="text-[10px] text-zinc-500">
+                    {piece.pinned ? 'Always sent' : piece.smartActivation ? `Sent when: ${(piece.triggers || []).join(', ') || '—'}` : 'Not sent'}
+                  </span>
                 </div>
-                <h4 className="font-bold text-white mb-1 text-sm">{piece.title}</h4>
-                <p className={`text-xs text-zinc-500 leading-relaxed ${isExpanded ? '' : 'line-clamp-3'}`}>{piece.content}</p>
+                <div className="flex items-center gap-3 mb-1">
+                  {piece.avatar && <img src={piece.avatar} alt="" className="w-10 h-10 rounded-lg object-cover flex-shrink-0" />}
+                  <div className="min-w-0">
+                    <h4 className="font-bold text-white text-sm">{piece.title}</h4>
+                    <TraitChips traits={piece.traits} className="mt-1" />
+                  </div>
+                </div>
+                {piece.description && <p className="text-xs text-zinc-300 mb-1">{piece.description}</p>}
+                <p className={`text-xs text-zinc-400 leading-relaxed ${isExpanded ? '' : 'line-clamp-3'}`}>{piece.content}</p>
                 {piece.content.length > 200 && (
                   <button
                     onClick={() => toggleLoreExpand(piece.id)}
@@ -997,69 +1152,6 @@ const MemoryMatrixView: React.FC<{ chat: Chat, scenario: Scenario, setChat: (cha
               </div>
             );
           })}
-        </div>
-      ) : (
-        /* AI-generated memories */
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h4 className="text-xs uppercase font-bold text-zinc-600 tracking-wider">Memories ({chat.memories.length})</h4>
-            <button
-              onClick={async () => {
-                const memory = await deepseek.generateMemory(chat.id);
-                if (!memory) {
-                  showToast('Could not generate a memory', 'error');
-                } else if (await showConfirm(`Add this memory?\n\n"${memory.content}"`)) {
-                  const newMemories = [...chat.memories, memory];
-                  const newChat = { ...chat, memories: newMemories };
-                  setChat(newChat);
-                  await apiService.saveChat(newChat);
-                }
-              }}
-              className="text-xs text-indigo-400 font-bold px-3 py-1.5 bg-indigo-600/10 border border-indigo-600/20 rounded-lg hover:bg-indigo-600/20 transition-colors"
-            >
-              + Generate
-            </button>
-          </div>
-          {chat.memories.length === 0 && (
-            <p className="text-zinc-600 text-sm italic text-center py-8">No memories have been generated yet.</p>
-          )}
-          {/* Display memories newest-first (reversed order) */}
-          {chat.memories.slice().reverse().map(memory => (
-            <div key={memory.id} className="bg-zinc-800/50 backdrop-blur-sm border border-zinc-700/50 rounded-xl p-4 hover:border-zinc-600/50 transition-colors">
-              <div className="flex items-start justify-between gap-3">
-                <p className="text-sm text-zinc-300 leading-relaxed flex-1">{memory.content}</p>
-                <div className="flex items-center gap-1 flex-shrink-0 pt-0.5">
-                  <button
-                    onClick={async () => {
-                      if (await showConfirm('Delete this memory?')) {
-                        const newMemories = chat.memories.filter(m => m.id !== memory.id);
-                        const newChat = { ...chat, memories: newMemories };
-                        setChat(newChat);
-                        await apiService.saveChat(newChat);
-                      }
-                    }}
-                    className="p-1.5 rounded-lg text-zinc-600 hover:bg-red-900/30 hover:text-red-400 transition-colors"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                  <button
-                    onClick={async () => {
-                      const newMemories = chat.memories.map(m => m.id === memory.id ? { ...m, pinned: !m.pinned } : m);
-                      const newChat = { ...chat, memories: newMemories };
-                      setChat(newChat);
-                      await apiService.saveChat(newChat);
-                    }}
-                    className={`p-1.5 rounded-lg transition-colors ${memory.pinned ? 'text-indigo-400 bg-indigo-600/10' : 'text-zinc-600 hover:bg-zinc-700 hover:text-zinc-400'}`}
-                  >
-                    <Pin size={16} fill={memory.pinned ? 'currentColor' : 'none'} />
-                  </button>
-                </div>
-              </div>
-              <div className="mt-2 text-[10px] text-zinc-600 font-medium">
-                {format(memory.timestamp, 'MMM d, HH:mm')}
-              </div>
-            </div>
-          ))}
         </div>
       )}
     </div>
@@ -1503,6 +1595,28 @@ const ScenarioInfoView: React.FC<{ scenario: Scenario }> = ({ scenario }) => {
         </div>
       </div>
 
+      {/* Characters */}
+      {scenario.characters.length > 0 && (
+        <div>
+          <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-3 flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />
+            Characters
+          </h4>
+          <div className="space-y-2">
+            {scenario.characters.map(c => (
+              <div key={c.id} className="flex gap-3 rounded-xl bg-zinc-800/30 border border-zinc-700/50 p-3">
+                <Avatar image={c.avatar} name={c.name} accent />
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-white">{c.name}</p>
+                  <TraitChips traits={c.traits} className="mt-1" />
+                  {!scenario.promptsHidden && c.description && <p className="text-xs text-zinc-400 mt-1 line-clamp-3">{c.description}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Scenario Instructions */}
       {scenario.customInstructions && (
         <div>
@@ -1568,3 +1682,87 @@ const TypingDots: React.FC<{ className?: string }> = ({ className = '' }) => (
     <span className="w-2 h-2 bg-indigo-400/80 rounded-full animate-bounce" />
   </div>
 );
+
+/** Header button: memories so far and progress toward the next one */
+const MemoryRing: React.FC<{ count: number; interval: number; memories: number; onClick: () => void }> = ({ count, interval, memories, onClick }) => {
+  const progress = Math.min(1, count / Math.max(1, interval));
+  const r = 9;
+  const circumference = 2 * Math.PI * r;
+  return (
+    <button
+      onClick={onClick}
+      className="relative p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+      title={`Memories & Lore: ${memories} memor${memories === 1 ? 'y' : 'ies'}; next one in ${Math.max(0, interval - count)} of your messages`}
+      aria-label={`Memories and Lore. ${memories} memories. Next memory in ${Math.max(0, interval - count)} messages.`}
+    >
+      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
+        <circle cx="13" cy="13" r={r} fill="none" stroke="currentColor" strokeOpacity="0.2" strokeWidth="2.5" />
+        <circle
+          cx="13" cy="13" r={r} fill="none" stroke="#818cf8" strokeWidth="2.5" strokeLinecap="round"
+          strokeDasharray={circumference} strokeDashoffset={circumference * (1 - progress)}
+          transform="rotate(-90 13 13)"
+        />
+      </svg>
+      <Brain size={11} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
+    </button>
+  );
+};
+
+/** Divider in the chat where a memory was made; opens to show it */
+const MemoryMarker: React.FC<{ chapter: number; memory: Memory; open: boolean; onToggle: () => void; onOpenPanel: () => void }> = ({ chapter, memory, open, onToggle, onOpenPanel }) => (
+  <div className="self-stretch mt-4">
+    <button onClick={onToggle} aria-expanded={open} className="w-full flex items-center gap-3 text-[11px] font-bold text-indigo-300/80 hover:text-indigo-200 transition-colors">
+      <span className="flex-1 h-px bg-indigo-500/20" />
+      <span className="flex items-center gap-1.5">
+        <Brain size={12} /> {memory.source === 'user' ? 'Your note' : 'Memory saved'} · Chapter {chapter}{memory.pinned ? ' · pinned' : ''}
+      </span>
+      <span className="flex-1 h-px bg-indigo-500/20" />
+    </button>
+    {open && (
+      <div className="mt-2 mx-auto max-w-xl rounded-xl bg-indigo-950/30 ring-1 ring-indigo-500/20 p-3 text-sm text-zinc-200">
+        <p className="whitespace-pre-wrap leading-relaxed">{memory.content}</p>
+        <button onClick={onOpenPanel} className="mt-2 text-[11px] font-bold text-indigo-300 hover:text-indigo-200">Edit or pin in Memories →</button>
+      </div>
+    )}
+  </div>
+);
+
+/** Under an AI reply: what the AI was given when it wrote it */
+const ContextChip: React.FC<{ context: ReplyContext; memories: Memory[]; open: boolean; onToggle: () => void }> = ({ context, memories, open, onToggle }) => {
+  const loreCount = context.lore.length + context.hiddenLore;
+  const parts = [
+    `${context.memoryIds.length} memor${context.memoryIds.length === 1 ? 'y' : 'ies'}`,
+    `${loreCount} lore`,
+    ...(context.listed ? [`${context.listed} more listed`] : []),
+    ...(context.omitted ? [`${context.omitted} older messages summarised`] : []),
+  ];
+  return (
+    <div className="mt-1 px-1 max-w-full">
+      <button onClick={onToggle} aria-expanded={open} className="flex items-center gap-1 text-[11px] text-zinc-600 hover:text-zinc-300 transition-colors" title="What the AI was given when it wrote this reply">
+        <Brain size={11} /> {parts.join(' · ')}
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-lg bg-zinc-900/80 ring-1 ring-white/5 p-3 text-xs text-zinc-400 space-y-2 max-w-xl">
+          <p className="text-zinc-500">When writing this reply, the AI was reminded of:</p>
+          {context.memoryIds.length > 0 ? (
+            <ul className="list-disc pl-4 space-y-1">
+              {context.memoryIds.map(id => {
+                const m = memories.find(x => x.id === id);
+                return <li key={id}>{m ? (m.content.length > 140 ? m.content.slice(0, 140) + '…' : m.content) : <em>a memory that was later removed</em>}</li>;
+              })}
+            </ul>
+          ) : <p>No memories yet.</p>}
+          {loreCount > 0 && (
+            <p>
+              <span className="text-zinc-500">Lore: </span>
+              {context.lore.join(', ')}
+              {context.hiddenLore > 0 && `${context.lore.length ? ', plus ' : ''}${context.hiddenLore} hidden piece${context.hiddenLore === 1 ? '' : 's'}`}
+            </p>
+          )}
+          {(context.listed ?? 0) > 0 && <p>{context.listed} other lore piece{context.listed === 1 ? ' was' : 's were'} listed by title and a one-line summary.</p>}
+          {context.omitted > 0 && <p>{context.omitted} older messages were left out; the memories cover them.</p>}
+        </div>
+      )}
+    </div>
+  );
+};
