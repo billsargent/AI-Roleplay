@@ -32,6 +32,9 @@ before(async () => {
       }
       if (!json.stream) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
+        // All tokens spent on reasoning: no answer at all
+        if (text.includes('EMPTYANSWER')) return res.end(JSON.stringify({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }));
+        if (text.includes('CUTANSWER')) return res.end(JSON.stringify({ choices: [{ message: { content: '{"fixes": [{"id": "x", "trig' }, finish_reason: 'length' }] }));
         // Lore suggestions in JSON mode: one good card, one duplicate, one without triggers
         // Lore fixes: suggest triggers for whatever card ids were sent
         const fixIds = [...String(json.messages?.[1]?.content || '').matchAll(/\[id: ([^\]]+)\]/g)].map(m => m[1]);
@@ -314,6 +317,30 @@ test('AI lore fixes are validated against the draft', async () => {
   assert.deepEqual(r.json.fixes, [{ id: tower.id, triggers: ['bell', 'tower'], mode: 'triggered', linkedPieces: [draft.lorePieces[0].id], description: 'A fixed card.' }]);
   assert.deepEqual(seen.last.response_format, { type: 'json_object' });
   assert.match(seen.last.messages[1].content, new RegExp(`\\[id: ${tower.id}\\] Bell Tower`));
+});
+
+test('AI tools ignore the chat reply cap and run without thinking; a cut-off answer is an error', async () => {
+  // Settings like a production install: short chat replies, thinking on
+  await srv.request('POST', '/api/system/settings', { token: admin.token, body: { deepseekThinking: 'high', maxTokens: 100 } });
+  try {
+    const u = await srv.register();
+    const draft = loreScenario();
+    const ids = [draft.lorePieces[1].id];
+    const r = await srv.request('POST', '/api/deepseek/lore-fix', { token: u.token, body: { draft, ids } });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(seen.last.thinking, { type: 'disabled' });
+    assert.equal(seen.last.max_tokens, 360, 'the tool sizes its own budget (one card), above the 100-token chat cap');
+
+    const enhance = await srv.request('POST', '/api/deepseek/enhance', { token: u.token, body: { field: 'backstory', text: 'EMPTYANSWER please' } });
+    assert.equal(enhance.status, 502);
+    assert.match(enhance.json.error, /ran out of room/);
+
+    const cut = await srv.request('POST', '/api/deepseek/lore-fix', { token: u.token, body: { draft: { ...draft, backstory: 'CUTANSWER' }, ids } });
+    assert.equal(cut.status, 502);
+    assert.match(cut.json.error, /cut off/);
+  } finally {
+    await srv.request('POST', '/api/system/settings', { token: admin.token, body: { deepseekThinking: '', maxTokens: 8192 } });
+  }
 });
 
 test('admin lore health: dry run, then safe fixes for all scenarios after a backup', async () => {

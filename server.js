@@ -1297,7 +1297,24 @@ function utilityModel() {
   return getSystemSetting('utilityModel') || getSystemSetting('deepseekModel') || DEFAULT_MODEL;
 }
 
-async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, stop, label, stream = false, beta = false, model, json = false }) {
+/**
+ * Background AI tools (generator, memories, lore suggestions and fixes, Enhance)
+ * run without thinking: they fill in structured answers, and with thinking on the
+ * reasoning can use the whole token budget before any answer is written.
+ */
+const UTILITY_THINKING = 'off';
+
+/** The AI's JSON answer, or an error when it was cut off or is not JSON (instead of silently "no results") */
+function readableJson(text) {
+  try {
+    JSON.parse(String(text).replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, ''));
+    return text;
+  } catch {
+    throw new LlmRequestError("The AI's answer was cut off or unreadable. Try again.", 502);
+  }
+}
+
+async function runCompletion(req, res, { messages, maxTokens, temperature, frequencyPenalty, presencePenalty, stop, label, stream = false, beta = false, model, json = false, utility = false }) {
   const deepseekKey = getSystemSetting('deepseekKey');
   if (!deepseekKey) {
     return res.status(400).json({ error: 'DeepSeek API key is not configured. Please ask your administrator to set it in settings.' });
@@ -1308,9 +1325,10 @@ async function runCompletion(req, res, { messages, maxTokens, temperature, frequ
       { messages, max_tokens: maxTokens, temperature, frequency_penalty: frequencyPenalty, presence_penalty: presencePenalty, stop },
       {
         model: model || getSystemSetting('deepseekModel') || DEFAULT_MODEL,
-        // Admin "Max Tokens Cap"
-        maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
-        thinking: getSystemSetting('deepseekThinking') || '',
+        // Admin "Max Tokens Cap" is the length of a chat reply; tools that write
+        // JSON or whole fields size their own answer and must not be cut off by it
+        maxTokensCap: utility ? undefined : Number(getSystemSetting('maxTokens')) || undefined,
+        thinking: utility ? UTILITY_THINKING : getSystemSetting('deepseekThinking') || '',
         json,
       }
     );
@@ -1433,8 +1451,7 @@ app.post('/api/chats/:id/memory', auth, async (req, res, next) => {
       const { messages, maxTokens } = buildMemoryPrompt(source, llm.memoryWordCount);
       const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature: llm.utilityTemperature }, {
         model: utilityModel(),
-        maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
-        thinking: getSystemSetting('deepseekThinking') || '',
+        thinking: UTILITY_THINKING,
       });
       debugLogLlmPrompt(req.userId, params, 'Memory');
       const content = (await completeOnce(params, { apiKey: deepseekKey })).trim();
@@ -1470,7 +1487,7 @@ app.post('/api/deepseek/generate', auth, llmLimiter, async (req, res) => {
     return res.status(413).json({ error: 'Description is too long (max 10,000 characters)' });
   }
   const { messages, maxTokens, temperature } = buildScenarioGenerationPrompt(description);
-  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate', model: utilityModel(), json: true });
+  await runCompletion(req, res, { messages, maxTokens, temperature, label: 'Generate', model: utilityModel(), json: true, utility: true });
 });
 
 /**
@@ -1501,12 +1518,11 @@ app.post('/api/deepseek/lore-suggest', auth, llmLimiter, async (req, res, next) 
     const { messages, maxTokens } = buildLoreSuggestPrompt(clean, text(req.body?.focus));
     const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature: 0.7 }, {
       model: utilityModel(),
-      maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
-      thinking: getSystemSetting('deepseekThinking') || '',
+      thinking: UTILITY_THINKING,
       json: true,
     });
     debugLogLlmPrompt(req.userId, params, 'Lore suggestions');
-    const suggestions = parseLoreSuggestions(await completeOnce(params, { apiKey: deepseekKey }), clean.loreTitles);
+    const suggestions = parseLoreSuggestions(readableJson(await completeOnce(params, { apiKey: deepseekKey })), clean.loreTitles);
     if (suggestions.length === 0) return res.status(502).json({ error: 'The AI did not return any usable lore cards; try again' });
     res.json({ suggestions });
   } catch (err) {
@@ -1535,8 +1551,7 @@ app.post('/api/deepseek/enhance', auth, llmLimiter, async (req, res, next) => {
     const { messages, maxTokens, temperature } = buildEnhancePrompt(field, text, safeContext, ['vivid', 'condense'].includes(mode) ? mode : 'fix');
     const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature }, {
       model: utilityModel(),
-      maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
-      thinking: getSystemSetting('deepseekThinking') || '',
+      thinking: UTILITY_THINKING,
     });
     debugLogLlmPrompt(req.userId, params, 'Enhance');
     const result = cleanEnhanced(await completeOnce(params, { apiKey: deepseekKey }));
@@ -1595,12 +1610,11 @@ app.post('/api/deepseek/lore-fix', auth, mediumBody, llmLimiter, async (req, res
     const { messages, maxTokens } = buildLoreFixPrompt(draft, cards);
     const params = validateCompletionRequest({ messages, max_tokens: maxTokens, temperature: 0.4 }, {
       model: utilityModel(),
-      maxTokensCap: Number(getSystemSetting('maxTokens')) || undefined,
-      thinking: getSystemSetting('deepseekThinking') || '',
+      thinking: UTILITY_THINKING,
       json: true,
     });
     debugLogLlmPrompt(req.userId, params, 'Lore fix');
-    res.json({ fixes: parseLoreFixes(await completeOnce(params, { apiKey: deepseekKey }), cards, draft.lorePieces) });
+    res.json({ fixes: parseLoreFixes(readableJson(await completeOnce(params, { apiKey: deepseekKey })), cards, draft.lorePieces) });
   } catch (err) {
     if (err instanceof LlmRequestError) return res.status(err.status).json({ error: err.message });
     next(err);
