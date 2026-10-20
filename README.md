@@ -2,7 +2,7 @@
 
 An immersive, AI-powered roleplay platform where you create stories, build worlds, and chat with intelligent AI characters. Built with a modern React frontend and an Express + SQLite backend, powered by the DeepSeek language model.
 
-**Current version: 2.1.0.** See [CHANGELOG.md](CHANGELOG.md) for what changed, and its *Upgrading from 1.x* section before updating an existing install.
+**Current version: 2.2.0.** See [CHANGELOG.md](CHANGELOG.md) for what changed, and its *Upgrading from 1.x* section before updating an existing install.
 
 ---
 
@@ -17,7 +17,8 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Copy & Customize** — Fork any public scenario and make it your own
 - **Tag-Based Discovery** — Search and browse community scenarios by name, tags, or creator
 - **Scenario Detail View** — Inspect full backstory, character profiles, and lore before playing
-- **Scenario Import** — Import Fictionlab exports (every known export shape), keeping lore types, descriptions, traits, pictures and links
+- **Scenario Import** — Import Fictionlab exports (every known export shape), keeping lore types, descriptions, traits, pictures and links; cards with no trigger words get AI suggestions straight away
+- **Update from Fictionlab file** — Refresh an existing scenario from its export file, keeping its chats (one at a time in the editor, or many at once in the admin panel)
 
 ### 🤖 AI Chat & Roleplay
 - **Real-Time Streaming** — AI responses stream character-by-character via Server-Sent Events (SSE) for instant feedback
@@ -64,6 +65,7 @@ An immersive, AI-powered roleplay platform where you create stories, build world
 - **Site Branding** — Custom site name displayed throughout the app
 - **Rate Limit & Sign-ups** — Set the general API rate limit and turn new registrations on or off
 - **User Management** — View, create, edit, and delete users with role assignment (the last admin cannot be demoted)
+- **Backup & Restore** — One file with the database and every picture: make, download, upload and restore backups (a backup of the current state is made before each restore). Nightly backups keep the last 7 by default. Restoring a backup on a new server is how an installation moves.
 
 ### 🔒 Security
 - **Server-Side API Key** — DeepSeek API key is stored server-side and never sent to the browser

@@ -1,8 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [v2.2.0] - 2026-10-20
+
+Fictionlab import and lore repair, AI authoring tools, memories you can shape, and backup and restore (#30, #41, #48).
 
 ### Added
+- **Backup and restore** (#50): Admin › System › Backups makes one file with the database and every picture, and can download, upload, delete and restore backups. A restore checks the file first, makes a backup of the current state, pauses other requests for the few seconds of the swap, and rolls back if anything fails; you stay logged in. **Nightly backups** run at a chosen hour (default 03:00 server time) and keep the last 7; backups made by hand or uploaded are never deleted automatically. Settings: `BACKUP_DIR`, `MAX_BACKUP_UPLOAD`, `REQUEST_TIMEOUT_MS`.
+- **Importing a Fictionlab file asks the AI straight away** (#49) for trigger words for cards that have none, and shows the suggestions for review before anything is saved.
 - **LLM options with explanations** (#34): every LLM Config setting now says what it does and what to choose.
   - **Stop sequences**: a reply stops when the AI starts a line as the player (on by default), plus up to 16 custom stops (`\n` and `{{user}}` supported).
   - **Background model and temperature** for memory summaries and the scenario generator (default: the chat model, 0.5).
@@ -27,12 +31,18 @@
 
 ### Changed
 - The default temperature is 1.0 (was 1.3); the help text recommends 0.8–1.2 for roleplay.
+- **Thinking is off by default.** An install that never chose a thinking setting now has it off, so chat replies are not cut short by reasoning that shares their token budget. It can still be turned on in LLM Config.
+- The "duplicates the cast" lore warning only appears when the lore card has text the cast member lacks (Fictionlab stores each character both ways).
+- The site works over plain HTTP from other machines on a home network. The HTTPS-only browser headers (upgrade insecure requests, HSTS) are sent only with `FORCE_HTTPS=true`.
 
 ### Security
 - `GET /api/system/llm-settings` sent the global instructions, sampling settings and model to every logged-in user. It now returns only the site name and memory limits.
 
 ### Fixed
 - The penalty slider labels were reversed for negative values (they called -2 "less repetitive"; negative values make the AI repeat itself more).
+- The AI tools (lore fixes and suggestions, Enhance, memories, the scenario generator) were limited by the chat reply length and could spend their whole budget on reasoning, so lore fixes reported "0 of N" and Enhance could cut text short. They now size their own answer, always run with thinking off, and report an empty or cut-off answer as an error.
+- Re-importing an export that has no lore (older Fictionlab files) keeps the scenario's existing lore; an export with nothing in it is refused instead of emptying the scenario.
+- Trigger words wrapped in quotes or backticks, or with trailing spaces, are cleaned up by Check & Fix and saved trimmed.
 
 ## [v2.1.0] - 2026-10-15
 
