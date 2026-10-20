@@ -27,6 +27,15 @@ export interface BackupInfo {
   error?: string;
 }
 
+/** Nightly backup: hour is server time; last is when it last ran (ms, 0 = never) */
+export interface BackupSchedule {
+  enabled: boolean;
+  hour: number;
+  keep: number;
+  last: number;
+  error?: string;
+}
+
 export interface ReimportSummary {
   fields: string[];
   /** The file is missing its lore text (hidden by its creator); it will not be applied */
@@ -375,9 +384,14 @@ export const apiService = {
   },
 
   /** Admin: backups kept on the server, newest first */
-  listBackups: async (): Promise<{ backups: BackupInfo[]; folder: string }> => {
+  listBackups: async (): Promise<{ backups: BackupInfo[]; folder: string; schedule: BackupSchedule }> => {
     const response = await api.get('/admin/backups');
     return response.data;
+  },
+
+  /** Admin: nightly backup settings */
+  saveBackupSchedule: async (schedule: Partial<Pick<BackupSchedule, 'enabled' | 'hour' | 'keep'>>): Promise<void> => {
+    await api.post('/admin/backups/schedule', schedule);
   },
 
   /** Admin: makes a backup of the database and every picture */

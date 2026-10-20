@@ -85,6 +85,16 @@ after(async () => {
 const msgs = (content) => [{ role: 'system', content: 'sys' }, { role: 'user', content }];
 
 // ── Unit: request validation ──
+test('a new install has thinking off; nightly backup settings are saved and validated', async () => {
+  const s = await srv.request('GET', '/api/system/settings', { token: admin.token });
+  assert.equal(s.json.deepseekThinking, 'off');
+  const save = (body) => srv.request('POST', '/api/admin/backups/schedule', { token: admin.token, body });
+  assert.equal((await save({ enabled: false, hour: 22, keep: 14 })).status, 200);
+  assert.deepEqual((await save({ hour: 99, keep: 0 })).json.schedule, { enabled: false, hour: 22, keep: 14, last: 0 });
+  assert.equal((await save({ enabled: true })).json.schedule.enabled, true);
+  assert.equal((await srv.request('POST', '/api/admin/backups/schedule', { token: user.token, body: { enabled: false } })).status, 403);
+});
+
 test('validation forces the configured model and clamps numbers', () => {
   const p = validateCompletionRequest(
     { messages: msgs('hi'), model: 'some-expensive-model', max_tokens: 999999, temperature: 7, frequency_penalty: -9, presence_penalty: 0.5 },

@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { createBackup, listEntries, inspectBackup, restoreBackup, checkDatabaseFile, backupFileName, isBackupName } from '../lib/backup.js';
+import { createBackup, listEntries, inspectBackup, restoreBackup, checkDatabaseFile, backupFileName, isBackupName, autoBackupDue, readSchedule, backupsToPrune } from '../lib/backup.js';
 
 const isUpload = (rel) => /^(scenarios|characters)\/[0-9a-z]{2}\/[0-9a-z-]+\.webp$/.test(rel);
 
@@ -31,6 +31,25 @@ test('backup names', () => {
   assert.match(backupFileName('before-restore', new Date('2026-10-20T15:04:05.123Z')), /^rpchat-backup-2026-10-20T15-04-05Z-before-restore\.tar$/);
   assert.equal(isBackupName('rpchat-backup-x.tar'), true);
   for (const bad of ['../x.tar', '.hidden.tar', 'x.zip', 'a/b.tar', '']) assert.equal(isBackupName(bad), false, bad);
+});
+
+test('nightly backups: due once a day at the hour, settings defaults, pruning only automatic ones', () => {
+  const at = (h, m = 0, day = 20) => new Date(2026, 9, day, h, m);
+  const schedule = { enabled: true, hour: 3, last: 0 };
+  assert.equal(autoBackupDue(schedule, at(2, 59)), false, 'before the hour');
+  assert.equal(autoBackupDue(schedule, at(3)), true);
+  assert.equal(autoBackupDue({ ...schedule, last: at(3, 1).getTime() }, at(23)), false, 'already done today');
+  assert.equal(autoBackupDue({ ...schedule, last: at(3, 1, 19).getTime() }, at(14)), true, 'server was off at 3: catches up');
+  assert.equal(autoBackupDue({ ...schedule, enabled: false }, at(4)), false);
+
+  assert.deepEqual(readSchedule(() => ''), { enabled: true, hour: 3, keep: 7, last: 0 });
+  const set = { autoBackupEnabled: 'false', autoBackupHour: '23', autoBackupKeep: '99', autoBackupLast: '5' };
+  assert.deepEqual(readSchedule(k => set[k]), { enabled: false, hour: 23, keep: 7, last: 5 }, 'keep out of range falls back');
+
+  const names = ['rpchat-backup-2026-10-18T03-00-00Z-auto.tar', 'rpchat-backup-2026-10-19T03-00-00Z-auto.tar', 'rpchat-backup-2026-10-20T03-00-00Z-auto.tar',
+    'rpchat-backup-2026-10-01T10-00-00Z.tar', 'rpchat-backup-2026-10-02T10-00-00Z-before-restore.tar'];
+  assert.deepEqual(backupsToPrune(names, 2), ['rpchat-backup-2026-10-18T03-00-00Z-auto.tar']);
+  assert.deepEqual(backupsToPrune(names, 7), []);
 });
 
 test('a backup holds the manifest, the database and every picture, and restores over another system', async () => {

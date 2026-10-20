@@ -566,10 +566,11 @@ export const AdminPage: React.FC = () => {
                 <option value="max">On, maximum effort</option>
               </select>
               <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
-                <strong className="text-zinc-400">Off is recommended for roleplay:</strong> replies start sooner, cost less, and
+                <strong className="text-zinc-400">Off (the default) is recommended for roleplay:</strong> replies start sooner, cost less, and
                 Continue can pick up exactly where a reply stopped. With thinking on, the model reasons before it writes: slower,
                 more tokens, and it ignores temperature and the penalties (the reply budget is raised to leave room for the
-                reasoning). "Model default" sends nothing and lets DeepSeek decide; deepseek-flash then thinks.
+                reasoning). "Model default" sends nothing and lets DeepSeek decide; deepseek-flash then thinks. This applies to chat
+                replies only: the editor's AI tools, memories and the generator always run with thinking off.
               </p>
             </div>
           </div>

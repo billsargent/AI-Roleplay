@@ -75,7 +75,7 @@ import { matchScenario, summarizeReimport, mergeReimport } from './lib/fictionla
 import { checkLore, applySafeFixes } from './lib/loreDoctor.js';
 
 import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath, uploadsRoot } from './database/images.js';
-import { createBackup, inspectBackup, restoreBackup, backupFileName, isBackupName } from './lib/backup.js';
+import { createBackup, inspectBackup, restoreBackup, backupFileName, isBackupName, readSchedule, autoBackupDue, backupsToPrune, AUTO_LABEL } from './lib/backup.js';
 import { pipeline } from 'stream/promises';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
 import { parseFictionlab } from './lib/fictionlab.js';
@@ -108,6 +108,12 @@ const JWT_SECRET = process.env.JWT_SECRET || (() => {
   }
   return secret;
 })();
+
+// Thinking is off unless an admin chooses otherwise: with it on, the reasoning
+// shares the reply's token budget and short replies can come back cut off or empty
+if (!getDb().prepare(`SELECT 1 FROM system_settings WHERE key = 'deepseekThinking'`).get()) {
+  setSystemSetting('deepseekThinking', 'off');
+}
 
 // Behind a reverse proxy, set TRUST_PROXY (e.g. "1" or "loopback") so rate
 // limits see each client's address instead of the proxy's
@@ -1725,16 +1731,52 @@ async function makeBackup(label = '') {
   return name;
 }
 
-/** GET /api/admin/backups — Backups kept on the server, newest first */
+/**
+ * Nightly backup: checked every 10 minutes, runs once a day at the chosen hour
+ * (server time), then deletes automatic backups beyond the number to keep.
+ * A failure is recorded and shown in the admin panel; it is tried again the next day.
+ */
+async function runScheduledBackup() {
+  const schedule = readSchedule(getSystemSetting);
+  if (!autoBackupDue(schedule) || backupBusy || restoring) return;
+  backupBusy = true;
+  setSystemSetting('autoBackupLast', String(Date.now()));
+  try {
+    const name = await makeBackup(AUTO_LABEL);
+    for (const old of backupsToPrune(fs.readdirSync(BACKUP_DIR), schedule.keep)) fs.rmSync(backupFile(old), { force: true });
+    setSystemSetting('autoBackupError', '');
+    console.log(`[BACKUP] Nightly backup ${name}`);
+  } catch (err) {
+    setSystemSetting('autoBackupError', String(err?.message || err).slice(0, 300));
+    console.error('[BACKUP] Nightly backup failed:', err?.message || err);
+  } finally {
+    backupBusy = false;
+  }
+}
+setInterval(() => { void runScheduledBackup(); }, 10 * 60 * 1000).unref();
+// Also shortly after start, so a server that was off at the hour catches up
+setTimeout(() => { void runScheduledBackup(); }, 2 * 60 * 1000).unref();
+
+/** GET /api/admin/backups — Backups kept on the server, newest first, and the nightly schedule */
 app.get('/api/admin/backups', adminAuth, async (req, res, next) => {
   try {
     const names = fs.existsSync(BACKUP_DIR) ? fs.readdirSync(BACKUP_DIR).filter(isBackupName) : [];
     const list = await Promise.all(names.map(describeBackup));
     list.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
-    res.json({ backups: list, folder: path.basename(BACKUP_DIR) });
+    const schedule = { ...readSchedule(getSystemSetting), error: getSystemSetting('autoBackupError') || '' };
+    res.json({ backups: list, folder: path.basename(BACKUP_DIR), schedule });
   } catch (err) {
     next(err);
   }
+});
+
+/** POST /api/admin/backups/schedule — { enabled, hour (0-23), keep (1-60) } */
+app.post('/api/admin/backups/schedule', adminAuth, (req, res) => {
+  const { enabled, hour, keep } = req.body || {};
+  if (typeof enabled === 'boolean') setSystemSetting('autoBackupEnabled', String(enabled));
+  if (Number.isInteger(hour) && hour >= 0 && hour <= 23) setSystemSetting('autoBackupHour', String(hour));
+  if (Number.isInteger(keep) && keep >= 1 && keep <= 60) setSystemSetting('autoBackupKeep', String(keep));
+  res.json({ schedule: readSchedule(getSystemSetting) });
 });
 
 /** POST /api/admin/backups — Makes a backup of the database and every picture */
