@@ -88,6 +88,8 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+/** FORCE_HTTPS=true once the site is served over HTTPS: browsers are then told to use HTTPS only */
+const FORCE_HTTPS = /^(1|true|yes)$/i.test(process.env.FORCE_HTTPS || '');
 /** Body limit for scenario saves/imports, which can embed many base64 images */
 const MAX_JSON_BODY_SIZE = process.env.MAX_JSON_BODY_SIZE || '250mb';
 /** Body limit for chats, personas (avatar) and AI requests */
@@ -218,8 +220,13 @@ app.use(helmet({
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
       formAction: ["'self'"],
+      // Only when the site is served over HTTPS: on plain HTTP (a home network
+      // address) this would make the browser fetch every file over https and fail
+      upgradeInsecureRequests: FORCE_HTTPS ? [] : null,
     },
   },
+  // Same reason: HSTS tells browsers to use HTTPS only, so send it only with HTTPS
+  strictTransportSecurity: FORCE_HTTPS,
   crossOriginEmbedderPolicy: false,
 }));
 

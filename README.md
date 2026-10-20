@@ -143,7 +143,13 @@ LLM_RATE_LIMIT=120                 # AI requests per user per window (admins exe
 LLM_RATE_WINDOW_MIN=15             # Length of that window in minutes
 DB_PATH=./database.sqlite          # Database file location
 UPLOADS_DIR=./uploads              # Uploaded images folder
+BACKUP_DIR=./backups               # Backups made in the admin panel (default: "backups" next to the database)
+MAX_BACKUP_UPLOAD=21474836480      # Largest backup file that can be uploaded, in bytes (default 20 GB)
+REQUEST_TIMEOUT_MS=3600000         # Longest a request may take, e.g. uploading a large backup (default 1 hour)
+FORCE_HTTPS=false                  # Set to true only when the site is served over HTTPS (tells browsers to use HTTPS only)
 ```
+
+The site works over plain HTTP on a home network by default. Turn on `FORCE_HTTPS` only once it is reached through HTTPS; on plain HTTP it would make browsers fail to load the page.
 
 ---
 
