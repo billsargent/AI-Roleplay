@@ -147,12 +147,17 @@ export const CreateScenario: React.FC = () => {
     }
     try {
       const { summary } = await apiService.reimportScenario(scenario.id, json, false);
+      if (summary.hollow) {
+        showToast('This export is missing its lore text (the creator probably hid it on Fictionlab). Updating from it would erase your lore, so nothing was changed.', 'error');
+        return;
+      }
       const lines = [
         `Lore: ${summary.lore.before} → ${summary.lore.after} cards${summary.lore.added.length ? ` (${summary.lore.added.length} new)` : ''}${summary.lore.removed.length ? `, ${summary.lore.removed.length} not in the file` : ''}`,
         `Never sent to the AI: ${summary.lore.neverSentBefore} → ${summary.lore.neverSentAfter}`,
         `Working lore links: ${summary.lore.workingLinksBefore} → ${summary.lore.workingLinksAfter}`,
         `Characters: ${summary.characters.before} → ${summary.characters.after}`,
         summary.fields.length ? `Also replaced: ${summary.fields.join(', ')}` : '',
+        summary.keepsLore ? 'The file has no lore cards (made before Fictionlab had lore), so your lore is kept.' : '',
       ].filter(Boolean);
       const warning = dirty ? '\n\nYour unsaved changes in the editor will be lost.' : '';
       if (!(await showConfirm(`Update "${scenario.name}" from this file?\n\n${lines.join('\n')}\n\nThe name, settings, pictures and chats are kept.${warning}`))) return;

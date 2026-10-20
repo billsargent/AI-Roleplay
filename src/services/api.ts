@@ -17,6 +17,10 @@ import { Scenario } from '../types';
 /** What a re-import changes (see lib/fictionlabReimport.js summarizeReimport) */
 export interface ReimportSummary {
   fields: string[];
+  /** The file is missing its lore text (hidden by its creator); it will not be applied */
+  hollow?: boolean;
+  /** The file has no lore cards (made before Fictionlab had lore): the scenario keeps its lore */
+  keepsLore?: boolean;
   lore: {
     before: number; after: number; added: string[]; removed: string[];
     neverSentBefore: number; neverSentAfter: number; workingLinksBefore: number; workingLinksAfter: number;

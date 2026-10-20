@@ -268,6 +268,27 @@ test('bulk re-import: dry run matches files, apply backs up first', async () => 
   assert.deepEqual([again.json.rows[0].status, again.json.rows[0].candidates[0].id], ['source', a.id]);
 });
 
+test('a hollow export is refused; an export from before lore existed keeps the lore', async () => {
+  const { id } = await oldImport(owner.token, 'Hollow Tale');
+  // Cards present, text missing (the creator hid the prompts on Fictionlab)
+  const hollow = topLevel({ id: 'fl-hollow', displayName: 'Hollow Tale', backStory: '', lorePieces: [piece({ title: 'A', content: '' }), piece({ title: 'B', content: '' })] });
+  const preview = await srv.request('POST', `/api/scenarios/${id}/reimport`, { token: owner.token, body: { file: hollow } });
+  assert.equal(preview.json.summary.hollow, true);
+  const refused = await srv.request('POST', `/api/scenarios/${id}/reimport`, { token: owner.token, body: { file: hollow, apply: true } });
+  assert.equal(refused.status, 422);
+  assert.match(refused.json.error, /missing its lore text/);
+  assert.equal((await srv.request('GET', `/api/scenarios/${id}`, { token: owner.token })).json.backstory, 'old backstory', 'nothing changed');
+
+  // No lore cards at all: an export from before Fictionlab had lore
+  const early = topLevel({ id: 'fl-early', displayName: 'Hollow Tale', backStory: 'Newer backstory.', lorePieces: [] });
+  const p2 = await srv.request('POST', `/api/scenarios/${id}/reimport`, { token: owner.token, body: { file: early } });
+  assert.deepEqual([p2.json.summary.hollow, p2.json.summary.keepsLore, p2.json.summary.lore.after], [false, true, 2]);
+  assert.equal((await srv.request('POST', `/api/scenarios/${id}/reimport`, { token: owner.token, body: { file: early, apply: true } })).status, 200);
+  const after = (await srv.request('GET', `/api/scenarios/${id}`, { token: owner.token })).json;
+  assert.equal(after.backstory, 'Newer backstory.');
+  assert.deepEqual(after.lorePieces.map(p => p.title).sort(), ['Docks', 'Gone Rule'], 'the scenario keeps its lore');
+});
+
 test('pieces that share an id in the file still get their own ids', () => {
   const { draft } = parseFictionlab(topLevel({
     lorePieces: [piece({ id: 'dup', title: 'A' }), piece({ id: 'dup', title: 'B' }), piece({ id: 'x', title: 'C', linkedPieces: ['dup'] })],

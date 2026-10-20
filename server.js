@@ -642,6 +642,10 @@ async function fetchDataUrl(url) {
 /** Re-imports one parsed file into one scenario; returns the change summary */
 async function reimportScenario(existing, parsed) {
   const summary = summarizeReimport(existing, parsed.draft);
+  // A hollow export (lore text hidden by its creator) would erase the scenario's lore
+  if (summary.hollow) {
+    throw new DataError('This export is missing its lore text (the creator probably hid it on Fictionlab). Re-importing it would erase the lore this scenario has, so it was not applied.', 422);
+  }
   const merged = await mergeReimport(existing, parsed, { fetchDataUrl });
   saveScenarioTransaction(merged);
   return summary;

@@ -51,7 +51,7 @@ export const FictionlabReimport: React.FC = () => {
         ...r,
         file: files[i].file,
         scenarioId: r.candidates?.length === 1 ? r.candidates[0].id : '',
-        selected: (r.status === 'source' || r.status === 'name') && !!r.summary,
+        selected: (r.status === 'source' || r.status === 'name') && !!r.summary && !r.summary.hollow,
       })));
       if (unreadable) showToast(`${unreadable} file(s) were not valid JSON and were skipped`, 'info');
     } catch (err: any) {
@@ -133,7 +133,7 @@ export const FictionlabReimport: React.FC = () => {
                         type="checkbox"
                         aria-label={`Re-import ${r.fileName}`}
                         checked={r.selected}
-                        disabled={!r.scenarioId || !!busy || !!r.result?.ok}
+                        disabled={!r.scenarioId || !!busy || !!r.result?.ok || !!r.summary?.hollow}
                         onChange={e => update(i, { selected: e.target.checked })}
                         className="accent-indigo-500"
                       />
@@ -155,6 +155,8 @@ export const FictionlabReimport: React.FC = () => {
                         <span className="text-zinc-300">{r.candidates[0].name}</span>
                       ) : null}
                       <span className={`block text-[10px] ${r.status === 'none' || r.status === 'not a scenario' ? 'text-amber-400' : 'text-zinc-500'}`}>{statusLabel[r.status]}</span>
+                      {r.summary?.keepsLore && <span className="block text-[10px] text-zinc-400">No lore in the file: the scenario keeps its own lore</span>}
+                      {r.summary?.hollow && <span className="block text-[10px] text-red-400">File has no lore text (hidden by its creator): would erase the lore, so it is skipped</span>}
                     </td>
                     <td className="p-2 text-zinc-400 tabular-nums">{r.summary ? `${r.summary.lore.neverSentBefore} → ${r.summary.lore.neverSentAfter}` : '—'}</td>
                     <td className="p-2 text-zinc-400 tabular-nums">{r.summary ? `${r.summary.lore.workingLinksBefore} → ${r.summary.lore.workingLinksAfter}` : '—'}</td>
