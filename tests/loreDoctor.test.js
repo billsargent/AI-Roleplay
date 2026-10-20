@@ -53,6 +53,9 @@ test('checks find the imported problems', () => {
   assert.deepEqual(kinds(issues), ['badTriggers', 'brokenLinks', 'castDuplicate', 'charPlaceholder', 'empty', 'neverSent', 'ruleCard', 'tooLong', 'weightScale']);
   assert.ok(issues.find(i => i.kind === 'neverSent').pieceId === 'lone');
   assert.equal(issues.find(i => i.kind === 'castDuplicate').safe, false);
+  // The usual Fictionlab copy (same text as the cast member) is not reported
+  const copy = piece({ id: 'k', type: 'character', title: 'Mara', content: 'Keeps  the ferry.', weight: 60 });
+  assert.deepEqual(kinds(checkLore({ lorePieces: [copy], characters: [{ name: 'Mara', description: 'Keeps the ferry.' }] })), []);
   const capped = checkLore({ lorePieces: Array.from({ length: 3 }, () => piece({ pinned: true, weight: 100 })) }, { lorePinnedMax: 2 });
   assert.deepEqual(kinds(capped), ['overAlwaysCap']);
 });

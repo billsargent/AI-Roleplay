@@ -103,6 +103,8 @@ export const CreateScenario: React.FC = () => {
   const [showAiGenerator, setShowAiGenerator] = useState(false);
   const [showLoreSuggest, setShowLoreSuggest] = useState(false);
   const [showLoreFix, setShowLoreFix] = useState(false);
+  // Opened by an import: asks the AI about cards with no trigger words straight away
+  const [loreFixAuto, setLoreFixAuto] = useState(false);
   const [triggerInputs, setTriggerInputs] = useState<Record<string, string>>({});
   const [rteKey, setRteKey] = useState(0);
   /** Problems found when saving, shown under the fields (cleared as they are edited) */
@@ -285,9 +287,14 @@ export const CreateScenario: React.FC = () => {
         const notes = [
           `${imported.lorePieces.length} lore cards, ${imported.characters.length} characters`,
           report.mergedRules.length ? `${report.mergedRules.length} rule card(s) moved into Custom AI Instructions` : '',
-          report.noTriggers.length ? `${report.noTriggers.length} card(s) have no trigger words yet` : '',
+          report.noTriggers.length ? `${report.noTriggers.length} card(s) with no trigger words: asking the AI` : '',
         ].filter(Boolean);
         showToast(`✅ Imported: ${notes.join('; ')}. Review, then save.`, 'success');
+        // Cards with no trigger words never reach the AI: get suggestions for them now
+        if (report.noTriggers.length) {
+          setLoreFixAuto(true);
+          setShowLoreFix(true);
+        }
       } catch (err: any) {
         showToast(`Import failed: ${err?.message || 'unknown error'}`, 'error');
         console.error('Import error:', err);
@@ -958,9 +965,10 @@ export const CreateScenario: React.FC = () => {
       {/* Lore health for this draft */}
       <LoreFixModal
         isOpen={showLoreFix}
-        onClose={() => setShowLoreFix(false)}
+        onClose={() => { setShowLoreFix(false); setLoreFixAuto(false); }}
         scenario={scenario}
         onChange={changes => updateScenario(changes)}
+        autoAsk={loreFixAuto}
       />
 
       {/* AI lore suggestions for this draft */}

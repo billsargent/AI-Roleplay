@@ -12,7 +12,7 @@
  *
  * @module LoreFixModal
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Stethoscope, Loader2, X, Check, Sparkles, Trash2, Minimize2, AlertTriangle } from 'lucide-react';
 import { deepseek, LoreCheckResult, LoreFix, LoreFixDraft } from '../services/deepseek';
 import { Scenario, LorePiece } from '../types';
@@ -25,6 +25,8 @@ interface LoreFixModalProps {
   scenario: Scenario;
   /** Puts changed lore and/or instructions into the editor */
   onChange: (changes: { lorePieces?: LorePiece[]; customInstructions?: string }) => void;
+  /** Ask the AI about never-sent cards as soon as the check finishes (after an import) */
+  autoAsk?: boolean;
 }
 
 /** A suggestion as edited in the list */
@@ -48,7 +50,7 @@ export const loreFixDraft = (s: Scenario): LoreFixDraft => ({
   })),
 });
 
-export const LoreFixModal: React.FC<LoreFixModalProps> = ({ isOpen, onClose, scenario, onChange }) => {
+export const LoreFixModal: React.FC<LoreFixModalProps> = ({ isOpen, onClose, scenario, onChange, autoAsk = false }) => {
   const { showToast, showConfirm } = useNotifications();
   const [check, setCheck] = useState<LoreCheckResult | null>(null);
   const [checking, setChecking] = useState(false);
@@ -74,12 +76,40 @@ export const LoreFixModal: React.FC<LoreFixModalProps> = ({ isOpen, onClose, sce
   // Check when opened, and again after the editor's lore changes
   useEffect(() => { if (isOpen) void runCheck(); }, [isOpen, scenario.lorePieces, scenario.customInstructions]);
 
-  if (!isOpen) return null;
-
   const issues = check?.issues || [];
   const byKind = (k: string) => issues.filter(i => i.kind === k);
   const titleOf = (id: string) => scenario.lorePieces.find(p => p.id === id)?.title || 'Untitled';
   const neverSent = byKind('neverSent');
+
+  const askAi = async () => {
+    const ids = neverSent.map(i => i.pieceId!).filter(Boolean);
+    const draft = loreFixDraft(scenario);
+    const found: Row[] = [];
+    try {
+      for (let start = 0; start < ids.length; start += BATCH) {
+        setAsking(`${Math.min(start + BATCH, ids.length)} of ${ids.length}`);
+        const fixes = await deepseek.loreFix(draft, ids.slice(start, start + BATCH));
+        found.push(...fixes.map(f => ({ ...f, selected: true, triggerText: f.triggers.join(', ') })));
+        setRows([...found]);
+      }
+      if (found.length < ids.length) showToast(`The AI had suggestions for ${found.length} of ${ids.length} cards`, 'info');
+    } catch (err: any) {
+      showToast(err.message, 'error');
+    } finally {
+      setAsking('');
+    }
+  };
+
+  // After an import: ask once, as soon as the first check is in
+  const autoAsked = useRef(false);
+  useEffect(() => { if (!isOpen) { autoAsked.current = false; setCheck(null); } }, [isOpen]);
+  useEffect(() => {
+    if (!isOpen || !autoAsk || !check || autoAsked.current) return;
+    autoAsked.current = true;
+    if (neverSent.length > 0 && rows.length === 0) void askAi();
+  }, [isOpen, autoAsk, check]);
+
+  if (!isOpen) return null;
 
   /** Applies the automatic fixes, keeping each card's picture and other editor-only fields */
   const applySafe = () => {
@@ -112,26 +142,7 @@ export const LoreFixModal: React.FC<LoreFixModalProps> = ({ isOpen, onClose, sce
     }
   };
 
-  const askAi = async () => {
-    const ids = neverSent.map(i => i.pieceId!).filter(Boolean);
-    const draft = loreFixDraft(scenario);
-    const found: Row[] = [];
-    try {
-      for (let start = 0; start < ids.length; start += BATCH) {
-        setAsking(`${Math.min(start + BATCH, ids.length)} of ${ids.length}`);
-        const fixes = await deepseek.loreFix(draft, ids.slice(start, start + BATCH));
-        found.push(...fixes.map(f => ({ ...f, selected: true, triggerText: f.triggers.join(', ') })));
-        setRows([...found]);
-      }
-      if (found.length < ids.length) showToast(`The AI had suggestions for ${found.length} of ${ids.length} cards`, 'info');
-    } catch (err: any) {
-      showToast(err.message, 'error');
-    } finally {
-      setAsking('');
-    }
-  };
-
-  const update = (id: string, changes: Partial<Row>) => setRows(prev => prev.map(r => (r.id === id ? { ...r, ...changes } : r)));
+  const update =(id: string, changes: Partial<Row>) => setRows(prev => prev.map(r => (r.id === id ? { ...r, ...changes } : r)));
   const chosen = rows.filter(r => r.selected);
   const applyAi = () => {
     const byId = new Map(chosen.map(r => [r.id, r]));
