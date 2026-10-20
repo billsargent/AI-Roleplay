@@ -28,6 +28,10 @@ test('AI lore fixes are validated: known cards only, links by title, triggers re
 
 test('trigger words are tidied', () => {
   assert.deepEqual(cleanTriggers([' Docks ', 'docks', 'the', 'x', 'pier', 7]), ['Docks', 'pier']);
+  assert.deepEqual(cleanTriggers(['`"Route Tango"`', '*whisper*', '“moon”']), ['Route Tango', 'whisper', 'moon'], 'quotes and markdown around a trigger are removed');
+  // A trailing space alone is a change worth saving
+  const { changes, lorePieces } = applySafeFixes({ lorePieces: [piece({ triggers: ['docks '], weight: 100 })] });
+  assert.deepEqual([changes, lorePieces[0].triggers], [['Tidied trigger words on 1 card(s)'], ['docks']]);
 });
 
 test('a piece is never sent without triggers, always-on or a link to it', () => {
