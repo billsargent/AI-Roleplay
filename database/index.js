@@ -893,6 +893,28 @@ export function listScenarioMatchKeys() {
  * Writes a consistent copy of the database next to it
  * ("<database file>.backup-<timestamp>") and returns its file name.
  */
+/** The database file's path */
+export const databasePath = () => DB_PATH;
+
+/** Writes a consistent copy of the live database to a file (SQLite online backup) */
+export async function snapshotDatabase(file) {
+  await getDb().backup(file);
+}
+
+/** Closes the database; the next getDb() opens it again (used by restore) */
+export function closeDb() {
+  if (db) {
+    db.close();
+    db = undefined;
+  }
+}
+
+/** Row counts shown in a backup's description */
+export function systemCounts() {
+  const count = (t) => getDb().prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
+  return { users: count('users'), scenarios: count('scenarios'), chats: count('chats') };
+}
+
 export async function backupDatabase() {
   const file = `${db.name}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   await db.backup(file);

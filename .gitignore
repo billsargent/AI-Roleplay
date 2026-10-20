@@ -13,3 +13,6 @@ dist/
 *.log
 uploads/
 *.tar.gz
+
+# System backups (admin panel)
+backups/

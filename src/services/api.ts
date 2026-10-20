@@ -15,6 +15,18 @@ import axios from 'axios';
 import { Scenario } from '../types';
 
 /** What a re-import changes (see lib/fictionlabReimport.js summarizeReimport) */
+/** A backup file kept on the server (error set when it cannot be restored) */
+export interface BackupInfo {
+  name: string;
+  size: number;
+  createdAt: string;
+  version?: string;
+  label?: string;
+  pictures?: number | null;
+  counts?: { users: number; scenarios: number; chats: number } | null;
+  error?: string;
+}
+
 export interface ReimportSummary {
   fields: string[];
   /** The file is missing its lore text (hidden by its creator); it will not be applied */
@@ -359,6 +371,45 @@ export const apiService = {
   /** Admin: applies the safe lore fixes to every scenario (backs up first) */
   applyLoreHealth: async (): Promise<{ backup: string; changed: number; failed: Array<{ id: string; name: string; error: string }> }> => {
     const response = await api.post('/admin/lore-health/apply');
+    return response.data;
+  },
+
+  /** Admin: backups kept on the server, newest first */
+  listBackups: async (): Promise<{ backups: BackupInfo[]; folder: string }> => {
+    const response = await api.get('/admin/backups');
+    return response.data;
+  },
+
+  /** Admin: makes a backup of the database and every picture */
+  createBackup: async (): Promise<BackupInfo> => {
+    const response = await api.post('/admin/backups', undefined, { timeout: 0 });
+    return response.data;
+  },
+
+  /** Admin: deletes a backup */
+  deleteBackup: async (name: string): Promise<void> => {
+    await api.delete(`/admin/backups/${encodeURIComponent(name)}`);
+  },
+
+  /** Admin: a one-time link that downloads a backup */
+  backupDownloadUrl: async (name: string): Promise<string> => {
+    const response = await api.post(`/admin/backups/${encodeURIComponent(name)}/link`);
+    return response.data.url;
+  },
+
+  /** Admin: replaces everything with a backup (a safety backup is made first) */
+  restoreBackup: async (name: string): Promise<{ safetyBackup: string; counts: { users: number; scenarios: number; chats: number } }> => {
+    const response = await api.post(`/admin/backups/${encodeURIComponent(name)}/restore`, undefined, { timeout: 0 });
+    return response.data;
+  },
+
+  /** Admin: uploads a backup file (checked, not restored); onProgress gets 0-1 */
+  uploadBackup: async (file: File, onProgress: (share: number) => void): Promise<BackupInfo> => {
+    const response = await api.post('/admin/backups/upload', file, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+      timeout: 0,
+      onUploadProgress: e => onProgress(e.total ? e.loaded / e.total : 0),
+    });
     return response.data;
   },
 

@@ -25,6 +25,9 @@ const __dirname = path.dirname(__filename);
 /** Root uploads directory (sibling to the database/ directory; UPLOADS_DIR overrides, e.g. for tests) */
 const UPLOADS_ROOT = path.resolve(process.env.UPLOADS_DIR || path.join(__dirname, '..', 'uploads'));
 
+/** The uploads root folder (for backups) */
+export const uploadsRoot = () => UPLOADS_ROOT;
+
 /** All supported entity types that can have images */
 export const ENTITY_TYPES = ['scenarios', 'characters', 'personas', 'lore-pieces', 'embedded'];
 

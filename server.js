@@ -66,11 +66,17 @@ import {
   countPinnedMemories,
   listScenarioMatchKeys,
   backupDatabase,
+  databasePath,
+  snapshotDatabase,
+  closeDb,
+  systemCounts,
 } from './database/index.js';
 import { matchScenario, summarizeReimport, mergeReimport } from './lib/fictionlabReimport.js';
 import { checkLore, applySafeFixes } from './lib/loreDoctor.js';
 
-import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath } from './database/images.js';
+import { ensureUploadsDirs, saveImage, deleteImage, readImage, isValidImagePath, absolutePath as absoluteImagePath, uploadsRoot } from './database/images.js';
+import { createBackup, inspectBackup, restoreBackup, backupFileName, isBackupName } from './lib/backup.js';
+import { pipeline } from 'stream/promises';
 import { fetchImage, ImageFetchError } from './lib/safeImageFetch.js';
 import { parseFictionlab } from './lib/fictionlab.js';
 import { validateCompletionRequest, relayCompletion, completeOnce, LlmRequestError, DEEPSEEK_BASE_URL, DEFAULT_MODEL, THINKING_LEVELS } from './lib/deepseek.js';
@@ -107,6 +113,17 @@ if (process.env.TRUST_PROXY) {
   const v = process.env.TRUST_PROXY;
   app.set('trust proxy', /^\d+$/.test(v) ? Number(v) : v === 'true' ? true : v);
 }
+
+// While a backup is being restored the database and pictures are swapped:
+// everything else waits with a 503 (the restore request itself is already running)
+let restoring = false;
+app.use((req, res, next) => {
+  if (restoring && req.path.startsWith('/api/')) {
+    res.setHeader('Retry-After', '10');
+    return res.status(503).json({ error: 'A backup is being restored. Try again in a moment.' });
+  }
+  next();
+});
 
 // ─── Image Serving Endpoint (BEFORE rate limiter for performance) ─────
 
@@ -1633,6 +1650,193 @@ app.post('/api/admin/lore-health/apply', adminAuth, async (req, res, next) => {
   }
 });
 
+// ─── Backup and restore (admin) ───────────────────────────────────────
+
+/** Where backups are kept: BACKUP_DIR, or a "backups" folder next to the database */
+const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(path.dirname(databasePath()), 'backups'));
+/** Largest backup file that can be uploaded (bytes; default 20 GB) */
+const MAX_BACKUP_UPLOAD = Number(process.env.MAX_BACKUP_UPLOAD) || 20 * 1024 ** 3;
+const APP_VERSION = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version; } catch { return ''; }
+})();
+/** One-time download links: token -> { name, expires } */
+const backupLinks = new Map();
+/** Only one backup or restore at a time */
+let backupBusy = false;
+
+const backupFile = (name) => path.join(BACKUP_DIR, name);
+
+/** Runs a backup or restore job, one at a time */
+async function exclusiveBackupJob(res, job) {
+  if (backupBusy) return res.status(409).json({ error: 'A backup or restore is already running' });
+  backupBusy = true;
+  try {
+    return await job();
+  } finally {
+    backupBusy = false;
+  }
+}
+
+/** Describes a backup file for the list (manifest, or the error that makes it unusable) */
+async function describeBackup(name) {
+  const stat = fs.statSync(backupFile(name));
+  try {
+    const { manifest } = await inspectBackup(backupFile(name), isValidImagePath);
+    // The label in the file name says how this copy got here (an uploaded copy keeps the original manifest)
+    const label = /Z-([a-z-]+)\.tar$/.exec(name)?.[1] || manifest.label || '';
+    return { name, size: stat.size, createdAt: manifest.createdAt, version: manifest.version || '', counts: manifest.counts || null, pictures: manifest.pictures ?? null, label };
+  } catch (err) {
+    return { name, size: stat.size, createdAt: new Date(stat.mtimeMs).toISOString(), error: err.message };
+  }
+}
+
+/** Makes a backup now; label goes into the file name and manifest */
+async function makeBackup(label = '') {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const name = backupFileName(label);
+  await createBackup({
+    outFile: backupFile(name),
+    snapshotDb: snapshotDatabase,
+    uploadsDir: uploadsRoot(),
+    isUpload: isValidImagePath,
+    info: { version: APP_VERSION, label, counts: systemCounts() },
+  });
+  return name;
+}
+
+/** GET /api/admin/backups — Backups kept on the server, newest first */
+app.get('/api/admin/backups', adminAuth, async (req, res, next) => {
+  try {
+    const names = fs.existsSync(BACKUP_DIR) ? fs.readdirSync(BACKUP_DIR).filter(isBackupName) : [];
+    const list = await Promise.all(names.map(describeBackup));
+    list.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    res.json({ backups: list, folder: path.basename(BACKUP_DIR) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** POST /api/admin/backups — Makes a backup of the database and every picture */
+app.post('/api/admin/backups', adminAuth, async (req, res, next) => {
+  try {
+    await exclusiveBackupJob(res, async () => {
+      const name = await makeBackup();
+      res.json(await describeBackup(name));
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** DELETE /api/admin/backups/:name */
+app.delete('/api/admin/backups/:name', adminAuth, (req, res) => {
+  const { name } = req.params;
+  if (!isBackupName(name) || !fs.existsSync(backupFile(name))) return res.status(404).json({ error: 'Backup not found' });
+  fs.rmSync(backupFile(name));
+  res.json({ ok: true });
+});
+
+/**
+ * POST /api/admin/backups/:name/link — A one-time download link (valid 2
+ * minutes), so the browser can download a large file without holding it in memory.
+ */
+app.post('/api/admin/backups/:name/link', adminAuth, (req, res) => {
+  const { name } = req.params;
+  if (!isBackupName(name) || !fs.existsSync(backupFile(name))) return res.status(404).json({ error: 'Backup not found' });
+  const now = Date.now();
+  for (const [t, v] of backupLinks) if (v.expires < now) backupLinks.delete(t);
+  const token = crypto.randomBytes(24).toString('hex');
+  backupLinks.set(token, { name, expires: now + 2 * 60 * 1000 });
+  res.json({ url: `/api/admin/backup-download/${token}` });
+});
+
+/** GET /api/admin/backup-download/:token — Sends the backup file (link from /link) */
+app.get('/api/admin/backup-download/:token', (req, res) => {
+  const link = backupLinks.get(req.params.token);
+  backupLinks.delete(req.params.token);
+  if (!link || link.expires < Date.now() || !fs.existsSync(backupFile(link.name))) return res.status(404).json({ error: 'Download link expired; try again' });
+  res.download(backupFile(link.name), link.name);
+});
+
+/**
+ * POST /api/admin/backups/upload — Stores an uploaded backup file (raw body,
+ * application/octet-stream) after checking it. It is not restored yet.
+ */
+app.post('/api/admin/backups/upload', adminAuth, async (req, res, next) => {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  const part = backupFile(`.upload-${crypto.randomBytes(6).toString('hex')}.part`);
+  try {
+    const declared = Number(req.headers['content-length']);
+    if (declared > MAX_BACKUP_UPLOAD) return res.status(413).json({ error: 'The backup file is too large' });
+    let received = 0;
+    await pipeline(req, async function* (source) {
+      for await (const chunk of source) {
+        received += chunk.length;
+        if (received > MAX_BACKUP_UPLOAD) throw Object.assign(new Error('too large'), { status: 413 });
+        yield chunk;
+      }
+    }, fs.createWriteStream(part));
+    try {
+      await inspectBackup(part, isValidImagePath);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const name = backupFileName('uploaded');
+    fs.renameSync(part, backupFile(name));
+    res.json(await describeBackup(name));
+  } catch (err) {
+    if (err?.status === 413) return res.status(413).json({ error: 'The backup file is too large' });
+    if (req.aborted || err?.code === 'ERR_STREAM_PREMATURE_CLOSE') return res.status(400).json({ error: 'The upload was interrupted' });
+    next(err);
+  } finally {
+    fs.rmSync(part, { force: true });
+  }
+});
+
+/**
+ * POST /api/admin/backups/:name/restore — Replaces the database and every
+ * picture with the backup's. A backup of the current state is made first.
+ * Logins keep working: the running session secret is kept in the restored database.
+ * Returns { safetyBackup, counts }.
+ */
+app.post('/api/admin/backups/:name/restore', adminAuth, async (req, res, next) => {
+  const { name } = req.params;
+  if (!isBackupName(name) || !fs.existsSync(backupFile(name))) return res.status(404).json({ error: 'Backup not found' });
+  try {
+    await exclusiveBackupJob(res, async () => {
+      // Refuse a bad file before making the safety backup or pausing anything
+      try {
+        await inspectBackup(backupFile(name), isValidImagePath);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      const safetyBackup = await makeBackup('before-restore');
+      restoring = true;
+      try {
+        const { counts } = await restoreBackup({
+          file: backupFile(name),
+          dbPath: databasePath(),
+          uploadsDir: uploadsRoot(),
+          workDir: BACKUP_DIR,
+          isUpload: isValidImagePath,
+          closeDb,
+          openDb: () => { getDb(); ensureUploadsDirs(); },
+          afterOpen: () => { if (!process.env.JWT_SECRET) setSystemSetting('jwtSecret', JWT_SECRET); },
+        });
+        console.log(`[BACKUP] Restored ${name} (safety backup ${safetyBackup})`);
+        res.json({ safetyBackup, counts });
+      } catch (err) {
+        console.error('[BACKUP] Restore failed, nothing was changed:', err?.message || err);
+        res.status(400).json({ error: `Restore failed, nothing was changed: ${err.message}`, safetyBackup });
+      } finally {
+        restoring = false;
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 /** GET /api/system/llm-settings — Site name and memory limits the browser needs (any logged-in user; no prompt text) */
 app.get('/api/system/llm-settings', auth, (req, res) => {
   const llm = readLlmSettings(getSystemSetting);
@@ -1870,6 +2074,8 @@ app.use((err, req, res, next) => {
 });
 
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+// Uploading a large backup can take longer than Node's default 5 minutes
+server.requestTimeout = Number(process.env.REQUEST_TIMEOUT_MS) || 60 * 60 * 1000;
